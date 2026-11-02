@@ -1,0 +1,112 @@
+# FaradAiWire Zero-Trust AI Security Gateway Configuration
+# Multi-Agent Architecture
+
+# Gateway Ingress Configuration
+listen_port: 8090
+agents_dir: "./agents"          # Directory containing per-agent configurations (or /etc/faradaiwire/agents in prod)
+
+# Security and Access Guardrails
+security:
+  cors_allowed_origins:
+    - "http://localhost:3000"
+    - "http://localhost:8090"
+    - "http://localhost:8095"
+  trusted_proxies:
+    - "127.0.0.1/32"
+    - "10.0.0.0/8"
+  ssrf_protection:
+    enabled: true
+    block_private_ips: true
+    allowed_domains: []
+
+# User Identity and Context Provenance
+user_context:
+  role_header: "X-User-Role"
+  user_header: "X-User-ID"
+  fallback_role: "Customer"
+  fallback_user: "guest-customer"
+  trusted_proxies:
+    - "127.0.0.1/32"
+    - "10.0.0.0/8"
+  context_hmac_secret: "${FARADAI_WIRE_HMAC_SECRET}" # Optional HMAC secret for anti-spoofing verification
+
+# Gateway Security Filter Pipelines
+filters:
+  # Block assistant prefill prompt injection (sockpuppeting)
+  prefill_block:
+    enabled: true
+
+  # Runtime JSON Schema validation for tool parameters & drift detection
+  schema_validation:
+    enabled: true
+    schemas_dir: "./schemas/"
+    dynamic_capture: true       # Intercept tools/list responses to cache schemas dynamically
+    baseline_pinning: true      # Pin first-seen schemas and alert on drift/poisoning
+
+  # Scan parameters and results for sensitive data (PII, credentials & host files)
+  dlp:
+    enabled: true
+    exclude_tools: []
+    patterns:
+      - name: "private_keys"
+        regex: '-----BEGIN (RSA|EC|OPENSSH|DSA|PGP) PRIVATE KEY-----'
+        action: "block"          # "block" (fail request with -32004) or "mask" (redact to [REDACTED])
+      - name: "sensitive_files"
+        regex: '(?i)(\.env|\.aws/credentials|id_rsa|id_ed25519|/etc/shadow|/etc/passwd)'
+        action: "block"
+      - name: "aws_credentials"
+        regex: '(?i)["'']?(aws_secret_access_key|aws_access_key_id)["'']?\s*[:=]?\s*["'']?[A-Za-z0-9/+=]{16,}["'']?'
+        action: "mask"
+      - name: "credit_card"
+        regex: '\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'
+        action: "mask"
+      - name: "email"
+        regex: '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z]{2,}\b'
+        action: "mask"
+      - name: "tc_kimlik"
+        regex: '\b\d{11}\b'
+        action: "mask"
+
+  # Extensible Semantic Security Guard Engine (Qwen3Guard-0.6B, Laya MLX, Granite Guardian)
+  guard:
+    enabled: true
+    discovery:
+      mode: "auto"              # "auto" (dual probe Ollama/Docker), "ollama", "docker", or "custom"
+      ollama_url: "http://127.0.0.1:11434"
+      docker_url: "http://127.0.0.1:8088"
+      custom_url: ""            # Custom OpenAI-compatible or Ollama endpoint (e.g. "http://remote-gpu:8000/v1")
+
+  # Interrupt destructive tool calls for human verification
+  hitl:
+    enabled: true
+    destructive_tools: ["write_to_db", "delete_record", "send_email", "para_transferi"]
+    approval_mode: "cli"        # "cli" (terminal prompt) or "webhook"
+    webhook_url: ""             # POST URL for webhook approval
+    timeout_seconds: 300
+
+  # Loop Protection to block infinite reasoning loops on tools
+  loop_protection:
+    enabled: true
+    max_repeat: 3               # Maximum consecutive identical calls allowed within the window
+    window_seconds: 10          # Sliding time window in seconds
+
+  # Token-Bucket Rate Limiter on tool execution frequency
+  rate_limiting:
+    enabled: true
+    max_burst: 5                # Maximum token capacity (burst)
+    refill_rate: 1.0            # Refill tokens per second
+
+# Immutable log file for audit events
+audit_log:
+  enabled: true
+  path: "./logs/faradai_audit.jsonl"
+
+# Hot-reload YAML configuration dynamically using fsnotify
+hot_reload: true
+
+# Admin Server configuration (for inspection, settings, and Web Console)
+admin_port: 8095
+admin_tls:
+  enabled: false
+  cert_file: "/path/to/cert.pem"
+  key_file: "/path/to/key.pem"

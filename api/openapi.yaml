@@ -1,0 +1,736 @@
+openapi: 3.1.0
+info:
+  title: FaradAiWire Open Core Security API
+  version: 0.3.0
+  description: >
+    Zero-Trust AI Agent Security Gateway Policy Enforcement Point (PEP) REST & SSE API.
+    Provides administrative controls, security telemetry queries, agent manifest management,
+    API key rotation, and real-time MCP streaming inspection.
+servers:
+  - url: http://127.0.0.1:8095
+    description: Local Administrative Console (admin_port)
+  - url: http://127.0.0.1:8090
+    description: Agent Ingress Proxy (listen_port)
+
+paths:
+  # ============================================================================
+  # Admin Console Endpoints (Port 8095)
+  # ============================================================================
+  /admin/dashboard:
+    get:
+      summary: Embedded Administrative Dashboard Web Console
+      description: Returns the single-page HTML/JS administrative application embedded directly inside the gateway binary.
+      responses:
+        '200':
+          description: Embedded HTML dashboard
+          content:
+            text/html:
+              schema: { type: string }
+
+  /admin/status:
+    get:
+      summary: Gateway Health & Operational Status
+      description: Returns process runtime statistics, goroutines, active filters, and registered agent count.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Operational health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardStatusResponse'
+        '401':
+          description: Unauthorized
+
+  /admin/settings:
+    get:
+      summary: Retrieve Active Gateway Settings
+      description: Returns sanitized runtime configuration properties for the admin dashboard.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Active gateway settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runtime_mode: { type: string, enum: [standalone, managed] }
+                  listen_port: { type: integer, example: 8090 }
+                  admin_port: { type: integer, example: 8095 }
+                  filters: { type: object }
+
+  /admin/config/toggle:
+    post:
+      summary: Runtime Toggle for Security Filters
+      description: Temporarily toggles a security filter (DLP, Prefill, Loop Protection, etc.) and hot-reloads configuration.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [filter, enabled]
+              properties:
+                filter: { type: string, example: "dlp" }
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: Filter setting toggled successfully
+        '403':
+          description: Forbidden in MANAGED runtime mode
+
+  /admin/schemas/clear:
+    post:
+      summary: Clear Dynamic Tool Schema Baselines
+      description: Clears first-seen tool schema baselines to allow new schema definitions without triggering drift alerts.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Baselines cleared successfully
+        '403':
+          description: Forbidden in MANAGED runtime mode
+
+  /admin/audit-logs:
+    get:
+      summary: Query Historical Audit Logs
+      description: Queries append-only security logs stored in DuckDB or file audit trail.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+        - name: search
+          in: query
+          schema: { type: string }
+        - name: action
+          in: query
+          schema: { type: string, enum: [allow, block, mask, error] }
+      responses:
+        '200':
+          description: Audit logs query result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogsResponse'
+
+  /api/v1/logs/events:
+    get:
+      summary: Live Audit Events Stream (SSE)
+      description: Real-time Server-Sent Events stream delivering live blocking, masking, and inspection events to dashboard subscribers.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: SSE event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+  /admin/mcp/tools:
+    get:
+      summary: List Registered MCP Tools
+      description: Returns tool manifests discovered across all registered agent domains.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: List of registered MCP tools
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MCPTool'
+
+  /admin/agents:
+    get:
+      summary: List Configured Agents
+      description: Returns summary of all local agent domains configured in the agents directory.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: List of agent configurations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AgentSummary'
+
+  /admin/agents/sync-tools:
+    post:
+      summary: Probe and Sync Agent Tools
+      description: Probes upstream MCP servers defined for the agent and caches tool manifests locally.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent]
+              properties:
+                agent: { type: string, example: "default" }
+      responses:
+        '200':
+          description: Tools synchronized successfully
+        '403':
+          description: Forbidden in MANAGED runtime mode
+
+  /admin/api-keys:
+    get:
+      summary: List API Keys
+      description: Returns metadata of all active API keys (hashes only; plaintext secrets are never stored or returned).
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: List of registered API keys
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/KeySummaryResponse'
+    post:
+      summary: Create New API Key
+      description: Generates a new API key with the specified role, returning the plaintext secret exactly once.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, role]
+              properties:
+                name: { type: string, example: "ci-agent" }
+                role: { type: string, enum: [Admin, Agent, Viewer], default: Agent }
+      responses:
+        '201':
+          description: Key generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateKeyResponse'
+
+  /admin/api-keys/{id}:
+    delete:
+      summary: Revoke API Key
+      description: Immediately revokes and deletes the specified API key.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: API key revoked successfully
+        '404':
+          description: API key not found
+
+  # ============================================================================
+  # Agent Snapshots & Rollback Endpoints (Port 8095)
+  # ============================================================================
+  /admin/agents/archives:
+    get:
+      summary: List Agent Snapshots
+      description: Returns historical configuration snapshots for the specified agent.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: agent
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: List of snapshot timestamps
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent: { type: string }
+                  archives: { type: array, items: { type: string } }
+        '400':
+          description: Missing or invalid agent identifier
+
+  /admin/agents/rollback:
+    post:
+      summary: Rollback Agent Configuration
+      description: Restores a previous configuration snapshot for an agent and hot-reloads the gateway.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent, timestamp]
+              properties:
+                agent: { type: string, example: "finance-agent" }
+                timestamp: { type: string, example: "20261031T120000Z" }
+      responses:
+        '200':
+          description: Agent rolled back successfully
+        '404':
+          description: Archive snapshot not found
+
+  # ============================================================================
+  # Guard & SLM Management Endpoints (Port 8095)
+  # ============================================================================
+  /admin/guards/status:
+    get:
+      summary: SLM Guard Subprocess Status
+      description: Reports the runtime status, PID, and health of the active semantic guard model.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Guard process runtime status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  running: { type: boolean }
+                  health_status: { type: string, enum: [HEALTHY, DEGRADED, STOPPED] }
+                  model_id: { type: string }
+                  pid: { type: integer }
+
+  /admin/guards/models:
+    get:
+      summary: List Guard Models Catalog
+      description: Lists all available and installed small language models for semantic guardrails.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: List of catalog models
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  models:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        install_status: { type: string }
+                        is_active: { type: boolean }
+
+  /admin/guards/models/{id}/connect:
+    post:
+      summary: Connect External Guard Endpoint
+      description: Verifies and binds an external Ollama, Docker, or vLLM inference endpoint as the active guard.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint_url]
+              properties:
+                endpoint_url: { type: string, example: "http://localhost:11434" }
+                runtime_type: { type: string, enum: [ollama, docker, vllm], default: docker }
+                context_window: { type: integer, default: 2048 }
+                force: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Connected and activated successfully
+        '503':
+          description: Target endpoint probe failed
+
+  /admin/guards/models/{id}/activate:
+    post:
+      summary: Activate Installed Guard Model
+      description: Zero-downtime hot-swap and process activation for an installed guard model.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Model activated successfully
+        '400':
+          description: Model not installed
+
+  /admin/guards/models/deactivate:
+    post:
+      summary: Deactivate Guard (Switch to L1-Only Mode)
+      description: Gracefully stops the active guard model and switches the gateway to lightweight L1 static regex mode.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Switched to L1 mode
+
+  /admin/guards/models/{id}/policy:
+    post:
+      summary: Configure Threat Policy for Model
+      description: Sets default action (hitl/block) and critical destructive tools for threat verdicts.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                default_action: { type: string, enum: [hitl, block] }
+                critical_tools: { type: array, items: { type: string } }
+      responses:
+        '200':
+          description: Threat policy updated
+
+  /admin/guards/hitl/pending:
+    get:
+      summary: List Pending HITL Approvals
+      description: Lists all in-flight human approval requests awaiting operator decision.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Pending approvals list
+
+  /admin/guards/hitl/respond:
+    post:
+      summary: Submit HITL Approval Decision
+      description: Resolves a pending HITL request, approving or blocking the tool execution.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [call_id, approved]
+              properties:
+                call_id: { type: string }
+                approved: { type: boolean }
+      responses:
+        '200':
+          description: Decision resolved
+        '404':
+          description: Call ID not found or already resolved
+
+  # ============================================================================
+  # Policy Packs & DLP Governance Endpoints (Port 8095)
+  # ============================================================================
+  /admin/dlp/rules:
+    get:
+      summary: List DLP Pattern Rules
+      description: Lists all built-in and custom DLP pattern rules.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: List of DLP rules
+    post:
+      summary: Create Custom DLP Rule
+      description: Creates a new regular expression pattern rule.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '201':
+          description: Rule created successfully
+
+  /admin/policy-packs:
+    get:
+      summary: List Policy Packs
+      description: Lists predefined and enterprise policy packs bundling related security rules.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: List of policy packs
+
+  /admin/policies/preview:
+    post:
+      summary: Stateless Policy Preview Compilation
+      description: Simulates policy compilation and effective rule resolution for an agent configuration without saving to disk.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Compiled policy preview
+
+  /admin/agents/{name}/dlp:
+    get:
+      summary: Get Agent DLP Governance Configuration
+      description: Retrieves the agent's DLP pack assignments, overrides, and effective compiled rules.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Agent DLP configuration
+    put:
+      summary: Update Agent DLP Governance Configuration
+      description: Atomically updates and compiles agent DLP rules, snapshotting prior state.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Saved and compiled successfully
+
+  /api/reload:
+    post:
+      summary: Hot Reload Gateway Configuration
+      description: Reloads YAML configuration and agent manifests from disk into memory without restarting the process.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Gateway reloaded successfully
+
+  # ============================================================================
+  # Ingress Proxy Endpoints (Port 8090)
+  # ============================================================================
+  /sse:
+    get:
+      summary: MCP Client SSE Ingress Stream
+      description: Establishes a persistent Server-Sent Events stream for AI agents (Cursor, Claude Code, Copilot).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: agent
+          in: query
+          description: Optional target agent domain
+          schema: { type: string }
+      responses:
+        '200':
+          description: SSE connection established
+        '401':
+          description: Fail-closed unauthorized (missing or invalid Bearer token)
+
+  /message:
+    post:
+      summary: MCP JSON-RPC Message Ingress
+      description: Ingests client JSON-RPC 2.0 requests, passes them through the security filter pipeline, and proxies to upstream tools.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JSONRPCRequest'
+      responses:
+        '200':
+          description: Filtered JSON-RPC response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JSONRPCResponse'
+        '401':
+          description: Unauthorized
+
+  /mcp:
+    post:
+      summary: Direct MCP JSON-RPC Ingress
+      description: Direct POST transport alternative to /message for single-request JSON-RPC interactions.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JSONRPCRequest'
+      responses:
+        '200':
+          description: Filtered JSON-RPC response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JSONRPCResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Standard API Key token (e.g., faw_live_...) provided via Authorization header.
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Alternative API Key delivery via X-API-Key header.
+
+  schemas:
+    DashboardStatusResponse:
+      type: object
+      properties:
+        gateway_id: { type: string, example: "farad-ai-gw-01" }
+        version: { type: string, example: "0.3.0" }
+        mode: { type: string, enum: [standalone, managed], example: "standalone" }
+        uptime_seconds: { type: integer, example: 3600 }
+        goroutines: { type: integer, example: 42 }
+        memory_alloc_mb: { type: number, example: 18.5 }
+        active_agents_count: { type: integer, example: 2 }
+        active_filters:
+          type: array
+          items: { type: string }
+          example: ["prefill_block", "schema_validation", "dlp", "rate_limiting"]
+
+    AuditLogsResponse:
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'
+        total: { type: integer, example: 1 }
+
+    AuditEvent:
+      type: object
+      properties:
+        timestamp: { type: string, format: date-time }
+        trace_id: { type: string, example: "trc-a1b2c3d4" }
+        tool_name: { type: string, example: "fetch_customer_record" }
+        action: { type: string, enum: [allow, block, mask, error], example: "mask" }
+        filter_name: { type: string, example: "dlp" }
+        reason: { type: string, example: "Masked 1 sensitive credit_card match(es)" }
+        latency_ms: { type: number, example: 4.2 }
+
+    MCPTool:
+      type: object
+      required: [name, description]
+      properties:
+        name: { type: string, example: "query_database" }
+        description: { type: string, example: "Executes read-only SQL queries" }
+        inputSchema: { type: object }
+
+    AgentSummary:
+      type: object
+      required: [name, routing_mode]
+      properties:
+        name: { type: string, example: "finance-agent" }
+        routing_mode: { type: string, enum: [aggregated, direct], example: "aggregated" }
+        tools_count: { type: integer, example: 5 }
+        status: { type: string, example: "active" }
+
+    KeySummaryResponse:
+      type: object
+      required: [id, prefix, name, role, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        prefix: { type: string, example: "faw_live_a1b2..." }
+        name: { type: string, example: "ci-pipeline" }
+        role: { type: string, enum: [Admin, Agent, Viewer], example: "Agent" }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time, nullable: true }
+
+    CreateKeyResponse:
+      type: object
+      required: [id, key, name, role]
+      properties:
+        id: { type: string, format: uuid }
+        key: { type: string, example: "faw_live_7c3a9f1b2e8d4a6c..." }
+        name: { type: string, example: "ci-pipeline" }
+        role: { type: string, enum: [Admin, Agent, Viewer], example: "Agent" }
+        warning: { type: string, example: "Save this key now. It cannot be retrieved again." }
+
+    JSONRPCRequest:
+      type: object
+      required: [jsonrpc, method]
+      properties:
+        jsonrpc: { type: string, example: "2.0" }
+        id: { oneOf: [{ type: string }, { type: integer }, { type: "null" }] }
+        method: { type: string, example: "tools/call" }
+        params: { type: object }
+        meta: { type: object, description: "Trace headers and client metadata" }
+
+    JSONRPCResponse:
+      type: object
+      required: [jsonrpc]
+      properties:
+        jsonrpc: { type: string, example: "2.0" }
+        id: { oneOf: [{ type: string }, { type: integer }, { type: "null" }] }
+        result: { type: object }
+        error:
+          $ref: '#/components/schemas/JSONRPCError'
+
+    JSONRPCError:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: integer, example: -32004 }
+        message: { type: string, example: "DLP policy violation: sensitive data blocked" }
+        data: { type: object }

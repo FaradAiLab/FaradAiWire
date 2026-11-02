@@ -1,0 +1,105 @@
+# ==============================================================================
+# FaradAiWire - Zero-Trust AI Security Gateway
+# .gitignore for Open-Source Distribution
+# ==============================================================================
+
+# --- Compiled Binaries & Test Artifacts ---
+/faradaiwire
+/faradaiwire.exe
+/main
+/mock_server
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+__debug_bin*
+/verify/run_tests/test_temp/
+test_temp/
+
+# --- Local Configurations & Credentials ---
+/config.yaml
+/config.local.yaml
+/api_keys.json
+/keys/
+*.pem
+*.key
+.env*
+!.env.example
+
+# --- Local MCP Protocols, Agents & Credentials ---
+# Contains upstream MCP tokens, URLs and live auth secrets
+/protocols/
+# Local agent profiles, snapshots and runtime archives
+/agents/
+/.agents/
+
+# --- Internal Documentation & Task Tracking ---
+/docs/adr/
+/docs/specs/
+/docs/tickets/
+/tasks/
+/rules/
+/SPEC.md
+/CONTEXT.md
+/GLOSSARY.md
+
+# --- Runtime Caches, Locks & Databases ---
+/schemas/
+/logs/
+*.log
+*.jsonl
+*.duckdb*
+wire.duckdb
+.faradaiwire.lock
+*.pid
+*.lock
+
+# --- Web Frontend (React / Vite) ---
+node_modules/
+web/node_modules/
+web/.vite/
+web/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+
+# --- Python Test Suites (verify/) ---
+**/__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- IDEs & Developer Tooling ---
+.vscode/
+.idea/
+*.iml
+.zed/
+.cursor/
+*.swp
+*.swo
+*~
+
+# --- Operating System Files ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini

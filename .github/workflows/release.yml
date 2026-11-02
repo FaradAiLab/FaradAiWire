@@ -1,0 +1,119 @@
+name: Release FaradAiWire
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: darwin
+            arch: arm64
+            runner: macos-latest
+            binary_name: faradaiwire
+          - os: darwin
+            arch: amd64
+            runner: macos-13
+            binary_name: faradaiwire
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            binary_name: faradaiwire
+          - os: windows
+            arch: amd64
+            runner: windows-latest
+            binary_name: faradaiwire.exe
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js (Web UI build)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Build Web Console Assets
+        run: |
+          cd web
+          npm ci
+          npm run build
+          cd ..
+
+      - name: Setup Go 1.23+
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Compile Native Binary with CGO
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          mkdir -p dist
+          go build -v -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/${{ matrix.binary_name }} ./cmd/faradaiwire
+
+      - name: Package Unix Archive (.tar.gz)
+        if: matrix.os != 'windows'
+        run: |
+          VERSION="${{ github.ref_name }}"
+          CLEAN_VERSION="${VERSION#v}"
+          cd dist
+          tar -czvf "faradaiwire_${CLEAN_VERSION}_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" "${{ matrix.binary_name }}"
+
+      - name: Package Windows Archive (.zip)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $Version = "${{ github.ref_name }}"
+          $CleanVersion = $Version.TrimStart("v")
+          cd dist
+          Compress-Archive -Path "${{ matrix.binary_name }}" -DestinationPath "faradaiwire_${CleanVersion}_windows_amd64.zip" -Force
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: faradaiwire-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/faradaiwire_*.*
+
+  release:
+    name: Publish Release & Checksums
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download Built Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets/
+          merge-multiple: true
+
+      - name: Generate Cryptographic SHA-256 Checksums
+        run: |
+          cd release_assets
+          sha256sum faradaiwire_* > checksums.txt
+          echo "Generated Checksums:"
+          cat checksums.txt
+
+      - name: Create Official GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release_assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
