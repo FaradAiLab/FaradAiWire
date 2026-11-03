@@ -7,13 +7,16 @@ help: ## Show available make targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 build-web: ## Build the React SPA frontend
-	@if command -v npm >/dev/null 2>&1; then \
+	@if [ -d "web/node_modules" ] && command -v npm >/dev/null 2>&1; then \
 		echo "==> Building React SPA in web/..."; \
 		(cd web && npm run build); \
 	elif [ -d "web/dist" ]; then \
-		echo "==> npm not found, using existing web/dist bundle..."; \
+		echo "==> web/node_modules not found, using existing web/dist bundle..."; \
+	elif command -v npm >/dev/null 2>&1; then \
+		echo "==> Installing frontend dependencies and building React SPA..."; \
+		(cd web && npm ci && npm run build); \
 	else \
-		echo "ERROR: npm is required to build web/dist" >&2; \
+		echo "ERROR: npm and web/dist bundle not found" >&2; \
 		exit 1; \
 	fi
 

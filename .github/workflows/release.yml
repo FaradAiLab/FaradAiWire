@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: false
+        default: 'v1.0.0'
 
 permissions:
   contents: write
@@ -39,6 +45,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Resolve Version Information
+        shell: bash
+        run: |
+          RAW_VER="${{ github.event.inputs.version || github.ref_name }}"
+          if [ -z "$RAW_VER" ] || [ "$RAW_VER" = "main" ] || [ "$RAW_VER" = "master" ]; then
+            RAW_VER="v1.0.0"
+          fi
+          echo "RELEASE_VERSION=${RAW_VER}" >> $GITHUB_ENV
+          CLEAN_VER="${RAW_VER#v}"
+          echo "CLEAN_VERSION=${CLEAN_VER}" >> $GITHUB_ENV
+
       - name: Setup Node.js (Web UI build)
         uses: actions/setup-node@v4
         with:
@@ -64,13 +81,11 @@ jobs:
           CGO_ENABLED: '1'
         run: |
           mkdir -p dist
-          go build -v -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/${{ matrix.binary_name }} ./cmd/faradaiwire
+          go build -v -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" -o dist/${{ matrix.binary_name }} ./cmd/faradaiwire
 
       - name: Package Unix Archive (.tar.gz)
         if: matrix.os != 'windows'
         run: |
-          VERSION="${{ github.ref_name }}"
-          CLEAN_VERSION="${VERSION#v}"
           cd dist
           tar -czvf "faradaiwire_${CLEAN_VERSION}_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" "${{ matrix.binary_name }}"
 
@@ -78,8 +93,7 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          $Version = "${{ github.ref_name }}"
-          $CleanVersion = $Version.TrimStart("v")
+          $CleanVersion = $env:CLEAN_VERSION
           cd dist
           Compress-Archive -Path "${{ matrix.binary_name }}" -DestinationPath "faradaiwire_${CleanVersion}_windows_amd64.zip" -Force
 
@@ -97,6 +111,15 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Resolve Release Metadata
+        id: release_meta
+        run: |
+          RAW_VER="${{ github.event.inputs.version || github.ref_name }}"
+          if [ -z "$RAW_VER" ] || [ "$RAW_VER" = "main" ] || [ "$RAW_VER" = "master" ]; then
+            RAW_VER="v1.0.0"
+          fi
+          echo "version=${RAW_VER}" >> $GITHUB_OUTPUT
+
       - name: Download Built Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -113,6 +136,8 @@ jobs:
       - name: Create Official GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release_meta.outputs.version }}
+          name: FaradAiWire ${{ steps.release_meta.outputs.version }}
           files: release_assets/*
           generate_release_notes: true
           draft: false
