@@ -8,7 +8,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
-	"golang.org/x/sys/unix"
 )
 
 // HostResources represents workstation hardware capacity and real-time utilization.
@@ -163,19 +161,12 @@ func readHostMemory() (total, available, used uint64, isCgroup bool) {
 	}
 
 	// B. macOS (Darwin) hw.memsize & vm_stat
-	if runtime.GOOS == "darwin" {
-		memSize, err := unix.SysctlUint64("hw.memsize")
-		if err == nil && memSize > 0 {
-			total = memSize
-			available = readDarwinAvailableMemory()
-			if available > total {
-				available = total
-			}
-			if total > available {
-				used = total - available
-			}
-			return total, available, used, false
+	if totalMem, availMem, ok := resolveDarwinMemory(); ok {
+		used := uint64(0)
+		if totalMem > availMem {
+			used = totalMem - availMem
 		}
+		return totalMem, availMem, used, false
 	}
 
 	// C. Fallback: runtime.MemStats minimal baseline
@@ -185,55 +176,6 @@ func readHostMemory() (total, available, used uint64, isCgroup bool) {
 	used = m.Sys
 	available = total - used
 	return total, available, used, false
-}
-
-// readDarwinAvailableMemory parses macOS vm_stat output to compute available RAM.
-func readDarwinAvailableMemory() uint64 {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "vm_stat").Output()
-	if err != nil {
-		return 8 * 1024 * 1024 * 1024
-	}
-
-	pageSize := uint64(4096)
-	scanner := bufio.NewScanner(bytes.NewReader(out))
-	var freePages, inactivePages, speculativePages, purgeablePages uint64
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.Contains(line, "page size of") {
-			parts := strings.Split(line, "page size of ")
-			if len(parts) == 2 {
-				sub := strings.Split(parts[1], " ")
-				if ps, err := strconv.ParseUint(sub[0], 10, 64); err == nil && ps > 0 {
-					pageSize = ps
-				}
-			}
-			continue
-		}
-
-		parts := strings.Split(line, ":")
-		if len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			valStr := strings.TrimSuffix(strings.TrimSpace(parts[1]), ".")
-			val, _ := strconv.ParseUint(valStr, 10, 64)
-
-			switch key {
-			case "Pages free":
-				freePages = val
-			case "Pages inactive":
-				inactivePages = val
-			case "Pages speculative":
-				speculativePages = val
-			case "Pages purgeable":
-				purgeablePages = val
-			}
-		}
-	}
-
-	availPages := freePages + inactivePages + speculativePages + purgeablePages
-	return availPages * pageSize
 }
 
 // resolveSwap calculates total and used swap memory across Linux and macOS.
@@ -264,34 +206,11 @@ func resolveSwap() (total, used uint64) {
 	}
 
 	// B. macOS sysctl vm.swapusage
-	if runtime.GOOS == "darwin" {
-		if swapStr, err := unix.Sysctl("vm.swapusage"); err == nil {
-			// Format: "total = 6144.00M  used = 4544.81M  free = 1599.19M  (encrypted)"
-			total = parseSysctlSwapMB(swapStr, "total = ")
-			used = parseSysctlSwapMB(swapStr, "used = ")
-			return total, used
-		}
+	if totalSwap, usedSwap, ok := resolveDarwinSwap(); ok {
+		return totalSwap, usedSwap
 	}
 
 	return 0, 0
-}
-
-func parseSysctlSwapMB(s, prefix string) uint64 {
-	idx := strings.Index(s, prefix)
-	if idx == -1 {
-		return 0
-	}
-	sub := s[idx+len(prefix):]
-	endIdx := strings.Index(sub, "M")
-	if endIdx == -1 {
-		return 0
-	}
-	numStr := strings.TrimSpace(sub[:endIdx])
-	f, err := strconv.ParseFloat(numStr, 64)
-	if err != nil || f < 0 {
-		return 0
-	}
-	return uint64(f * 1024 * 1024)
 }
 
 // resolveCPU estimates current CPU load percentage normalized across CPU cores.
@@ -316,21 +235,8 @@ func resolveCPU() float64 {
 	}
 
 	// 2. Darwin sysctl vm.loadavg
-	if runtime.GOOS == "darwin" {
-		if out, err := unix.Sysctl("vm.loadavg"); err == nil {
-			// Format: "{ 3.92 3.99 3.89 }"
-			clean := strings.Trim(out, "{ }\n\r\t")
-			fields := strings.Fields(clean)
-			if len(fields) > 0 {
-				if l1, err := strconv.ParseFloat(fields[0], 64); err == nil && l1 >= 0 {
-					pct := (l1 / numCPU) * 100.0
-					if pct > 100.0 {
-						pct = 100.0
-					}
-					return pct
-				}
-			}
-		}
+	if cpuPct, ok := resolveDarwinCPU(numCPU); ok {
+		return cpuPct
 	}
 
 	return 5.0 // Healthy fallback baseline
