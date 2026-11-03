@@ -142,6 +142,36 @@ jobs:
           echo "Generated Checksums:"
           cat checksums.txt
 
+      - name: Render Homebrew Formula & Cask
+        run: |
+          RAW_VER="${{ steps.release_meta.outputs.version }}"
+          CLEAN_VER="${RAW_VER#v}"
+
+          cd release_assets
+          ARM64_SHA=$(grep '_darwin_arm64\.tar\.gz$' checksums.txt | awk '{print $1}')
+          AMD64_SHA=$(grep '_darwin_amd64\.tar\.gz$' checksums.txt | awk '{print $1}')
+          LINUX_SHA=$(grep '_linux_amd64\.tar\.gz$' checksums.txt | awk '{print $1}')
+
+          if [ -f ../deploy/homebrew/faradaiwire.rb.tmpl ]; then
+            sed -e "s/{{VERSION}}/${CLEAN_VER}/g" \
+                -e "s/{{DARWIN_ARM64_SHA}}/${ARM64_SHA}/g" \
+                -e "s/{{DARWIN_AMD64_SHA}}/${AMD64_SHA}/g" \
+                -e "s/{{LINUX_AMD64_SHA}}/${LINUX_SHA}/g" \
+                ../deploy/homebrew/faradaiwire.rb.tmpl > faradaiwire.rb
+            echo "Generated Homebrew Formula:"
+            cat faradaiwire.rb
+          fi
+
+          if [ -f ../deploy/homebrew/Casks/faradaiwire.rb.tmpl ]; then
+            sed -e "s/{{VERSION}}/${CLEAN_VER}/g" \
+                -e "s/{{DARWIN_ARM64_SHA}}/${ARM64_SHA}/g" \
+                -e "s/{{DARWIN_AMD64_SHA}}/${AMD64_SHA}/g" \
+                ../deploy/homebrew/Casks/faradaiwire.rb.tmpl > faradaiwire-cask.rb
+            echo "Generated Homebrew Cask:"
+            cat faradaiwire-cask.rb
+          fi
+          cd ..
+
       - name: Create Official GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -151,3 +181,40 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
+
+      - name: Publish to Homebrew Tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "⚠️ HOMEBREW_TAP_TOKEN secret is not set. Skipping automatic push to FaradAiLab/homebrew-tap."
+            echo "To enable automatic updates, add HOMEBREW_TAP_TOKEN (PAT with repo write permissions) to repository secrets."
+            exit 0
+          fi
+
+          echo "🚀 Updating FaradAiLab/homebrew-tap repository..."
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/FaradAiLab/homebrew-tap.git tap_repo
+
+          if [ -f release_assets/faradaiwire.rb ]; then
+            mkdir -p tap_repo/Formula
+            cp release_assets/faradaiwire.rb tap_repo/Formula/faradaiwire.rb
+            git -C tap_repo add Formula/faradaiwire.rb
+          fi
+
+          if [ -f release_assets/faradaiwire-cask.rb ]; then
+            mkdir -p tap_repo/Casks
+            cp release_assets/faradaiwire-cask.rb tap_repo/Casks/faradaiwire.rb
+            git -C tap_repo add Casks/faradaiwire.rb
+          fi
+
+          cd tap_repo
+          if git diff --staged --quiet; then
+            echo "Formula & Cask are already up to date."
+          else
+            git commit -m "feat(formula): bump faradaiwire to ${{ steps.release_meta.outputs.version }}"
+            git push origin main
+            echo "🎉 Successfully published formula to FaradAiLab/homebrew-tap!"
+          fi

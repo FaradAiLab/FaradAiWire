@@ -1,0 +1,19 @@
+cask "faradaiwire" do
+  arch arm: "darwin_arm64", intel: "darwin_amd64"
+
+  version "{{VERSION}}"
+  sha256 arm:   "{{DARWIN_ARM64_SHA}}",
+         intel: "{{DARWIN_AMD64_SHA}}"
+
+  url "https://github.com/FaradAiLab/FaradAiWire/releases/download/v#{version}/faradaiwire_#{version}_#{arch}.tar.gz"
+  name "FaradAiWire"
+  desc "Zero-trust security gateway for AI agents & MCP"
+  homepage "https://github.com/FaradAiLab/FaradAiWire"
+
+  depends_on macos: :monterey
+
+  binary "faradaiwire"
+
+  zap trash: "~/.faradaiwire"
+end
+
