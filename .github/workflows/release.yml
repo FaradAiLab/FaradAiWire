@@ -76,11 +76,14 @@ jobs:
           go-version: '1.23'
           cache: true
 
-      - name: Configure macOS Intel Cross-Compilation
-        if: matrix.os == 'darwin' && matrix.arch == 'amd64'
+      - name: Configure macOS Build Environment
+        if: matrix.os == 'darwin'
         run: |
-          echo "CC=clang -arch x86_64" >> $GITHUB_ENV
-          echo "GOARCH=amd64" >> $GITHUB_ENV
+          echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> $GITHUB_ENV
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            echo "CC=clang -arch x86_64" >> $GITHUB_ENV
+            echo "GOARCH=amd64" >> $GITHUB_ENV
+          fi
 
       - name: Compile Native Binary with CGO
         env:
