@@ -200,12 +200,13 @@ func EnsureDefaultRuntimeConfig() (string, error) {
 
 	configPath := filepath.Join(wireDir, "config.yaml")
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		agentsDir := filepath.ToSlash(filepath.Join(wireDir, "agents"))
 		defaultYAML := `# Farad Ai Core - Offline-First Standalone Configuration
 runtime_mode: STANDALONE
 listen_host: "127.0.0.1"
 listen_port: 8090
 admin_port: 8095
-agents_dir: "` + filepath.Join(wireDir, "agents") + `"
+agents_dir: "` + agentsDir + `"
 mode: "sse"
 security:
   admin_auth_required: false

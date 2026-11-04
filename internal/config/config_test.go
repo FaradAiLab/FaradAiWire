@@ -239,3 +239,33 @@ func TestConfigWatcher_Lifecycle(t *testing.T) {
 		t.Log("Watcher didn't fire in test environment, acceptable due to OS fsnotify timing")
 	}
 }
+
+func TestYAMLConfigProvider_WindowsLegacyPathRecovery(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yaml")
+
+	// Simulates the exact Windows bug where C:\Users contains \U which triggers:
+	// "yaml: line 6: did not find expected hexdecimal number"
+	legacyWindowsYAML := `# Farad Ai Core - Offline-First Standalone Configuration
+runtime_mode: STANDALONE
+listen_host: "127.0.0.1"
+listen_port: 8090
+admin_port: 8095
+agents_dir: "C:\Users\User\.faradaiwire\agents"
+mode: "sse"
+`
+	if err := os.WriteFile(configPath, []byte(legacyWindowsYAML), 0644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	provider := config.NewYAMLConfigProvider(configPath)
+	cfg, err := provider.Load()
+	if err != nil {
+		t.Fatalf("expected auto-recovery for legacy Windows path, but got error: %v", err)
+	}
+
+	expectedAgentsDir := "C:/Users/User/.faradaiwire/agents"
+	if cfg.AgentsDir != expectedAgentsDir {
+		t.Errorf("expected agents_dir %s, got %s", expectedAgentsDir, cfg.AgentsDir)
+	}
+}

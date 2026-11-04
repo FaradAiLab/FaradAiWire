@@ -3,9 +3,19 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+var windowsPathRegex = regexp.MustCompile(`"([A-Za-z]:\\[^"\r\n]+)"`)
+
+func sanitizeWindowsYAMLPaths(data []byte) []byte {
+	return windowsPathRegex.ReplaceAllFunc(data, func(match []byte) []byte {
+		return []byte(strings.ReplaceAll(string(match), `\`, `/`))
+	})
+}
 
 // YAMLConfigProvider implements Provider for local YAML files.
 type YAMLConfigProvider struct {
@@ -43,6 +53,14 @@ func (y *YAMLConfigProvider) Load() (*Config, error) {
 	}
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		sanitized := sanitizeWindowsYAMLPaths(data)
+		if retryErr := yaml.Unmarshal(sanitized, &cfg); retryErr == nil {
+			cfg.ConfigPath = y.filePath
+			if cfg.RuntimeMode == "" {
+				cfg.RuntimeMode = RuntimeModeStandalone
+			}
+			return &cfg, nil
+		}
 		return nil, err
 	}
 	cfg.ConfigPath = y.filePath
