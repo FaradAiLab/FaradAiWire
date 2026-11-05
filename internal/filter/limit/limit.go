@@ -136,7 +136,7 @@ func (l *LoopFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.
 
 	maxRepeat := l.maxRepeat
 	windowSeconds := l.windowSeconds
-	excludeTools := l.excludeTools
+	var agentExcludes []string
 
 	// Agent-specific overrides (ADR-0042)
 	agentName := extractAgentName(ctx)
@@ -148,10 +148,6 @@ func (l *LoopFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.
 		if repo != nil {
 			agentCfg, err := repo.GetAgentConfig(agentName)
 			if err == nil && agentCfg != nil && agentCfg.LoopProtection != nil {
-				if !agentCfg.LoopProtection.Enabled {
-					// Loop protection is explicitly disabled for this agent
-					return req, nil
-				}
 				if agentCfg.LoopProtection.MaxRepeat > 0 {
 					maxRepeat = agentCfg.LoopProtection.MaxRepeat
 				}
@@ -159,13 +155,20 @@ func (l *LoopFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.
 					windowSeconds = agentCfg.LoopProtection.WindowSeconds
 				}
 				if len(agentCfg.LoopProtection.ExcludeTools) > 0 {
-					excludeTools = append(excludeTools, agentCfg.LoopProtection.ExcludeTools...)
+					agentExcludes = agentCfg.LoopProtection.ExcludeTools
 				}
 			}
 		}
 	}
 
-	for _, ex := range excludeTools {
+	// Check global exclusions
+	for _, ex := range l.excludeTools {
+		if ex == callParams.Name {
+			return req, nil
+		}
+	}
+	// Check agent-specific exclusions
+	for _, ex := range agentExcludes {
 		if ex == callParams.Name {
 			return req, nil
 		}
@@ -178,9 +181,9 @@ func (l *LoopFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.
 		}
 	}
 
-	h := sha256.New()
-	h.Write(callParams.Arguments)
-	argsHash := hex.EncodeToString(h.Sum(nil))
+	// Compute deterministic SHA-256 hash using stack-based Sum256 (zero heap allocations)
+	sum := sha256.Sum256(callParams.Arguments)
+	argsHash := hex.EncodeToString(sum[:])
 
 	now := time.Now()
 	call := ToolCall{

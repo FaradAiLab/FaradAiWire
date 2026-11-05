@@ -57,7 +57,7 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
     setLocalProtocols(protocols)
   }, [protocols])
   const [toolGovernance, setToolGovernance] = useState<Record<string, ToolGovernanceMode>>({})
-  const [rateLimit, setRateLimit] = useState<RateLimitOverride>({ max_burst: 5, refill_rate: 1.0 })
+  const [rateLimit, setRateLimit] = useState<RateLimitOverride>({ enabled: true, max_burst: 10, refill_rate: 2.0 })
   const [loopProtection, setLoopProtection] = useState<LoopProtectionOverride>({
     enabled: true,
     max_repeat: 3,
@@ -120,7 +120,15 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
     }
 
     setToolGovernance(agent.config?.tool_governance || {})
-    setRateLimit(agent.config?.rate_limit || { max_burst: 5, refill_rate: 1.0 })
+    setRateLimit(
+      agent.config?.rate_limit
+        ? {
+            enabled: agent.config.rate_limit.enabled !== false,
+            max_burst: agent.config.rate_limit.max_burst,
+            refill_rate: agent.config.rate_limit.refill_rate,
+          }
+        : { enabled: true, max_burst: 10, refill_rate: 2.0 }
+    )
     setLoopProtection(
       agent.config?.loop_protection || {
         enabled: true,
@@ -164,7 +172,7 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
       setScopedTools([])
       setAvailableTools([])
       setToolGovernance({})
-      setRateLimit({ max_burst: 5, refill_rate: 1.0 })
+      setRateLimit({ enabled: true, max_burst: 10, refill_rate: 2.0 })
       setLoopProtection({
         enabled: true,
         max_repeat: 3,
@@ -440,7 +448,7 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
             }`}
           >
             <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
-            <span>Guardrails & HITL</span>
+            <span>AI Guard & HITL</span>
           </button>
 
           <button
@@ -493,7 +501,7 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
                 isLoading={savingAgent}
                 disabled={savingAgent || !agentName.trim()}
               >
-                Save Guardrail Settings
+                Save AI Guard Settings
               </Button>
             )}
             {activeTab === 'pipeline' && (

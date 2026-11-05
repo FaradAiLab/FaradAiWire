@@ -280,9 +280,7 @@ func TestSessionManager_StartCleanupLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create bridge1: %v", err)
 	}
-	bridge1.mu.Lock()
-	bridge1.LastActive = time.Now().Add(-10 * time.Minute)
-	bridge1.mu.Unlock()
+	bridge1.SetLastActive(time.Now().Add(-10 * time.Minute))
 
 	// Create bridge 2 (fresh/active)
 	_, err = mgr.CreateBridge(ctx, "agent-test", "client-active", nil)

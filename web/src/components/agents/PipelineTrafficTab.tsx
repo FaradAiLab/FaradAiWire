@@ -30,7 +30,7 @@ export interface PipelineTrafficTabProps {
 }
 
 export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
-  rateLimit = { max_burst: 5, refill_rate: 1.0 },
+  rateLimit = { enabled: true, max_burst: 10, refill_rate: 2.0 },
   onChangeRateLimit,
   loopProtection = {
     enabled: true,
@@ -63,13 +63,6 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
     onChangeRateLimit({
       ...rateLimit,
       refill_rate: Math.max(0, val),
-    })
-  }
-
-  const handleToggleLoopEnabled = (enabled: boolean) => {
-    onChangeLoopProtection({
-      ...loopProtection,
-      enabled,
     })
   }
 
@@ -134,7 +127,7 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
       statusLabel: !isGlobalRateLimitActive
         ? 'Cluster Off'
         : rateLimit.max_burst > 0
-        ? `${rateLimit.max_burst}t / ${rateLimit.refill_rate}rps`
+        ? `${rateLimit.max_burst} Calls / ${rateLimit.refill_rate} RPS`
         : 'Active',
       statusVariant: (isGlobalRateLimitActive ? 'cyan' : 'neutral') as StepVariant,
       latency: '<0.05ms',
@@ -145,14 +138,12 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
       name: 'Loop Protection',
       category: 'Execution Guard',
       icon: <Repeat className="w-4 h-4 text-amber-400" />,
-      isActive: isGlobalLoopActive && loopProtection.enabled,
-      isSuspended: !isGlobalLoopActive && loopProtection.enabled,
+      isActive: isGlobalLoopActive,
+      isSuspended: !isGlobalLoopActive,
       statusLabel: !isGlobalLoopActive
-        ? (loopProtection.enabled ? 'Suspended' : 'Bypassed')
-        : (loopProtection.enabled ? `${loopProtection.max_repeat}x / ${loopProtection.window_seconds}s` : 'Bypassed'),
-      statusVariant: (!isGlobalLoopActive
-        ? (loopProtection.enabled ? 'amber' : 'neutral')
-        : (loopProtection.enabled ? 'emerald' : 'amber')) as StepVariant,
+        ? 'Suspended'
+        : `${loopProtection.max_repeat}x Identical / ${loopProtection.window_seconds}s`,
+      statusVariant: (!isGlobalLoopActive ? 'amber' : 'emerald') as StepVariant,
       latency: '<0.1ms',
       desc: 'Prevents infinite tool invocation loops and runaway recursion.',
     },
@@ -223,16 +214,16 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
         </div>
         <div className="flex items-center gap-2">
           <Badge variant="cyan" className="font-mono text-[10px]">
-            ADR-0044 Enforced
+            Rate Limit: Enforced
           </Badge>
-          {!isGlobalLoopActive && loopProtection.enabled ? (
+          {!isGlobalLoopActive ? (
             <Badge variant="amber" className="font-mono text-[10px] flex items-center gap-1">
               <AlertTriangle className="w-3 h-3 text-amber-500" />
-              Loop: Suspended (Master Killswitch Engaged)
+              Loop: Suspended (Master Killswitch)
             </Badge>
           ) : (
-            <Badge variant={loopProtection.enabled ? 'emerald' : 'amber'} className="font-mono text-[10px]">
-              Loop: {loopProtection.enabled ? 'Active' : 'Bypassed'}
+            <Badge variant="emerald" className="font-mono text-[10px]">
+              Loop Guard: Enforced
             </Badge>
           )}
         </div>
@@ -248,40 +239,100 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
                 <Zap className="w-4 h-4 text-cyan-500" />
                 Ingress Rate Limiting (Token-Bucket)
               </span>
-              <span className="text-[10px] font-mono text-muted">Order: 10</span>
+              <Badge variant="cyan" size="sm" className="font-mono text-[9px]">
+                Enforced
+              </Badge>
             </div>
             <p className="text-xs text-muted mt-2">
-              Limits incoming tool execution request velocity for this agent. Protects target MCP tools from burst floods.
+              Limits incoming tool call velocity for this agent. Protects target MCP tools against concurrency spikes and burst floods.
             </p>
-            <div className="grid grid-cols-2 gap-3 mt-4">
+
+            {/* Presets */}
+            <div className="flex items-center gap-1.5 mt-3">
+              <span className="text-[10px] uppercase font-semibold text-muted tracking-wider select-none">Presets:</span>
+              {[
+                { label: 'Strict', burst: 3, refill: 0.5, desc: 'Cost-sensitive / Paid tools' },
+                { label: 'Balanced', burst: 10, refill: 2.0, desc: 'Recommended default' },
+                { label: 'High Concurrency', burst: 25, refill: 5.0, desc: 'Deep research / Parallel swarms' },
+              ].map((p) => {
+                const isSelected = rateLimit.max_burst === p.burst && rateLimit.refill_rate === p.refill
+                return (
+                  <button
+                    key={p.label}
+                    type="button"
+                    onClick={() => onChangeRateLimit({ max_burst: p.burst, refill_rate: p.refill })}
+                    title={`${p.burst} burst calls, ${p.refill} calls/s sustained. ${p.desc}`}
+                    className={`px-2 py-0.5 text-[10px] font-medium rounded-md border transition-all ${
+                      isSelected
+                        ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-600 dark:text-cyan-300 font-semibold shadow-xs'
+                        : 'bg-canvas hover:bg-surface border-subtle text-muted hover:text-primary'
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 mt-3">
               <Input
-                label="Max Burst (Tokens)"
+                label="Burst Capacity"
                 type="number"
                 min="0"
                 max="1000"
                 value={rateLimit.max_burst}
                 onChange={(e) => handleBurstChange(parseInt(e.target.value) || 0)}
-                placeholder="5"
-                helperText="Maximum allowed burst request capacity."
+                placeholder="10"
+                suffix="calls"
+                helperText="Concurrent tool execution allowance."
                 isMono
               />
               <Input
-                label="Refill Rate (Tokens/sec)"
+                label="Sustained Velocity"
                 type="number"
                 min="0"
                 step="0.5"
                 max="500"
                 value={rateLimit.refill_rate}
                 onChange={(e) => handleRefillChange(parseFloat(e.target.value) || 0)}
-                placeholder="1.0"
-                helperText="Continuous token regeneration rate per second."
+                placeholder="2.0"
+                suffix="calls / s"
+                helperText="Continuous token refill rate per second."
                 isMono
               />
             </div>
           </div>
-          <div className="p-2.5 rounded-xl bg-canvas border border-subtle text-[11px] text-muted flex items-center gap-2">
-            <Sliders className="w-3.5 h-3.5 text-accent shrink-0" />
-            <span>Effective limit: <strong>{rateLimit.refill_rate} req/s</strong> sustained, bursting up to <strong>{rateLimit.max_burst}</strong>.</span>
+
+          {/* Traffic Projection & Behavior Simulator */}
+          <div className="p-3 rounded-xl bg-canvas border border-subtle space-y-2 text-[11px] text-muted">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-primary flex items-center gap-1.5 text-xs">
+                <Sliders className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+                Traffic Projection
+              </span>
+              <span className="text-[10px] font-mono text-muted">
+                Refill: ~{rateLimit.refill_rate > 0 ? (rateLimit.max_burst / rateLimit.refill_rate).toFixed(1) : '∞'}s
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 pt-1 border-t border-subtle/50 text-center">
+              <div className="p-1.5 rounded-lg bg-surface/70 border border-subtle/60">
+                <span className="text-[9px] text-muted block">Peak Concurrency</span>
+                <span className="font-semibold text-primary font-mono text-[11px]">{rateLimit.max_burst} calls</span>
+              </div>
+              <div className="p-1.5 rounded-lg bg-surface/70 border border-subtle/60">
+                <span className="text-[9px] text-muted block">Sustained Rate</span>
+                <span className="font-semibold text-primary font-mono text-[11px]">{rateLimit.refill_rate} req/s</span>
+              </div>
+              <div className="p-1.5 rounded-lg bg-surface/70 border border-subtle/60">
+                <span className="text-[9px] text-muted block">Refill Time</span>
+                <span className="font-semibold text-primary font-mono text-[11px]">
+                  ~{rateLimit.refill_rate > 0 ? (rateLimit.max_burst / rateLimit.refill_rate).toFixed(1) : '∞'}s
+                </span>
+              </div>
+            </div>
+            <p className="text-[10px] text-muted leading-tight">
+              Sustains up to <strong>{rateLimit.refill_rate} calls/s</strong> (~{Math.round(rateLimit.refill_rate * 60)}/min) continuously, with bursts up to <strong>{rateLimit.max_burst} concurrent calls</strong>. Excess calls receive <code className="text-cyan-600 dark:text-cyan-400 font-mono">ErrRateLimitExceeded (-32001)</code>.
+            </p>
           </div>
         </div>
 
@@ -293,26 +344,42 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
                 <Repeat className="w-4 h-4 text-amber-500" />
                 Infinite Loop & Recursion Protection
               </span>
-              <span className="text-[10px] font-mono text-muted">Order: 15</span>
+              <Badge variant={isGlobalLoopActive ? 'emerald' : 'amber'} size="sm" className="font-mono text-[9px]">
+                {isGlobalLoopActive ? 'Enforced' : 'Suspended'}
+              </Badge>
             </div>
-            <div className="flex items-center justify-between mt-2">
-              <p className="text-xs text-muted">
-                Detects identical parameters invoked repeatedly within a sliding window.
-              </p>
-              <label htmlFor="loop-protection-toggle" className="relative inline-flex items-center cursor-pointer shrink-0 ml-3">
-                <input
-                  id="loop-protection-toggle"
-                  type="checkbox"
-                  aria-label="Toggle infinite loop and recursion protection"
-                  checked={loopProtection.enabled}
-                  onChange={(e) => handleToggleLoopEnabled(e.target.checked)}
-                  className="sr-only peer"
-                />
-                <div className="w-8 h-4 bg-canvas border border-subtle peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
-              </label>
+            <p className="text-xs text-muted mt-2">
+              Halts runaway agents repeating identical parameter invocations (SHA-256 payload deduplication).
+            </p>
+
+            {/* Presets */}
+            <div className="flex items-center gap-1.5 mt-3">
+              <span className="text-[10px] uppercase font-semibold text-muted tracking-wider select-none">Presets:</span>
+              {[
+                { label: 'Strict', repeat: 2, window: 10 },
+                { label: 'Balanced', repeat: 3, window: 10 },
+                { label: 'Permissive', repeat: 5, window: 20 },
+              ].map((p) => {
+                const isSelected = loopProtection.max_repeat === p.repeat && loopProtection.window_seconds === p.window
+                return (
+                  <button
+                    key={p.label}
+                    type="button"
+                    onClick={() => onChangeLoopProtection({ ...loopProtection, max_repeat: p.repeat, window_seconds: p.window })}
+                    title={`${p.repeat} repeats in ${p.window} seconds sliding window`}
+                    className={`px-2 py-0.5 text-[10px] font-medium rounded-md border transition-all ${
+                      isSelected
+                        ? 'bg-amber-500/15 border-amber-500/40 text-amber-600 dark:text-amber-300 font-semibold shadow-xs'
+                        : 'bg-canvas hover:bg-surface border-subtle text-muted hover:text-primary'
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                )
+              })}
             </div>
 
-            {!isGlobalLoopActive && loopProtection.enabled && (
+            {!isGlobalLoopActive && (
               <div className="p-3 my-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-300 text-xs flex items-start gap-2.5">
                 <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
                 <div className="space-y-1">
@@ -329,29 +396,29 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-3 mt-4">
+            <div className="grid grid-cols-2 gap-3 mt-3">
               <Input
-                label="Max Repeat Count"
+                label="Max Identical Invocations"
                 type="number"
                 min="1"
                 max="50"
-                disabled={!loopProtection.enabled}
                 value={loopProtection.max_repeat}
                 onChange={(e) => handleMaxRepeatChange(parseInt(e.target.value) || 1)}
                 placeholder="3"
-                helperText="Allowed identical calls before triggering block."
+                suffix="repeats"
+                helperText="Identical calls before triggering block."
                 isMono
               />
               <Input
-                label="Window Duration (Seconds)"
+                label="Deduplication Window"
                 type="number"
                 min="1"
                 max="3600"
-                disabled={!loopProtection.enabled}
                 value={loopProtection.window_seconds}
                 onChange={(e) => handleWindowChange(parseInt(e.target.value) || 1)}
                 placeholder="10"
-                helperText="Sliding deduplication window time."
+                suffix="seconds"
+                helperText="Sliding deduplication time window."
                 isMono
               />
             </div>
@@ -435,13 +502,16 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
             </div>
           </div>
 
-          <div className="p-2.5 rounded-xl bg-canvas border border-subtle text-[11px] text-muted flex items-center gap-2">
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-            <span>
-              {loopProtection.enabled
-                ? `Blocks tool execution if repeated identical call exceeds ${loopProtection.max_repeat}x in ${loopProtection.window_seconds}s.`
-                : 'Warning: Loop protection disabled. Agent is vulnerable to infinite recursion.'}
-            </span>
+          <div className="p-3 rounded-xl bg-canvas border border-subtle text-[11px] text-muted space-y-1.5">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+              <span className="font-medium text-primary">
+                Blocks tool execution if identical payload exceeds {loopProtection.max_repeat}x in {loopProtection.window_seconds}s.
+              </span>
+            </div>
+            <p className="text-[10px] text-muted leading-tight">
+              Calls with different arguments (e.g. paginated queries, varied search terms) are <strong>never blocked</strong>. Only calls with identical SHA-256 payload signatures count toward the repeat threshold.
+            </p>
           </div>
         </div>
       </div>
@@ -465,7 +535,7 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
 
         {/* Visual Pipeline Rail */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2 relative">
-          {pipelineSteps.map((step) => (
+          {pipelineSteps.map((step, idx) => (
             <div
               key={step.name}
               className={`p-3 rounded-xl border flex flex-col justify-between space-y-2 relative group transition-all min-w-0 overflow-hidden ${
@@ -478,7 +548,7 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
             >
               <div className="flex items-center justify-between">
                 <span className="w-5 h-5 rounded-md bg-surface border border-subtle flex items-center justify-center text-[10px] font-mono text-muted font-bold shrink-0">
-                  {step.order}
+                  {idx + 1}
                 </span>
                 <span className="text-[9px] font-mono text-muted">{step.latency}</span>
               </div>

@@ -475,6 +475,13 @@ func (b *AgentSessionBridge) Touch() {
 	b.LastActive = time.Now()
 }
 
+// SetLastActive sets the last active timestamp safely under the bridge mutex.
+func (b *AgentSessionBridge) SetLastActive(t time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.LastActive = t
+}
+
 // GetUpstream safely retrieves an upstream session by canonical protocol ID or protocol name alias.
 func (b *AgentSessionBridge) GetUpstream(nameOrID string) *UpstreamSession {
 	b.mu.RLock()

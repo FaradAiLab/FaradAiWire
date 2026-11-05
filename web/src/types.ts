@@ -113,6 +113,7 @@ export interface ToolOverrides {
 }
 
 export interface RateLimitOverride {
+  enabled?: boolean
   max_burst: number
   refill_rate: number
 }

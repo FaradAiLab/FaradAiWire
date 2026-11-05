@@ -245,32 +245,41 @@ func (m *mockAgentRepo) GetAgentConfig(name string) (*agent.RouteConfig, error) 
 	return nil, nil
 }
 
-func TestLoopFilter_AgentOverride_Disabled(t *testing.T) {
+func TestLoopFilter_AlwaysEnforced_CannotBypassWithoutExclude(t *testing.T) {
 	store := NewInMemoryStateStore(WithDisableBackgroundWorker())
 	defer store.Close()
 
 	loopFilter := NewLoopFilter(true, 2, 10, nil, nil, store)
 	repo := &mockAgentRepo{
 		configs: map[string]*agent.RouteConfig{
-			"unlimited-agent": {
-				AgentName: "unlimited-agent",
+			"strict-agent": {
+				AgentName: "strict-agent",
 				LoopProtection: &agent.LoopProtectionOverride{
-					Enabled: false,
+					MaxRepeat:     2,
+					WindowSeconds: 10,
 				},
 			},
 		},
 	}
 	loopFilter.SetAgentRepository(repo)
 
-	ctx := context.WithValue(context.Background(), types.AgentNameContextKey, "unlimited-agent")
+	ctx := context.WithValue(context.Background(), types.AgentNameContextKey, "strict-agent")
 	req := makeTestToolCallRequest("batch_process", map[string]interface{}{"id": 100})
 
-	// Make 6 identical requests, all should succeed because loop protection is disabled for this agent
-	for i := 1; i <= 6; i++ {
-		_, err := loopFilter.FilterRequest(ctx, req)
-		if err != nil {
-			t.Fatalf("request %d failed despite loop protection disabled: %v", i, err)
-		}
+	// Calls 1 and 2 allowed
+	_, err1 := loopFilter.FilterRequest(ctx, req)
+	if err1 != nil {
+		t.Fatalf("call 1 failed: %v", err1)
+	}
+	_, err2 := loopFilter.FilterRequest(ctx, req)
+	if err2 != nil {
+		t.Fatalf("call 2 failed: %v", err2)
+	}
+
+	// Call 3 MUST be blocked by loop protection (cannot be bypassed at agent level)
+	_, err3 := loopFilter.FilterRequest(ctx, req)
+	if err3 == nil || err3.Code != mcp.ErrLoopDetected {
+		t.Fatalf("expected ErrLoopDetected on 3rd identical call, got: %v", err3)
 	}
 }
 
@@ -285,7 +294,6 @@ func TestLoopFilter_AgentOverride_CustomThresholds(t *testing.T) {
 			"custom-agent": {
 				AgentName: "custom-agent",
 				LoopProtection: &agent.LoopProtectionOverride{
-					Enabled:       true,
 					MaxRepeat:     4,
 					WindowSeconds: 20,
 				},
@@ -322,7 +330,6 @@ func TestLoopFilter_AgentOverride_ExcludeTools(t *testing.T) {
 			"excluded-agent": {
 				AgentName: "excluded-agent",
 				LoopProtection: &agent.LoopProtectionOverride{
-					Enabled:      true,
 					MaxRepeat:    1,
 					ExcludeTools: []string{"ping_health"},
 				},
@@ -388,6 +395,75 @@ func TestRateLimitFilter_AgentOverride(t *testing.T) {
 	_, err := rateLimiter.FilterRequest(ctx, req)
 	if err == nil || err.Code != mcp.ErrRateLimitExceeded {
 		t.Fatalf("expected call 4 to be rate limited, got: %v", err)
+	}
+}
+
+func TestRateLimitFilter_AlwaysEnforced_CannotBypass(t *testing.T) {
+	store := NewInMemoryStateStore(WithDisableBackgroundWorker())
+	defer store.Close()
+
+	// Global rate limiter has MaxBurst = 1
+	rateLimiter := NewRateLimitFilter(true, 1, 0.1, store)
+	repo := &mockAgentRepo{
+		configs: map[string]*agent.RouteConfig{
+			"custom-burst-agent": {
+				AgentName: "custom-burst-agent",
+				RateLimit: &agent.RateLimitOverride{
+					MaxBurst:   2,
+					RefillRate: 0.1,
+				},
+			},
+		},
+	}
+	rateLimiter.SetAgentRepository(repo)
+
+	ctx := context.WithValue(context.Background(), types.AgentNameContextKey, "custom-burst-agent")
+	req := makeTestToolCallRequest("batch_task", map[string]interface{}{"idx": 42})
+
+	// Calls 1 and 2 succeed (burst allowance: 2)
+	for i := 1; i <= 2; i++ {
+		_, err := rateLimiter.FilterRequest(ctx, req)
+		if err != nil {
+			t.Fatalf("request %d failed: %v", i, err)
+		}
+	}
+
+	// Call 3 MUST be rate limited (rate limiting cannot be bypassed at agent level)
+	_, err := rateLimiter.FilterRequest(ctx, req)
+	if err == nil || err.Code != mcp.ErrRateLimitExceeded {
+		t.Fatalf("expected call 3 to be rate limited with ErrRateLimitExceeded, got: %v", err)
+	}
+}
+
+func BenchmarkLoopFilter_FilterRequest(b *testing.B) {
+	store := NewInMemoryStateStore(WithDisableBackgroundWorker())
+	defer store.Close()
+
+	loopFilter := NewLoopFilter(true, 1000000, 60, nil, nil, store)
+	ctx := context.WithValue(context.Background(), types.AgentNameContextKey, "bench-agent")
+	req := makeTestToolCallRequest("calculate_metric", map[string]interface{}{"value": 42})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, _ = loopFilter.FilterRequest(ctx, req)
+	}
+}
+
+func BenchmarkRateLimitFilter_FilterRequest(b *testing.B) {
+	store := NewInMemoryStateStore(WithDisableBackgroundWorker())
+	defer store.Close()
+
+	rateLimiter := NewRateLimitFilter(true, 1000000, 1000000.0, store)
+	ctx := context.WithValue(context.Background(), types.AgentNameContextKey, "bench-agent")
+	req := makeTestToolCallRequest("calculate_metric", map[string]interface{}{"value": 42})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, _ = rateLimiter.FilterRequest(ctx, req)
 	}
 }
 

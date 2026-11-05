@@ -692,7 +692,6 @@ func TestAdminEndpoints_Agents_TrafficPipelineOverrides(t *testing.T) {
 			RefillRate: 2.5,
 		},
 		LoopProtection: &agent.LoopProtectionOverride{
-			Enabled:       true,
 			MaxRepeat:     5,
 			WindowSeconds: 20,
 			ExcludeTools:  []string{"echo"},
@@ -721,11 +720,11 @@ func TestAdminEndpoints_Agents_TrafficPipelineOverrides(t *testing.T) {
 	if cfg.RateLimit == nil || cfg.RateLimit.MaxBurst != 10 || cfg.RateLimit.RefillRate != 2.5 {
 		t.Fatalf("rate limit override not saved properly: %+v", cfg.RateLimit)
 	}
-	if cfg.LoopProtection == nil || !cfg.LoopProtection.Enabled || cfg.LoopProtection.MaxRepeat != 5 || cfg.LoopProtection.WindowSeconds != 20 || len(cfg.LoopProtection.ExcludeTools) != 1 || cfg.LoopProtection.ExcludeTools[0] != "echo" {
+	if cfg.LoopProtection == nil || cfg.LoopProtection.MaxRepeat != 5 || cfg.LoopProtection.WindowSeconds != 20 || len(cfg.LoopProtection.ExcludeTools) != 1 || cfg.LoopProtection.ExcludeTools[0] != "echo" {
 		t.Fatalf("loop protection override not saved properly: %+v", cfg.LoopProtection)
 	}
 
-	// 2. Update agent: disable loop protection
+	// 2. Update agent: update loop protection thresholds
 	putPayload := AgentPayload{
 		Protocols: cfg.Protocols,
 		RateLimit: &agent.RateLimitOverride{
@@ -733,9 +732,9 @@ func TestAdminEndpoints_Agents_TrafficPipelineOverrides(t *testing.T) {
 			RefillRate: 5.0,
 		},
 		LoopProtection: &agent.LoopProtectionOverride{
-			Enabled:       false,
-			MaxRepeat:     3,
-			WindowSeconds: 10,
+			MaxRepeat:     15,
+			WindowSeconds: 30,
+			ExcludeTools:  []string{"echo", "ping"},
 		},
 	}
 	putBody, _ := json.Marshal(putPayload)
@@ -756,8 +755,8 @@ func TestAdminEndpoints_Agents_TrafficPipelineOverrides(t *testing.T) {
 	if updatedCfg.RateLimit == nil || updatedCfg.RateLimit.MaxBurst != 20 || updatedCfg.RateLimit.RefillRate != 5.0 {
 		t.Fatalf("updated rate limit not saved properly: %+v", updatedCfg.RateLimit)
 	}
-	if updatedCfg.LoopProtection == nil || updatedCfg.LoopProtection.Enabled != false {
-		t.Fatalf("updated loop protection should be disabled: %+v", updatedCfg.LoopProtection)
+	if updatedCfg.LoopProtection == nil || updatedCfg.LoopProtection.MaxRepeat != 15 || updatedCfg.LoopProtection.WindowSeconds != 30 || len(updatedCfg.LoopProtection.ExcludeTools) != 2 {
+		t.Fatalf("updated loop protection not saved properly: %+v", updatedCfg.LoopProtection)
 	}
 
 	// 3. Test validation failure on negative values

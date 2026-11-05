@@ -159,7 +159,6 @@ type RateLimitOverride struct {
 
 // LoopProtectionOverride configures infinite reasoning loop detection for an individual agent (ADR-0042).
 type LoopProtectionOverride struct {
-	Enabled       bool     `json:"enabled"`
 	MaxRepeat     int      `json:"max_repeat"`
 	WindowSeconds int      `json:"window_seconds"`
 	ExcludeTools  []string `json:"exclude_tools,omitempty"`
@@ -262,7 +261,6 @@ func (r *RouteConfig) Clone() *RouteConfig {
 
 	if r.LoopProtection != nil {
 		clone.LoopProtection = &LoopProtectionOverride{
-			Enabled:       r.LoopProtection.Enabled,
 			MaxRepeat:     r.LoopProtection.MaxRepeat,
 			WindowSeconds: r.LoopProtection.WindowSeconds,
 		}

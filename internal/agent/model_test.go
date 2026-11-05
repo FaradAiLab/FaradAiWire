@@ -39,7 +39,6 @@ func TestRouteConfig_Clone_DeepCopy(t *testing.T) {
 			RefillRate: 10.5,
 		},
 		LoopProtection: &LoopProtectionOverride{
-			Enabled:       true,
 			MaxRepeat:     5,
 			WindowSeconds: 60,
 			ExcludeTools:  []string{"ping"},

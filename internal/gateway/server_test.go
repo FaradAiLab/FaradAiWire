@@ -902,7 +902,7 @@ func TestServer_MaintenanceCoordinator_RuntimeSessionEviction(t *testing.T) {
 	}
 	bridgeIdle.Touch()
 	// Manually backdate LastActive to simulate 30+ minutes of inactivity
-	bridgeIdle.LastActive = time.Now().Add(-1 * time.Hour)
+	bridgeIdle.SetLastActive(time.Now().Add(-1 * time.Hour))
 
 	_, err = sessionMgr.CreateBridge(serverCtx, "agent-unified", "active-bridge-2", nil)
 	if err != nil {
@@ -1138,7 +1138,7 @@ func TestServer_SegregatedMode_MemoryLeakPrevention_ExtendedTraffic(t *testing.T
 			if err != nil {
 				t.Fatalf("failed to create bridge: %v", err)
 			}
-			b.LastActive = time.Now().Add(-1 * time.Hour) // abandoned
+			b.SetLastActive(time.Now().Add(-1 * time.Hour)) // abandoned
 			cStore.Put(proxy.NewCorrelationKey(sid, "req-1"), &proxy.PendingRequest{
 				ToolName:  "fetch",
 				Timestamp: time.Now().Add(-10 * time.Minute),
