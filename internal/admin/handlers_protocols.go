@@ -99,6 +99,7 @@ func (a *AdminServer) handleProtocolPresets(w http.ResponseWriter, r *http.Reque
 
 // ProbeProtocolRequest contains parameters for active MCP connection testing and tool discovery.
 type ProbeProtocolRequest struct {
+	ID        string            `json:"id,omitempty"`
 	Type      string            `json:"type"` // "stdio", "sse", "http"
 	URL       string            `json:"url,omitempty"`
 	Command   string            `json:"command,omitempty"`
@@ -106,6 +107,48 @@ type ProbeProtocolRequest struct {
 	Env       []string          `json:"env,omitempty"`
 	AuthToken string            `json:"auth_token,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"`
+}
+
+func hydrateProbeSecrets(req *ProbeProtocolRequest, store protocol.Store) {
+	if store == nil {
+		return
+	}
+	existing := matchStoredProtocol(store, req.ID, req.URL, req.Command)
+	if existing == nil {
+		return
+	}
+	if req.AuthToken == "" || strings.Contains(req.AuthToken, "••••••") {
+		req.AuthToken = existing.AuthToken
+	}
+	if len(req.Headers) == 0 {
+		req.Headers = existing.Headers
+		return
+	}
+	for k, v := range req.Headers {
+		if strings.Contains(v, "••••••") {
+			if orig, ok := existing.Headers[k]; ok {
+				req.Headers[k] = orig
+			}
+		}
+	}
+}
+
+func matchStoredProtocol(store protocol.Store, id, targetURL, cmd string) *protocol.Protocol {
+	if id != "" {
+		if p, err := store.Get(id); err == nil && p != nil {
+			return p
+		}
+	}
+	all, _ := store.List()
+	for _, p := range all {
+		if targetURL != "" && (p.URLOrCommand == targetURL || p.Command == targetURL) {
+			return p
+		}
+		if cmd != "" && p.Command == cmd {
+			return p
+		}
+	}
+	return nil
 }
 
 // handleProtocolProbe executes an active SSRF-safe connection test and tool discovery against an MCP endpoint.
@@ -132,6 +175,8 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 		})
 		return
 	}
+
+	hydrateProbeSecrets(&req, a.getProtocolStore())
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()

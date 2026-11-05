@@ -755,6 +755,80 @@ func TestAdminServer_ProtocolProbe_WithAuthTokenAndCustomHeaders(t *testing.T) {
 	}
 }
 
+func TestAdminServer_ProtocolProbe_MaskedTokenHydration(t *testing.T) {
+	var receivedGETAuth, receivedPOSTAuth string
+	upstream := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			receivedGETAuth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("event: endpoint\ndata: /messages\n\n"))
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			return
+		}
+
+		if r.Method == http.MethodPost {
+			receivedPOSTAuth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      2,
+				"result": map[string]interface{}{
+					"tools": []map[string]interface{}{
+						{"name": "test_tool", "description": "test"},
+					},
+				},
+			})
+			return
+		}
+	}))
+	defer upstream.Close()
+
+	server, _, protoDir := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server.cfg.Security.SSRFProtection.Enabled = false
+	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
+
+	// Save real protocol to store
+	store, _ := protocol.NewFSStore(protoDir)
+	_ = store.Save(&protocol.Protocol{
+		ID:           "test-probe-mask",
+		Name:         "Masked Probe Test",
+		Type:         "sse",
+		URLOrCommand: upstream.URL + "/sse",
+		AuthToken:    "my-real-secret-12345",
+	})
+	server.protocolStore = store
+
+	handler := server.Handler()
+
+	// Probe with masked token placeholder
+	probeReq := map[string]interface{}{
+		"id":         "test-probe-mask",
+		"type":       "sse",
+		"url":        upstream.URL + "/sse",
+		"auth_token": "my-••••••45",
+	}
+	body, _ := json.Marshal(probeReq)
+	req := httptest.NewRequest(http.MethodPost, "/admin/protocols/probe", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from probe, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if receivedGETAuth != "Bearer my-real-secret-12345" {
+		t.Errorf("expected GET hydrated token 'Bearer my-real-secret-12345', got %q", receivedGETAuth)
+	}
+	if receivedPOSTAuth != "Bearer my-real-secret-12345" {
+		t.Errorf("expected POST hydrated token 'Bearer my-real-secret-12345', got %q", receivedPOSTAuth)
+	}
+}
+
 // ========== STUDIO-008: Diagnostic Transparency & HTTP Status Probing ==========
 
 func TestAdminServer_Probe_UpstreamHTTPError_StatusCodes(t *testing.T) {

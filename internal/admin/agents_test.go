@@ -944,5 +944,59 @@ func TestAdminEndpoints_Agents_DetachedProtocol_RetainsGovernance(t *testing.T) 
 	}
 }
 
+func TestAdminEndpoints_Agents_EnrichAgentProtocols_HydratesSecrets(t *testing.T) {
+	server, protoDir, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+
+	// Save a protocol with secret auth token and custom headers
+	store, _ := protocol.NewFSStore(protoDir)
+	_ = store.Save(&protocol.Protocol{
+		ID:           "secret-proto",
+		Name:         "Secret Protocol",
+		Type:         "http",
+		URLOrCommand: "https://api.example.com/mcp",
+		AuthToken:    "super-secret-token-12345",
+		Headers: map[string]string{
+			"X-Custom-Secret": "header-secret-999",
+		},
+	})
+	server.protocolStore = store
+
+	handler := server.Handler()
+
+	// Create an agent attaching this protocol by ID
+	payload := map[string]interface{}{
+		"agent_name":   "agent-secret-test",
+		"description":  "Agent secret test",
+		"protocol_ids": []string{"secret-proto"},
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/admin/agents", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	repo := server.getAgentRepository()
+	cfg, err := repo.GetAgentConfig("agent-secret-test")
+	if err != nil {
+		t.Fatalf("failed to load saved agent: %v", err)
+	}
+
+	if len(cfg.Protocols) != 1 {
+		t.Fatalf("expected 1 protocol, got %d", len(cfg.Protocols))
+	}
+
+	savedProto := cfg.Protocols[0]
+	if savedProto.AuthToken != "super-secret-token-12345" {
+		t.Errorf("expected hydrated AuthToken 'super-secret-token-12345', got %q", savedProto.AuthToken)
+	}
+	if savedProto.Headers["X-Custom-Secret"] != "header-secret-999" {
+		t.Errorf("expected hydrated Headers['X-Custom-Secret'] 'header-secret-999', got %q", savedProto.Headers["X-Custom-Secret"])
+	}
+}
+
 
 

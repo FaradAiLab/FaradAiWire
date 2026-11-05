@@ -121,6 +121,7 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
       })
 
       const res = await api.probeProtocol({
+        id: protoId.trim() || undefined,
         type: protoType,
         url: (protoType === 'sse' || protoType === 'http') ? protoUrl.trim() : undefined,
         auth_token: (protoType === 'sse' || protoType === 'http') && protoAuthToken.trim() ? protoAuthToken.trim() : undefined,

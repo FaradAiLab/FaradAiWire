@@ -144,6 +144,7 @@ export const api = {
     }),
   probeProtocol: (
     probeReq: {
+      id?: string
       type: string
       url?: string
       command?: string

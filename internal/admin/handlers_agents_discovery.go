@@ -1,14 +1,17 @@
 package admin
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
+	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
 	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 )
 
@@ -40,51 +43,79 @@ func (a *AdminServer) enrichAgentProtocols(protocols []agent.ProtocolConfig, pro
 	res := make([]agent.ProtocolConfig, len(protocols))
 	copy(res, protocols)
 
-	if len(protocolIDs) == 0 {
-		return res
-	}
-
 	store := a.getProtocolStore()
 	if store == nil {
 		return res
 	}
 
-	for _, pid := range protocolIDs {
-		trimmed := strings.TrimSpace(pid)
-		if trimmed == "" {
-			continue
+	for i := range res {
+		if def := findProtocolDef(store, res[i].ID, res[i].Name); def != nil {
+			applyProtocolDefaults(&res[i], def)
 		}
-		alreadyExists := false
-		for _, p := range res {
-			if strings.EqualFold(p.ID, trimmed) || strings.EqualFold(p.Name, trimmed) {
-				alreadyExists = true
-				break
-			}
-		}
-		if alreadyExists {
-			continue
-		}
+	}
 
-		pDef, err := store.Get(trimmed)
-		if err == nil && pDef != nil {
-			urlOrCmd := pDef.URLOrCommand
-			if urlOrCmd == "" && pDef.Command != "" {
-				urlOrCmd = pDef.Command
-			}
-			res = append(res, agent.ProtocolConfig{
-				ID:           pDef.ID,
-				Name:         pDef.Name,
-				Type:         pDef.Type,
-				URLOrCommand: urlOrCmd,
-				Command:      pDef.Command,
-				Args:         pDef.Args,
-				Env:          pDef.Env,
-				AllowedTools: pDef.AllowedTools,
-			})
+	for _, rawID := range protocolIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" || containsProtocol(res, id) {
+			continue
+		}
+		if def, err := store.Get(id); err == nil && def != nil {
+			var cfg agent.ProtocolConfig
+			applyProtocolDefaults(&cfg, def)
+			res = append(res, cfg)
 		}
 	}
 
 	return res
+}
+
+func findProtocolDef(store protocol.Store, ids ...string) *protocol.Protocol {
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			if def, err := store.Get(id); err == nil && def != nil {
+				return def
+			}
+		}
+	}
+	return nil
+}
+
+func containsProtocol(list []agent.ProtocolConfig, id string) bool {
+	return slices.ContainsFunc(list, func(p agent.ProtocolConfig) bool {
+		return strings.EqualFold(p.ID, id) || strings.EqualFold(p.Name, id)
+	})
+}
+
+func applyProtocolDefaults(dst *agent.ProtocolConfig, src *protocol.Protocol) {
+	dst.ID = cmp.Or(dst.ID, src.ID)
+	dst.Name = cmp.Or(dst.Name, src.Name)
+	dst.Type = cmp.Or(dst.Type, src.Type)
+	dst.Command = cmp.Or(dst.Command, src.Command)
+	dst.URLOrCommand = cmp.Or(dst.URLOrCommand, src.URLOrCommand, src.Command)
+
+	if len(dst.Args) == 0 {
+		dst.Args = src.Args
+	}
+	if len(dst.Env) == 0 {
+		dst.Env = src.Env
+	}
+	if len(dst.AllowedTools) == 0 {
+		dst.AllowedTools = src.AllowedTools
+	}
+	if dst.AuthToken == "" || strings.Contains(dst.AuthToken, "••••••") {
+		dst.AuthToken = src.AuthToken
+	}
+	if len(dst.Headers) == 0 {
+		dst.Headers = src.Headers
+		return
+	}
+	for k, v := range dst.Headers {
+		if strings.Contains(v, "••••••") {
+			if orig, ok := src.Headers[k]; ok {
+				dst.Headers[k] = orig
+			}
+		}
+	}
 }
 
 func (a *AdminServer) syncAgentToolsProbed(ctx context.Context, agentName string, agentCfg *agent.RouteConfig) ([]map[string]interface{}, error) {
