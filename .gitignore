@@ -64,7 +64,8 @@ wire.duckdb
 node_modules/
 web/node_modules/
 web/.vite/
-web/dist/
+web/dist/*
+!web/dist/index.html
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
