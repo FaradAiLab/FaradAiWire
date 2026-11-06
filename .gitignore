@@ -90,6 +90,10 @@ htmlcov/
 *.iml
 .zed/
 .cursor/
+.kiro/
+.claude/
+.gemini/
+.mcp.json
 *.swp
 *.swo
 *~
@@ -103,3 +107,8 @@ htmlcov/
 ehthumbs.db
 Thumbs.db
 Desktop.ini
+
+# Temporary AI Agent Scratchpad & CodeGraph Artifacts
+.scratch/
+.codegraph/
+GEMINI.md
