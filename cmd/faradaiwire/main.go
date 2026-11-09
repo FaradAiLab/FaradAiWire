@@ -35,6 +35,35 @@ func main() {
 		adminPort := fs.Int("admin-port", 0, "Admin console port to listen on (default 8095)")
 		fs.Parse(os.Args[2:])
 		executeRun(*cfgPath, *standalone, *host, *port, *adminPort)
+	case "adopt":
+		fs := flag.NewFlagSet("adopt", flag.ExitOnError)
+		rollback := fs.Bool("rollback", false, "Revert client configurations back to pristine pre-adoption backups")
+		dryRun := fs.Bool("dry-run", false, "Preview planned adoption changes without mutating files on disk")
+		yes := fs.Bool("yes", false, "Automatically accept all adoption prompts without interactive confirmation")
+		fs.BoolVar(yes, "y", false, "Alias for --yes")
+		backupDir := fs.String("backup-dir", "", "Custom directory to store client configuration backups (defaults to ~/.faradaiwire/backups)")
+		protocolsDir := fs.String("protocols-dir", "./protocols", "Directory to store imported Tool Sources")
+		agentsDir := fs.String("agents-dir", "./agents", "Directory to store client Security Profiles")
+		fs.Parse(os.Args[2:])
+		code := executeAdopt(adoptOptions{
+			rollback:     *rollback,
+			dryRun:       *dryRun,
+			yes:          *yes,
+			backupDir:    *backupDir,
+			protocolsDir: *protocolsDir,
+			agentsDir:    *agentsDir,
+		}, os.Stdin, os.Stdout)
+		os.Exit(code)
+	case "connect":
+		fs := flag.NewFlagSet("connect", flag.ExitOnError)
+		profile := fs.String("profile", "default", "Target Security Profile name to route traffic through")
+		host := fs.String("host", "127.0.0.1", "Gateway ingress host address")
+		port := fs.Int("port", 8090, "Gateway ingress port")
+		token := fs.String("token", "", "Optional API bearer token (autodiscovered from ~/.faradaiwire if omitted)")
+		noSpawn := fs.Bool("no-spawn", false, "Do not auto-spawn the background daemon if offline")
+		fs.Parse(os.Args[2:])
+		code := executeConnect(*profile, *host, *port, *token, *noSpawn, os.Stdin, os.Stdout)
+		os.Exit(code)
 	case "doctor":
 		fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 		cfgPath := fs.String("config", "", "Path to YAML configuration file (autodiscovers from ./config.yaml or ~/.faradaiwire/config.yaml)")
@@ -153,7 +182,7 @@ func main() {
 
 func printUsage() {
 	fmt.Printf("FaradAiWire - Zero-Trust AI Agent Security Gateway (%s)\n", version)
-	fmt.Println("Usage: faradaiwire run [--config <path>] [--standalone] [--host <host>] [--port <port>] [--admin-port <admin-port>] | doctor [--config <path>] | audit <path|url> [--json] | guard [list|status|install <id>|uninstall <id>] [--config <path>] | version")
+	fmt.Println("Usage: faradaiwire run [--config <path>] [--standalone] [--host <host>] [--port <port>] [--admin-port <admin-port>] | adopt [--rollback] [--dry-run] [-y] | connect [--profile <name>] [--host <host>] [--port <port>] | doctor [--config <path>] | audit <path|url> [--json] | guard [list|status|install <id>|uninstall <id>] [--config <path>] | version")
 }
 
 func executeRun(configPath string, standalone bool, host string, port int, adminPort int) {

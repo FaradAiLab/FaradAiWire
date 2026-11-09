@@ -759,5 +759,46 @@ func TestSSE_UnknownAgent_Returns404NotFound(t *testing.T) {
 	}
 }
 
+func TestSSEProxy_HealthEndpoint(t *testing.T) {
+	proxy := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), nil, nil, config.UserContextConfig{})
+	handler := proxy.Handler()
+
+	// 1. GET /health -> 200 OK
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d. Body: %s", rec.Code, rec.Body.String())
+	}
+
+	contentType := rec.Header().Get("Content-Type")
+	if !strings.Contains(contentType, "application/json") {
+		t.Errorf("expected application/json Content-Type, got %s", contentType)
+	}
+
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to parse health response JSON: %v", err)
+	}
+
+	if body["status"] != "ok" {
+		t.Errorf("expected status 'ok', got '%s'", body["status"])
+	}
+	if body["version"] == "" {
+		t.Errorf("expected non-empty version")
+	}
+
+	// 2. POST /health -> 405 Method Not Allowed
+	reqPost := httptest.NewRequest(http.MethodPost, "/health", nil)
+	recPost := httptest.NewRecorder()
+	handler.ServeHTTP(recPost, reqPost)
+
+	if recPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected HTTP 405 for POST /health, got %d", recPost.Code)
+	}
+}
+
+
 
 

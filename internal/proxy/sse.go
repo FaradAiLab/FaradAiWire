@@ -126,6 +126,7 @@ func NewSSEProxy(
 // Handler builds and returns the configured HTTP handler with security headers and rate limiting applied.
 func (s *SSEProxy) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/sse", s.handleSSE)
 	mux.HandleFunc("/sse/", s.handleSSE)
 	mux.HandleFunc("/message", s.handleMessage)
@@ -157,6 +158,16 @@ func (s *SSEProxy) Handler() http.Handler {
 		h = drainMW(h)
 	}
 	return h
+}
+
+func (s *SSEProxy) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(fmt.Sprintf(`{"status":"ok","version":"%s"}`, config.Version)))
 }
 
 func (s *SSEProxy) handleSSE(w http.ResponseWriter, r *http.Request) {
