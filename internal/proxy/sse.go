@@ -160,6 +160,8 @@ func (s *SSEProxy) Handler() http.Handler {
 	return h
 }
 
+var healthResponseBytes = []byte(fmt.Sprintf(`{"status":"ok","version":"%s"}`, config.Version))
+
 func (s *SSEProxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -167,7 +169,9 @@ func (s *SSEProxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(fmt.Sprintf(`{"status":"ok","version":"%s"}`, config.Version)))
+	if r.Method == http.MethodGet {
+		_, _ = w.Write(healthResponseBytes)
+	}
 }
 
 func (s *SSEProxy) handleSSE(w http.ResponseWriter, r *http.Request) {

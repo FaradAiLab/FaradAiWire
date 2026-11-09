@@ -7,6 +7,10 @@ const (
 	ClientClaudeDesktop ClientID = "claude-desktop"
 	ClientCursor        ClientID = "cursor"
 	ClientWindsurf      ClientID = "windsurf"
+	ClientAntigravity   ClientID = "antigravity"
+	ClientClaudeCode    ClientID = "claude-code"
+	ClientCline         ClientID = "cline"
+	ClientRooCode       ClientID = "roo-code"
 )
 
 // DiscoveredServer represents an MCP server definition discovered from a client IDE configuration.

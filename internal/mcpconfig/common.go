@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -46,6 +47,51 @@ type rawClientConfig struct {
 	ExtraFields map[string]interface{} `json:"-"`
 }
 
+// isSelfReference checks if an MCP server definition points to FaradAiWire itself,
+// preventing infinite forwarding loops, circular recursion, and duplicate re-adoption cycles.
+func isSelfReference(name string, cmd string, args []string, url string) bool {
+	// 1. Check server name
+	lowerName := strings.ToLower(name)
+	if strings.HasPrefix(lowerName, "farad-ai") ||
+		strings.HasPrefix(lowerName, "faradai") ||
+		strings.Contains(lowerName, "faradaiwire") ||
+		strings.Contains(lowerName, "faradaimcp") {
+		return true
+	}
+
+	// 2. Check binary command
+	if cmd != "" {
+		lowerCmd := strings.ToLower(filepath.Base(cmd))
+		if lowerCmd == "faradaiwire" || strings.HasPrefix(lowerCmd, "faradaiwire") {
+			return true
+		}
+	}
+
+	// 3. Check CLI arguments (e.g. wrapper script invoking connect subcommand)
+	for _, arg := range args {
+		if arg == "connect" {
+			for _, a := range args {
+				if a == "--profile" || a == "-profile" {
+					return true
+				}
+			}
+		}
+	}
+
+	// 4. Check URL / Ingress loopback port (default gateway port 8090)
+	if url != "" {
+		lowerURL := strings.ToLower(url)
+		if strings.Contains(lowerURL, "127.0.0.1:8090") ||
+			strings.Contains(lowerURL, "localhost:8090") ||
+			strings.Contains(lowerURL, ":8090/sse") ||
+			strings.Contains(lowerURL, ":8090/mcp") {
+			return true
+		}
+	}
+
+	return false
+}
+
 // readConfigFile reads and deserializes a client JSON/JSONC configuration file.
 func readConfigFile(path string) (map[string]interface{}, []DiscoveredServer, ClientID, string, error) {
 	data, err := os.ReadFile(path)
@@ -67,11 +113,6 @@ func readConfigFile(path string) (map[string]interface{}, []DiscoveredServer, Cl
 	mcpServersRaw, ok := rawMap["mcpServers"].(map[string]interface{})
 	if ok {
 		for name, serverVal := range mcpServersRaw {
-			// Skip if it's already farad-ai-wire
-			if strings.HasPrefix(name, "farad-ai") {
-				continue
-			}
-
 			serverMap, sOk := serverVal.(map[string]interface{})
 			if !sOk {
 				continue
@@ -113,9 +154,19 @@ func readConfigFile(path string) (map[string]interface{}, []DiscoveredServer, Cl
 				}
 			}
 
+			// Skip self-references to FaradAiWire (by name, binary command, args, or port 8090)
+			if isSelfReference(ds.Name, ds.Command, ds.Args, ds.URL) {
+				continue
+			}
+
 			servers = append(servers, ds)
 		}
 	}
+
+	// Sort servers deterministically by name
+	sort.Slice(servers, func(i, j int) bool {
+		return servers[i].Name < servers[j].Name
+	})
 
 	return rawMap, servers, "", "", nil
 }
@@ -149,6 +200,29 @@ func mutateConfigFile(configPath string, profileName string, adoptedServerNames 
 		}
 	}
 
+	// Clean up any legacy, duplicate or alternate self-references (e.g. "faradaimcp")
+	// to ensure only one clean canonical "farad-ai-wire" bridge remains.
+	for name, val := range mcpServers {
+		if name == "farad-ai-wire" {
+			continue
+		}
+		if sMap, ok := val.(map[string]interface{}); ok {
+			cmd, _ := sMap["command"].(string)
+			url, _ := sMap["url"].(string)
+			var args []string
+			if aRaw, aOk := sMap["args"].([]interface{}); aOk {
+				for _, a := range aRaw {
+					if aStr, ok := a.(string); ok {
+						args = append(args, aStr)
+					}
+				}
+			}
+			if isSelfReference(name, cmd, args, url) {
+				delete(mcpServers, name)
+			}
+		}
+	}
+
 	// Inject FaradAiWire single connection
 	mcpServers["farad-ai-wire"] = map[string]interface{}{
 		"command": "faradaiwire",
@@ -161,9 +235,15 @@ func mutateConfigFile(configPath string, profileName string, adoptedServerNames 
 		return fmt.Errorf("marshal mutated config: %w", err)
 	}
 
+	// Preserve existing file permissions if present; fallback to 0600
+	perm := os.FileMode(0600)
+	if fi, err := os.Stat(configPath); err == nil {
+		perm = fi.Mode().Perm()
+	}
+
 	// Atomic write via temp file
 	tmpPath := configPath + ".faw_tmp"
-	if err := os.WriteFile(tmpPath, formatted, 0644); err != nil {
+	if err := os.WriteFile(tmpPath, formatted, perm); err != nil {
 		return fmt.Errorf("write temp config: %w", err)
 	}
 
@@ -182,8 +262,16 @@ func restoreConfigFile(configPath, backupPath string) error {
 		return fmt.Errorf("read backup '%s': %w", backupPath, err)
 	}
 
+	// Preserve existing file permissions if present; fallback to 0600
+	perm := os.FileMode(0600)
+	if fi, err := os.Stat(configPath); err == nil {
+		perm = fi.Mode().Perm()
+	} else if fi, err := os.Stat(backupPath); err == nil {
+		perm = fi.Mode().Perm()
+	}
+
 	tmpPath := configPath + ".faw_restore_tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := os.WriteFile(tmpPath, data, perm); err != nil {
 		return fmt.Errorf("write restore tmp file: %w", err)
 	}
 

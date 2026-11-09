@@ -3,6 +3,7 @@ package mcpconfig
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -93,9 +94,98 @@ func TestPersistAdoptedProtocols(t *testing.T) {
 		t.Fatalf("protocol file %s was not written properly: %v", expectedProto, err)
 	}
 
-	// Verify agent config exists
+	// Verify agent config exists and has 0600 permissions
 	expectedAgentCfg := filepath.Join(agentsDir, "claude-desktop", "current", "config.json")
 	if fi, err := os.Stat(expectedAgentCfg); err != nil || fi.Size() == 0 {
 		t.Fatalf("agent config file %s was not written properly: %v", expectedAgentCfg, err)
+	} else if fi.Mode().Perm() != 0600 {
+		t.Errorf("expected agent config to have 0600 permissions, got %v", fi.Mode().Perm())
+	}
+
+	// 2nd run: Adopt a second server and ensure protocols are merged, not overwritten
+	secondServer := []DiscoveredServer{
+		{
+			Name:       "github.com/upstash/context7-mcp",
+			Command:    "npx",
+			Args:       []string{"-y", "@upstash/context7-mcp"},
+			ClientName: "Claude Desktop",
+		},
+	}
+	if err := PersistAdoptedProtocols("claude-desktop", secondServer, nil, protoDir, agentsDir); err != nil {
+		t.Fatalf("second PersistAdoptedProtocols failed: %v", err)
+	}
+
+	// Verify both protocols exist in config.json
+	data, _ := os.ReadFile(expectedAgentCfg)
+	if !strings.Contains(string(data), "claude_desktop_filesystem") || !strings.Contains(string(data), "claude_desktop_github_com_upstash_context7_mcp") {
+		t.Errorf("expected both protocols merged in config.json, got:\n%s", string(data))
+	}
+}
+
+func TestSanitizeIdentifier(t *testing.T) {
+	tests := []struct {
+		profile  string
+		name     string
+		expected string
+	}{
+		{
+			profile:  "cline",
+			name:     "github.com/upstash/context7-mcp",
+			expected: "cline_github_com_upstash_context7_mcp",
+		},
+		{
+			profile:  "cursor",
+			name:     "../../../../etc/passwd",
+			expected: "cursor_etc_passwd",
+		},
+		{
+			profile:  "antigravity",
+			name:     "@modelcontextprotocol/server-postgres",
+			expected: "antigravity_modelcontextprotocol_server_postgres",
+		},
+	}
+
+	for _, tc := range tests {
+		got := sanitizeIdentifier(tc.profile, tc.name)
+		if got != tc.expected {
+			t.Errorf("sanitizeIdentifier(%q, %q) = %q; want %q", tc.profile, tc.name, got, tc.expected)
+		}
+	}
+}
+
+func TestBackupManager_PreservesPristineBackup(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backupDir := filepath.Join(tempDir, "backups")
+	bm, _ := NewBackupManager(backupDir)
+
+	cfgPath := filepath.Join(tempDir, "orig.json")
+	origContent := `{"original": true}`
+	_ = os.WriteFile(cfgPath, []byte(origContent), 0600)
+
+	// First backup
+	dest1, err := bm.CreateBackup(ClientCursor, cfgPath)
+	if err != nil {
+		t.Fatalf("first CreateBackup failed: %v", err)
+	}
+
+	// Mutate the original config file
+	mutatedContent := `{"mutated_by_faw": true}`
+	_ = os.WriteFile(cfgPath, []byte(mutatedContent), 0600)
+
+	// Second backup attempt should NOT overwrite the pristine backup
+	dest2, err := bm.CreateBackup(ClientCursor, cfgPath)
+	if err != nil {
+		t.Fatalf("second CreateBackup failed: %v", err)
+	}
+	if dest1 != dest2 {
+		t.Errorf("expected backup paths to match: %s vs %s", dest1, dest2)
+	}
+
+	// Backup file content must still be the original content
+	backupData, _ := os.ReadFile(dest1)
+	if string(backupData) != origContent {
+		t.Errorf("pristine backup was overwritten! got %s, want %s", string(backupData), origContent)
 	}
 }

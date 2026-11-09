@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -57,8 +58,36 @@ func (m *BackupManager) HasBackup(client ClientID) bool {
 	return err == nil && !fi.IsDir() && fi.Size() > 0
 }
 
+// sanitizeIdentifier converts a profile and server name into a safe, alphanumeric slug,
+// preventing path traversal and invalid filename characters (slashes, backslashes, colons, at-signs).
+func sanitizeIdentifier(profile, name string) string {
+	raw := fmt.Sprintf("%s_%s", profile, name)
+	var b strings.Builder
+	b.Grow(len(raw))
+	lastWasUnderscore := false
+	for _, r := range raw {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastWasUnderscore = false
+		} else if !lastWasUnderscore {
+			b.WriteRune('_')
+			lastWasUnderscore = true
+		}
+	}
+	res := strings.Trim(b.String(), "_")
+	if res == "" {
+		res = "mcp_tool"
+	}
+	return filepath.Base(res)
+}
+
 // CreateBackup copies the client's current configuration to the backup store with 0600 permissions.
+// If a pristine backup already exists, it is preserved without overwrite so rollback always restores original state.
 func (m *BackupManager) CreateBackup(client ClientID, configPath string) (string, error) {
+	if m.HasBackup(client) {
+		return m.BackupPath(client), nil
+	}
+
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return "", fmt.Errorf("read source config '%s': %w", configPath, err)
@@ -113,14 +142,14 @@ func PersistAdoptedProtocols(
 	attachedProtocols := make([]agent.ProtocolConfig, 0, len(servers))
 
 	for _, s := range servers {
-		protoID := fmt.Sprintf("%s_%s", profileName, s.Name)
-		protoID = strings.ReplaceAll(protoID, "-", "_")
+		protoID := sanitizeIdentifier(profileName, s.Name)
 
 		// Convert env map to slice
 		envSlice := make([]string, 0, len(s.Env))
 		for k, v := range s.Env {
 			envSlice = append(envSlice, k+"="+v)
 		}
+		sort.Strings(envSlice)
 
 		protoType := "stdio"
 		urlOrCmd := s.Command
@@ -148,14 +177,19 @@ func PersistAdoptedProtocols(
 				return fmt.Errorf("save protocol '%s' to store: %w", protoID, err)
 			}
 		} else {
-			// Direct file write fallback with 0600 permissions
+			// Direct file write fallback with 0600 permissions and atomic rename
 			pPath := filepath.Join(protocolsDir, fmt.Sprintf("%s.json", protoID))
 			pData, err := json.MarshalIndent(p, "", "  ")
 			if err != nil {
 				return fmt.Errorf("marshal protocol '%s': %w", protoID, err)
 			}
-			if err := os.WriteFile(pPath, pData, 0600); err != nil {
-				return fmt.Errorf("write protocol '%s': %w", pPath, err)
+			tmpPPath := pPath + ".tmp"
+			if err := os.WriteFile(tmpPPath, pData, 0600); err != nil {
+				return fmt.Errorf("write protocol temp '%s': %w", tmpPPath, err)
+			}
+			if err := os.Rename(tmpPPath, pPath); err != nil {
+				_ = os.Remove(tmpPPath)
+				return fmt.Errorf("commit protocol '%s': %w", pPath, err)
 			}
 		}
 
@@ -183,7 +217,6 @@ func PersistAdoptedProtocols(
 		AgentName:   profileName,
 		Description: fmt.Sprintf("Security Profile for %s", profileName),
 		RoutingMode: "aggregated",
-		Protocols:   attachedProtocols,
 		RateLimit: &agent.RateLimitOverride{
 			MaxBurst:   10,
 			RefillRate: 2.0,
@@ -194,13 +227,45 @@ func PersistAdoptedProtocols(
 		},
 	}
 
+	// Merge with existing configuration if present (preserves previously adopted protocols on repeated adopt)
+	protocolMap := make(map[string]agent.ProtocolConfig)
+	if existingData, err := os.ReadFile(cfgPath); err == nil && len(existingData) > 0 {
+		var existingCfg agent.RouteConfig
+		if err := json.Unmarshal(existingData, &existingCfg); err == nil {
+			routeCfg = existingCfg
+			for _, ep := range existingCfg.Protocols {
+				protocolMap[ep.ID] = ep
+			}
+		}
+	}
+
+	// Add/update with newly attached protocols
+	for _, ap := range attachedProtocols {
+		protocolMap[ap.ID] = ap
+	}
+
+	mergedProtocols := make([]agent.ProtocolConfig, 0, len(protocolMap))
+	for _, p := range protocolMap {
+		mergedProtocols = append(mergedProtocols, p)
+	}
+	sort.Slice(mergedProtocols, func(i, j int) bool {
+		return mergedProtocols[i].ID < mergedProtocols[j].ID
+	})
+	routeCfg.Protocols = mergedProtocols
+
 	cfgBytes, err := json.MarshalIndent(routeCfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal profile config: %w", err)
 	}
 
-	if err := os.WriteFile(cfgPath, cfgBytes, 0644); err != nil {
-		return fmt.Errorf("write profile config '%s': %w", cfgPath, err)
+	// Atomic write with 0600 permissions
+	tmpCfgPath := cfgPath + ".tmp"
+	if err := os.WriteFile(tmpCfgPath, cfgBytes, 0600); err != nil {
+		return fmt.Errorf("write profile config temp '%s': %w", tmpCfgPath, err)
+	}
+	if err := os.Rename(tmpCfgPath, cfgPath); err != nil {
+		_ = os.Remove(tmpCfgPath)
+		return fmt.Errorf("commit profile config '%s': %w", cfgPath, err)
 	}
 
 	return nil

@@ -70,10 +70,87 @@ func TestAdapters_ReadAndMutate(t *testing.T) {
 		t.Fatalf("failed to write windsurf fixture: %v", err)
 	}
 
+	// 4. Setup Google Antigravity fixture
+	antigravityPath := filepath.Join(tempDir, "antigravity_mcp.json")
+	antigravityContent := `{
+		"mcpServers": {
+			"codegraph": {
+				"command": "codegraph",
+				"args": ["serve", "--mcp"]
+			}
+		}
+	}`
+	if err := os.WriteFile(antigravityPath, []byte(antigravityContent), 0644); err != nil {
+		t.Fatalf("failed to write antigravity fixture: %v", err)
+	}
+
+	// 5. Setup Claude Code fixture
+	claudeCodePath := filepath.Join(tempDir, "claude_code.json")
+	claudeCodeContent := `{
+		"numApprovedRequests": 42,
+		"mcpServers": {
+			"memory": {
+				"command": "npx",
+				"args": ["-y", "@modelcontextprotocol/server-memory"]
+			}
+		}
+	}`
+	if err := os.WriteFile(claudeCodePath, []byte(claudeCodeContent), 0644); err != nil {
+		t.Fatalf("failed to write claude code fixture: %v", err)
+	}
+
+	// 6. Setup Cline fixture
+	clinePath := filepath.Join(tempDir, "cline_mcp_settings.json")
+	clineContent := `{
+		"mcpServers": {
+			"brave-search": {
+				"command": "npx",
+				"args": ["-y", "@modelcontextprotocol/server-brave-search"],
+				"env": {
+					"BRAVE_API_KEY": "brave_secret_key"
+				}
+			}
+		}
+	}`
+	if err := os.WriteFile(clinePath, []byte(clineContent), 0644); err != nil {
+		t.Fatalf("failed to write cline fixture: %v", err)
+	}
+
+	// 7. Setup Roo Code fixture
+	rooPath := filepath.Join(tempDir, "roo_mcp_settings.json")
+	rooContent := `{
+		"mcpServers": {
+			"slack": {
+				"command": "npx",
+				"args": ["-y", "@modelcontextprotocol/server-slack"],
+				"env": {
+					"SLACK_BOT_TOKEN": "xoxb-secret"
+				}
+			}
+		}
+	}`
+	if err := os.WriteFile(rooPath, []byte(rooContent), 0644); err != nil {
+		t.Fatalf("failed to write roo code fixture: %v", err)
+	}
+
+	pathMap := map[ClientID]string{
+		ClientClaudeDesktop: claudePath,
+		ClientCursor:        cursorPath,
+		ClientWindsurf:      windsurfPath,
+		ClientAntigravity:   antigravityPath,
+		ClientClaudeCode:    claudeCodePath,
+		ClientCline:         clinePath,
+		ClientRooCode:       rooPath,
+	}
+
 	adapters := []ClientAdapter{
 		NewClaudeDesktopAdapter(claudePath),
 		NewCursorAdapter(cursorPath),
 		NewWindsurfAdapter(windsurfPath),
+		NewAntigravityAdapter(antigravityPath),
+		NewClaudeCodeAdapter(claudeCodePath),
+		NewClineAdapter(clinePath),
+		NewRooCodeAdapter(rooPath),
 	}
 
 	for _, adapter := range adapters {
@@ -104,11 +181,9 @@ func TestAdapters_ReadAndMutate(t *testing.T) {
 
 			// Test backup and mutation
 			backupPath := filepath.Join(tempDir, string(adapter.ID())+".bak")
-			origBytes, err := os.ReadFile(claudePath)
-			if adapter.ID() == ClientCursor {
-				origBytes, _ = os.ReadFile(cursorPath)
-			} else if adapter.ID() == ClientWindsurf {
-				origBytes, _ = os.ReadFile(windsurfPath)
+			origBytes, err := os.ReadFile(pathMap[adapter.ID()])
+			if err != nil {
+				t.Fatalf("failed to read original fixture for %s: %v", adapter.ID(), err)
 			}
 			if err := os.WriteFile(backupPath, origBytes, 0600); err != nil {
 				t.Fatalf("failed to write backup: %v", err)

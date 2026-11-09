@@ -21,14 +21,19 @@ type adoptOptions struct {
 	agentsDir    string
 }
 
-// executeAdopt discovers MCP servers across Claude Desktop, Cursor, and Windsurf,
-// prompts the user for confirmation, imports them into FaradAiWire, backs up IDE configs,
-// and mutates client IDE configurations to route traffic through the FaradAiWire gateway.
+// executeAdopt discovers MCP servers across Antigravity, Claude Desktop, Cursor,
+// Windsurf, Claude Code, Cline, and Roo Code, prompts the user for confirmation,
+// imports them into FaradAiWire, backs up IDE configs, and mutates client configurations
+// to route traffic through the FaradAiWire gateway.
 func executeAdopt(opts adoptOptions, in io.Reader, out io.Writer) int {
 	adapters := []mcpconfig.ClientAdapter{
+		mcpconfig.NewAntigravityAdapter(),
 		mcpconfig.NewClaudeDesktopAdapter(),
 		mcpconfig.NewCursorAdapter(),
 		mcpconfig.NewWindsurfAdapter(),
+		mcpconfig.NewClaudeCodeAdapter(),
+		mcpconfig.NewClineAdapter(),
+		mcpconfig.NewRooCodeAdapter(),
 	}
 	return executeAdoptWithAdapters(opts, in, out, adapters)
 }
@@ -114,7 +119,7 @@ func executeAdoptWithAdapters(opts adoptOptions, in io.Reader, out io.Writer, ad
 	}
 
 	if totalServers == 0 {
-		fmt.Fprintln(out, "\nNo MCP servers detected across Claude Desktop, Cursor, or Windsurf.")
+		fmt.Fprintln(out, "\nNo MCP servers detected across supported AI clients.")
 		fmt.Fprintln(out, "To manually connect an agent, run: faradaiwire run")
 		return 0
 	}
@@ -206,11 +211,16 @@ func executeAdoptWithAdapters(opts adoptOptions, in io.Reader, out io.Writer, ad
 		// 3. Probe upstream tools and generate tools_manifest.json
 		ctx := context.Background()
 		fmt.Fprintf(out, "    ↳ Introspecting upstream tool schemas for %s...\n", c.adapter.DisplayName())
-		probeRes, _ := mcpconfig.ProbeAndCompileManifest(ctx, profileName, c.servers, opts.agentsDir, 4*time.Second)
+		probeRes, probeErr := mcpconfig.ProbeAndCompileManifest(ctx, profileName, c.servers, opts.agentsDir, 4*time.Second)
+		if probeErr != nil {
+			fmt.Fprintf(out, "    [!] Notice compiling manifest: %v\n", probeErr)
+		}
 		activeCount := 0
 		for _, pr := range probeRes {
 			if pr.Success {
 				activeCount += pr.ToolCount
+			} else if pr.Warning != "" {
+				fmt.Fprintf(out, "    [!] %s: %s\n", pr.ServerName, pr.Warning)
 			}
 		}
 		fmt.Fprintf(out, "[✓] Compiled tools manifest (%d active tools ready)\n", activeCount)

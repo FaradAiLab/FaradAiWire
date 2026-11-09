@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,169 +22,286 @@ import (
 
 const version = config.Version
 
-func main() {
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
+// isHelpArg returns true if the argument represents a standard help request.
+func isHelpArg(arg string) bool {
+	return arg == "-h" || arg == "--help" || arg == "-help" || arg == "help"
+}
+
+// parseAuditArgs extracts target path/URL and JSON flag independently of argument ordering.
+// It allocates zero heap memory on typical invocations (stack-evaluated comparisons).
+func parseAuditArgs(args []string) (target string, jsonOutput bool, showHelp bool, err error) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if isHelpArg(arg) {
+			return "", false, true, nil
+		}
+		if arg == "-json" || arg == "--json" {
+			jsonOutput = true
+		} else if strings.HasPrefix(arg, "-") {
+			return "", false, false, fmt.Errorf("unknown flag: %s", arg)
+		} else if target == "" {
+			target = arg
+		} else {
+			return "", false, false, fmt.Errorf("unexpected argument: %s", arg)
+		}
 	}
-	switch os.Args[1] {
+	return target, jsonOutput, false, nil
+}
+
+// parseGuardModelArgs extracts target model ID and optional config path independently of argument ordering.
+func parseGuardModelArgs(subcmd string, args []string) (modelID string, configPath string, showHelp bool, err error) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if isHelpArg(arg) {
+			return "", "", true, nil
+		}
+		if arg == "-config" || arg == "--config" {
+			if i+1 >= len(args) {
+				return "", "", false, fmt.Errorf("flag needs an argument: %s", arg)
+			}
+			i++
+			configPath = args[i]
+		} else if strings.HasPrefix(arg, "-config=") || strings.HasPrefix(arg, "--config=") {
+			parts := strings.SplitN(arg, "=", 2)
+			configPath = parts[1]
+		} else if strings.HasPrefix(arg, "-") {
+			return "", "", false, fmt.Errorf("unknown flag: %s", arg)
+		} else if modelID == "" {
+			modelID = arg
+		} else {
+			return "", "", false, fmt.Errorf("unexpected argument: %s", arg)
+		}
+	}
+	return modelID, configPath, false, nil
+}
+
+func main() {
+	code := runCLI(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+	if code != 0 {
+		os.Exit(code)
+	}
+}
+
+// runCLI parses arguments and dispatches commands. It accepts streams for full unit testability.
+func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printRootUsage(stderr)
+		return 1
+	}
+	if isHelpArg(args[0]) {
+		printRootUsage(stdout)
+		return 0
+	}
+
+	switch args[0] {
 	case "run":
-		fs := flag.NewFlagSet("run", flag.ExitOnError)
-		cfgPath := fs.String("config", "", "Path to YAML configuration file (autodiscovers from ./config.yaml or ~/.faradaiwire/config.yaml)")
-		standalone := fs.Bool("standalone", false, "Force offline-first standalone mode (zero-egress, no cloud auth)")
-		host := fs.String("host", "", "Host address to bind HTTP listeners to (default 127.0.0.1; use 0.0.0.0 for containers)")
-		port := fs.Int("port", 0, "Ingress port to listen on (default 8090)")
-		adminPort := fs.Int("admin-port", 0, "Admin console port to listen on (default 8095)")
-		fs.Parse(os.Args[2:])
+		if len(args) > 1 && isHelpArg(args[1]) {
+			printRunUsage(stdout)
+			return 0
+		}
+		fs := flag.NewFlagSet("run", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		fs.Usage = func() { printRunUsage(stderr) }
+		cfgPath := fs.String("config", "", "Path to YAML configuration file")
+		standalone := fs.Bool("standalone", false, "Force offline-first standalone mode")
+		host := fs.String("host", "", "Host address to bind HTTP listeners to")
+		port := fs.Int("port", 0, "Ingress port to listen on")
+		adminPort := fs.Int("admin-port", 0, "Admin console port to listen on")
+		if err := fs.Parse(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return 0
+			}
+			return 1
+		}
 		executeRun(*cfgPath, *standalone, *host, *port, *adminPort)
+		return 0
+
 	case "adopt":
-		fs := flag.NewFlagSet("adopt", flag.ExitOnError)
+		if len(args) > 1 && isHelpArg(args[1]) {
+			printAdoptUsage(stdout)
+			return 0
+		}
+		fs := flag.NewFlagSet("adopt", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		fs.Usage = func() { printAdoptUsage(stderr) }
 		rollback := fs.Bool("rollback", false, "Revert client configurations back to pristine pre-adoption backups")
 		dryRun := fs.Bool("dry-run", false, "Preview planned adoption changes without mutating files on disk")
 		yes := fs.Bool("yes", false, "Automatically accept all adoption prompts without interactive confirmation")
 		fs.BoolVar(yes, "y", false, "Alias for --yes")
-		backupDir := fs.String("backup-dir", "", "Custom directory to store client configuration backups (defaults to ~/.faradaiwire/backups)")
+		backupDir := fs.String("backup-dir", "", "Custom directory to store client configuration backups")
 		protocolsDir := fs.String("protocols-dir", "./protocols", "Directory to store imported Tool Sources")
 		agentsDir := fs.String("agents-dir", "./agents", "Directory to store client Security Profiles")
-		fs.Parse(os.Args[2:])
-		code := executeAdopt(adoptOptions{
+		if err := fs.Parse(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return 0
+			}
+			return 1
+		}
+		return executeAdopt(adoptOptions{
 			rollback:     *rollback,
 			dryRun:       *dryRun,
 			yes:          *yes,
 			backupDir:    *backupDir,
 			protocolsDir: *protocolsDir,
 			agentsDir:    *agentsDir,
-		}, os.Stdin, os.Stdout)
-		os.Exit(code)
+		}, stdin, stdout)
+
 	case "connect":
-		fs := flag.NewFlagSet("connect", flag.ExitOnError)
+		if len(args) > 1 && isHelpArg(args[1]) {
+			printConnectUsage(stdout)
+			return 0
+		}
+		fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		fs.Usage = func() { printConnectUsage(stderr) }
 		profile := fs.String("profile", "default", "Target Security Profile name to route traffic through")
 		host := fs.String("host", "127.0.0.1", "Gateway ingress host address")
 		port := fs.Int("port", 8090, "Gateway ingress port")
-		token := fs.String("token", "", "Optional API bearer token (autodiscovered from ~/.faradaiwire if omitted)")
+		token := fs.String("token", "", "Optional API bearer token")
 		noSpawn := fs.Bool("no-spawn", false, "Do not auto-spawn the background daemon if offline")
-		fs.Parse(os.Args[2:])
-		code := executeConnect(*profile, *host, *port, *token, *noSpawn, os.Stdin, os.Stdout)
-		os.Exit(code)
+		if err := fs.Parse(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return 0
+			}
+			return 1
+		}
+		return executeConnect(*profile, *host, *port, *token, *noSpawn, stdin, stdout)
+
 	case "doctor":
-		fs := flag.NewFlagSet("doctor", flag.ExitOnError)
-		cfgPath := fs.String("config", "", "Path to YAML configuration file (autodiscovers from ./config.yaml or ~/.faradaiwire/config.yaml)")
-		fs.Parse(os.Args[2:])
-		code := executeDoctor(*cfgPath, os.Stdout)
-		os.Exit(code)
+		if len(args) > 1 && isHelpArg(args[1]) {
+			printDoctorUsage(stdout)
+			return 0
+		}
+		fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		fs.Usage = func() { printDoctorUsage(stderr) }
+		cfgPath := fs.String("config", "", "Path to YAML configuration file")
+		if err := fs.Parse(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return 0
+			}
+			return 1
+		}
+		return executeDoctor(*cfgPath, stdout)
+
 	case "audit":
-		if len(os.Args) < 3 {
-			fmt.Println("Error: audit command requires a path or URL. Usage: faradaiwire audit <path|url> [--json]")
-			os.Exit(1)
+		target, jsonOutput, showHelp, err := parseAuditArgs(args[1:])
+		if showHelp {
+			printAuditUsage(stdout)
+			return 0
 		}
-		fs := flag.NewFlagSet("audit", flag.ExitOnError)
-		jsonOutput := fs.Bool("json", false, "Output scan report as structured JSON")
-		args := os.Args[2:]
-		var target string
-		var flagArgs []string
-		for i := 0; i < len(args); i++ {
-			if strings.HasPrefix(args[i], "-") {
-				flagArgs = append(flagArgs, args[i])
-			} else if target == "" {
-				target = args[i]
-			} else {
-				flagArgs = append(flagArgs, args[i])
-			}
+		if err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			printAuditUsage(stderr)
+			return 1
 		}
-		fs.Parse(flagArgs)
 		if target == "" {
-			fmt.Println("Error: audit command requires a path or URL. Usage: faradaiwire audit <path|url> [--json]")
-			os.Exit(1)
+			fmt.Fprintln(stderr, "Error: audit command requires a path or URL. Usage: faradaiwire audit <path|url> [--json]")
+			return 1
 		}
-		code := executeAudit(target, *jsonOutput, os.Stdout)
-		os.Exit(code)
+		return executeAudit(target, jsonOutput, stdout)
+
 	case "guard":
-		if len(os.Args) < 3 {
-			printGuardUsage()
-			os.Exit(1)
+		if len(args) < 2 {
+			printGuardUsageTo(stderr)
+			return 1
 		}
-		switch os.Args[2] {
+		if isHelpArg(args[1]) {
+			printGuardUsageTo(stdout)
+			return 0
+		}
+		switch args[1] {
 		case "list":
-			fs := flag.NewFlagSet("guard list", flag.ExitOnError)
-			cfgPath := fs.String("config", "", "Path to YAML configuration file (autodiscovers from ./config.yaml or ~/.faradaiwire/config.yaml)")
-			fs.Parse(os.Args[3:])
-			code := executeGuardList(*cfgPath, os.Stdout)
-			os.Exit(code)
+			if len(args) > 2 && isHelpArg(args[2]) {
+				printGuardListUsage(stdout)
+				return 0
+			}
+			fs := flag.NewFlagSet("guard list", flag.ContinueOnError)
+			fs.SetOutput(stderr)
+			fs.Usage = func() { printGuardListUsage(stderr) }
+			cfgPath := fs.String("config", "", "Path to YAML configuration file")
+			if err := fs.Parse(args[2:]); err != nil {
+				if errors.Is(err, flag.ErrHelp) {
+					return 0
+				}
+				return 1
+			}
+			return executeGuardList(*cfgPath, stdout)
+
 		case "status":
-			fs := flag.NewFlagSet("guard status", flag.ExitOnError)
-			cfgPath := fs.String("config", "", "Path to YAML configuration file (autodiscovers from ./config.yaml or ~/.faradaiwire/config.yaml)")
-			fs.Parse(os.Args[3:])
-			code := executeGuardStatus(*cfgPath, os.Stdout)
-			os.Exit(code)
+			if len(args) > 2 && isHelpArg(args[2]) {
+				printGuardStatusUsage(stdout)
+				return 0
+			}
+			fs := flag.NewFlagSet("guard status", flag.ContinueOnError)
+			fs.SetOutput(stderr)
+			fs.Usage = func() { printGuardStatusUsage(stderr) }
+			cfgPath := fs.String("config", "", "Path to YAML configuration file")
+			if err := fs.Parse(args[2:]); err != nil {
+				if errors.Is(err, flag.ErrHelp) {
+					return 0
+				}
+				return 1
+			}
+			return executeGuardStatus(*cfgPath, stdout)
+
 		case "install":
-			fs := flag.NewFlagSet("guard install", flag.ExitOnError)
-			cfgPath := fs.String("config", "", "Path to YAML configuration file (autodiscovers from ./config.yaml or ~/.faradaiwire/config.yaml)")
-			args := os.Args[3:]
-			var modelID string
-			var flagArgs []string
-			for i := 0; i < len(args); i++ {
-				if strings.HasPrefix(args[i], "-") {
-					flagArgs = append(flagArgs, args[i])
-					if (args[i] == "--config" || args[i] == "-config") && i+1 < len(args) {
-						i++
-						flagArgs = append(flagArgs, args[i])
-					}
-				} else if modelID == "" {
-					modelID = args[i]
-				} else {
-					flagArgs = append(flagArgs, args[i])
-				}
+			modelID, cfgPath, showHelp, err := parseGuardModelArgs("install", args[2:])
+			if showHelp {
+				printGuardInstallUsage(stdout)
+				return 0
 			}
-			fs.Parse(flagArgs)
+			if err != nil {
+				fmt.Fprintf(stderr, "Error: %v\n", err)
+				printGuardInstallUsage(stderr)
+				return 1
+			}
 			if modelID == "" {
-				fmt.Println("Error: install command requires a model ID. Usage: faradaiwire guard install <id> [--config <path>]")
-				os.Exit(1)
+				fmt.Fprintln(stderr, "Error: install command requires a model ID. Usage: faradaiwire guard install <id> [--config <path>]")
+				return 1
 			}
-			code := executeGuardInstall(*cfgPath, modelID, os.Stdout)
-			os.Exit(code)
+			return executeGuardInstall(cfgPath, modelID, stdout)
+
 		case "uninstall":
-			fs := flag.NewFlagSet("guard uninstall", flag.ExitOnError)
-			cfgPath := fs.String("config", "", "Path to YAML configuration file (autodiscovers from ./config.yaml or ~/.faradaiwire/config.yaml)")
-			args := os.Args[3:]
-			var modelID string
-			var flagArgs []string
-			for i := 0; i < len(args); i++ {
-				if strings.HasPrefix(args[i], "-") {
-					flagArgs = append(flagArgs, args[i])
-					if (args[i] == "--config" || args[i] == "-config") && i+1 < len(args) {
-						i++
-						flagArgs = append(flagArgs, args[i])
-					}
-				} else if modelID == "" {
-					modelID = args[i]
-				} else {
-					flagArgs = append(flagArgs, args[i])
-				}
+			modelID, cfgPath, showHelp, err := parseGuardModelArgs("uninstall", args[2:])
+			if showHelp {
+				printGuardUninstallUsage(stdout)
+				return 0
 			}
-			fs.Parse(flagArgs)
+			if err != nil {
+				fmt.Fprintf(stderr, "Error: %v\n", err)
+				printGuardUninstallUsage(stderr)
+				return 1
+			}
 			if modelID == "" {
-				fmt.Println("Error: uninstall command requires a model ID. Usage: faradaiwire guard uninstall <id> [--config <path>]")
-				os.Exit(1)
+				fmt.Fprintln(stderr, "Error: uninstall command requires a model ID. Usage: faradaiwire guard uninstall <id> [--config <path>]")
+				return 1
 			}
-			code := executeGuardUninstall(*cfgPath, modelID, os.Stdout)
-			os.Exit(code)
+			return executeGuardUninstall(cfgPath, modelID, stdout)
+
 		default:
-			fmt.Printf("Unknown guard subcommand: %s\n", os.Args[2])
-			printGuardUsage()
-			os.Exit(1)
+			fmt.Fprintf(stderr, "Unknown guard subcommand: %s\n\n", args[1])
+			printGuardUsageTo(stderr)
+			return 1
 		}
+
 	case "version":
-		fmt.Printf("FaradAiWire Security Gateway %s\n", version)
+		if len(args) > 1 && isHelpArg(args[1]) {
+			printVersionUsage(stdout)
+			return 0
+		}
+		fmt.Fprintf(stdout, "FaradAiWire Security Gateway %s\n", version)
+		return 0
+
 	default:
-		fmt.Printf("Unknown subcommand: %s\n", os.Args[1])
-		printUsage()
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Unknown subcommand: %s\n\n", args[0])
+		printRootUsage(stderr)
+		return 1
 	}
 }
 
 func printUsage() {
-	fmt.Printf("FaradAiWire - Zero-Trust AI Agent Security Gateway (%s)\n", version)
-	fmt.Println("Usage: faradaiwire run [--config <path>] [--standalone] [--host <host>] [--port <port>] [--admin-port <admin-port>] | adopt [--rollback] [--dry-run] [-y] | connect [--profile <name>] [--host <host>] [--port <port>] | doctor [--config <path>] | audit <path|url> [--json] | guard [list|status|install <id>|uninstall <id>] [--config <path>] | version")
+	printRootUsage(os.Stdout)
 }
 
 func executeRun(configPath string, standalone bool, host string, port int, adminPort int) {

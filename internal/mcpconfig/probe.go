@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,6 +56,7 @@ func ProbeAndCompileManifest(ctx context.Context, profileName string, servers []
 			for k, v := range s.Env {
 				envSlice = append(envSlice, k+"="+v)
 			}
+			sort.Strings(envSlice)
 
 			probeCtx, cancel := context.WithTimeout(ctx, timeoutPerServer)
 			rawTools, err := admin.ProbeAndDiscoverMCPToolsStdio(probeCtx, s.Command, s.Args, envSlice)
@@ -63,17 +64,13 @@ func ProbeAndCompileManifest(ctx context.Context, profileName string, servers []
 
 			if err != nil {
 				pr.Warning = fmt.Sprintf("Probe failed or timed out: %v (will auto-capture on first live execution)", err)
-				slog.Warn("Upstream MCP probe timed out or failed during adoption",
-					slog.String("server", s.Name),
-					slog.String("warning", pr.Warning),
-				)
 			} else {
 				pr.Success = true
 				pr.ToolCount = len(rawTools)
 				pr.Tools = rawTools
 
 				// Transform to agent.ToolMetadata format
-				protoSlug := s.Name
+				protoSlug := sanitizeIdentifier(profileName, s.Name)
 				for _, rt := range rawTools {
 					rawName, _ := rt["name"].(string)
 					desc, _ := rt["description"].(string)
@@ -108,17 +105,42 @@ func ProbeAndCompileManifest(ctx context.Context, profileName string, servers []
 	}
 
 	manifestPath := filepath.Join(targetDir, "tools_manifest.json")
-	if allTools == nil {
-		allTools = make([]agent.ToolMetadata, 0)
+
+	// Merge with existing tools_manifest.json if present
+	toolMap := make(map[string]agent.ToolMetadata)
+	if existingData, err := os.ReadFile(manifestPath); err == nil && len(existingData) > 0 {
+		var existingTools []agent.ToolMetadata
+		if err := json.Unmarshal(existingData, &existingTools); err == nil {
+			for _, t := range existingTools {
+				toolMap[t.Name] = t
+			}
+		}
 	}
 
-	manifestBytes, err := json.MarshalIndent(allTools, "", "  ")
+	for _, t := range allTools {
+		toolMap[t.Name] = t
+	}
+
+	mergedTools := make([]agent.ToolMetadata, 0, len(toolMap))
+	for _, t := range toolMap {
+		mergedTools = append(mergedTools, t)
+	}
+	sort.Slice(mergedTools, func(i, j int) bool {
+		return mergedTools[i].Name < mergedTools[j].Name
+	})
+
+	manifestBytes, err := json.MarshalIndent(mergedTools, "", "  ")
 	if err != nil {
 		return results, fmt.Errorf("marshal tools manifest: %w", err)
 	}
 
-	if err := os.WriteFile(manifestPath, manifestBytes, 0644); err != nil {
-		return results, fmt.Errorf("write tools manifest '%s': %w", manifestPath, err)
+	tmpManifestPath := manifestPath + ".tmp"
+	if err := os.WriteFile(tmpManifestPath, manifestBytes, 0600); err != nil {
+		return results, fmt.Errorf("write tools manifest temp '%s': %w", tmpManifestPath, err)
+	}
+	if err := os.Rename(tmpManifestPath, manifestPath); err != nil {
+		_ = os.Remove(tmpManifestPath)
+		return results, fmt.Errorf("commit tools manifest '%s': %w", manifestPath, err)
 	}
 
 	return results, nil

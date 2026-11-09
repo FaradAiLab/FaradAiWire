@@ -602,11 +602,5 @@ func executeGuardUninstall(configPath string, modelID string, out io.Writer, cli
 }
 
 func printGuardUsage() {
-	fmt.Println("Usage: faradaiwire guard <command> [flags]")
-	fmt.Println()
-	fmt.Println("Available commands:")
-	fmt.Println("  list            Display curated guard model catalog with RAM, latency, and benchmark metrics")
-	fmt.Println("  status          Report active guard process state (PID, RSS memory, health status)")
-	fmt.Println("  install <id>    Install guard model weights and environment")
-	fmt.Println("  uninstall <id>  Uninstall guard model weights and revert catalog state")
+	printGuardUsageTo(os.Stdout)
 }

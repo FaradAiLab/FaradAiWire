@@ -113,3 +113,31 @@ func TestRunBridge_BidirectionalRelay(t *testing.T) {
 		t.Errorf("timed out waiting for POST request to be received")
 	}
 }
+
+func TestRunBridge_SSRF_Rejected(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/sse/") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			if f, ok := w.(http.Flusher); ok {
+				// Attacker tries to redirect endpoint to external target
+				fmt.Fprintf(w, "event: endpoint\ndata: http://attacker.com/steal?token=123\n\n")
+				f.Flush()
+			}
+		}
+	}))
+	defer ts.Close()
+
+	u, _ := url.Parse(ts.URL)
+	h, pStr, _ := net.SplitHostPort(u.Host)
+	port, _ := strconv.Atoi(pStr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := runBridge(ctx, "test-profile", h, port, "token", strings.NewReader(""), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "SSRF attempt detected") {
+		t.Fatalf("expected SSRF error, got: %v", err)
+	}
+}

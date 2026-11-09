@@ -65,6 +65,177 @@ func TestCLI_UsageString(t *testing.T) {
 	}
 }
 
+func TestCLI_RunCLI_HelpAndDispatch(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantExit   int
+		wantOutput string
+		isStderr   bool
+	}{
+		{
+			name:       "empty args prints root usage",
+			args:       []string{},
+			wantExit:   1,
+			wantOutput: "Usage:",
+			isStderr:   true,
+		},
+		{
+			name:       "root --help prints root usage",
+			args:       []string{"--help"},
+			wantExit:   0,
+			wantOutput: "Usage:",
+			isStderr:   false,
+		},
+		{
+			name:       "root -h prints root usage",
+			args:       []string{"-h"},
+			wantExit:   0,
+			wantOutput: "Core Commands:",
+			isStderr:   false,
+		},
+		{
+			name:       "root help prints root usage",
+			args:       []string{"help"},
+			wantExit:   0,
+			wantOutput: "Security & Policy:",
+			isStderr:   false,
+		},
+		{
+			name:       "unknown subcommand prints error and root usage",
+			args:       []string{"unknown"},
+			wantExit:   1,
+			wantOutput: "Unknown subcommand: unknown",
+			isStderr:   true,
+		},
+		{
+			name:       "run --help prints run usage",
+			args:       []string{"run", "--help"},
+			wantExit:   0,
+			wantOutput: "Usage:\n  faradaiwire run [flags]",
+			isStderr:   false,
+		},
+		{
+			name:       "adopt --help prints adopt usage",
+			args:       []string{"adopt", "--help"},
+			wantExit:   0,
+			wantOutput: "Usage:\n  faradaiwire adopt [flags]",
+			isStderr:   false,
+		},
+		{
+			name:       "connect --help prints connect usage",
+			args:       []string{"connect", "--help"},
+			wantExit:   0,
+			wantOutput: "Usage:\n  faradaiwire connect [flags]",
+			isStderr:   false,
+		},
+		{
+			name:       "doctor --help prints doctor usage",
+			args:       []string{"doctor", "--help"},
+			wantExit:   0,
+			wantOutput: "Usage:\n  faradaiwire doctor [flags]",
+			isStderr:   false,
+		},
+		{
+			name:       "audit --help prints audit usage",
+			args:       []string{"audit", "--help"},
+			wantExit:   0,
+			wantOutput: "Usage:\n  faradaiwire audit <path|url> [flags]",
+			isStderr:   false,
+		},
+		{
+			name:       "audit missing target prints error",
+			args:       []string{"audit"},
+			wantExit:   1,
+			wantOutput: "Error: audit command requires a path or URL",
+			isStderr:   true,
+		},
+		{
+			name:       "guard missing subcommand prints guard usage",
+			args:       []string{"guard"},
+			wantExit:   1,
+			wantOutput: "Usage:\n  faradaiwire guard <command>",
+			isStderr:   true,
+		},
+		{
+			name:       "guard --help prints guard usage",
+			args:       []string{"guard", "--help"},
+			wantExit:   0,
+			wantOutput: "Available Commands:",
+			isStderr:   false,
+		},
+		{
+			name:       "guard install --help prints install usage",
+			args:       []string{"guard", "install", "--help"},
+			wantExit:   0,
+			wantOutput: "Usage:\n  faradaiwire guard install <id> [flags]",
+			isStderr:   false,
+		},
+		{
+			name:       "guard install missing id prints error",
+			args:       []string{"guard", "install"},
+			wantExit:   1,
+			wantOutput: "Error: install command requires a model ID",
+			isStderr:   true,
+		},
+		{
+			name:       "guard uninstall --help prints uninstall usage",
+			args:       []string{"guard", "uninstall", "--help"},
+			wantExit:   0,
+			wantOutput: "Usage:\n  faradaiwire guard uninstall <id> [flags]",
+			isStderr:   false,
+		},
+		{
+			name:       "guard uninstall missing id prints error",
+			args:       []string{"guard", "uninstall"},
+			wantExit:   1,
+			wantOutput: "Error: uninstall command requires a model ID",
+			isStderr:   true,
+		},
+		{
+			name:       "guard unknown prints error and usage",
+			args:       []string{"guard", "unknown"},
+			wantExit:   1,
+			wantOutput: "Unknown guard subcommand: unknown",
+			isStderr:   true,
+		},
+		{
+			name:       "version prints version",
+			args:       []string{"version"},
+			wantExit:   0,
+			wantOutput: "FaradAiWire Security Gateway",
+			isStderr:   false,
+		},
+		{
+			name:       "version --help prints version usage",
+			args:       []string{"version", "--help"},
+			wantExit:   0,
+			wantOutput: "Usage:\n  faradaiwire version [flags]",
+			isStderr:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr strings.Builder
+			code := runCLI(tc.args, nil, &stdout, &stderr)
+			if code != tc.wantExit {
+				t.Errorf("runCLI(%v) exit = %d, want %d", tc.args, code, tc.wantExit)
+			}
+			var out string
+			if tc.isStderr {
+				out = stderr.String()
+			} else {
+				out = stdout.String()
+			}
+			if !strings.Contains(out, tc.wantOutput) {
+				t.Errorf("runCLI(%v) output missing %q, got: %q", tc.args, tc.wantOutput, out)
+			}
+		})
+	}
+}
+
 func TestCLI_DoctorCommand(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("FARADAI_WIRE_HOME", tempHome)

@@ -44,7 +44,7 @@ func executeConnect(profile string, host string, port int, token string, noSpawn
 			return 1
 		}
 
-		if err := spawnDetachedDaemon(host, port); err != nil {
+		if err := spawnDetachedDaemon(ctx, host, port); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: Failed to auto-spawn FaradAiWire daemon: %v\n", err)
 			return 1
 		}
@@ -71,10 +71,11 @@ func isDaemonHealthy(host string, port int) bool {
 		return false
 	}
 	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
 	return resp.StatusCode == http.StatusOK
 }
 
-func spawnDetachedDaemon(host string, port int) error {
+func spawnDetachedDaemon(ctx context.Context, host string, port int) error {
 	binPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve executable path: %w", err)
@@ -89,7 +90,8 @@ func spawnDetachedDaemon(host string, port int) error {
 	}
 
 	logFilePath := filepath.Join(logsDir, "daemon.log")
-	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	// Enforce 0600 permissions to protect daemon log files containing connection info
+	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return fmt.Errorf("open daemon log file '%s': %w", logFilePath, err)
 	}
@@ -114,12 +116,19 @@ func spawnDetachedDaemon(host string, port int) error {
 	_ = logFile.Close()
 	_ = cmd.Process.Release()
 
-	// Poll healthcheck up to 3000ms with 100ms intervals
+	// Poll healthcheck up to 3000ms with 100ms intervals respecting context cancellation
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 	deadline := time.Now().Add(3 * time.Second)
+
 	for time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-		if isDaemonHealthy(host, port) {
-			return nil
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if isDaemonHealthy(host, port) {
+				return nil
+			}
 		}
 	}
 
@@ -150,8 +159,11 @@ func runBridge(ctx context.Context, profile, host string, port int, token string
 		out = os.Stdout
 	}
 
-	sseURL := fmt.Sprintf("http://%s:%d/sse/%s", host, port, profile)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sseURL, nil)
+	bridgeCtx, bridgeCancel := context.WithCancel(ctx)
+	defer bridgeCancel()
+
+	sseURL := fmt.Sprintf("http://%s:%d/sse/%s", host, port, url.PathEscape(profile))
+	req, err := http.NewRequestWithContext(bridgeCtx, http.MethodGet, sseURL, nil)
 	if err != nil {
 		return fmt.Errorf("create SSE request: %w", err)
 	}
@@ -162,8 +174,8 @@ func runBridge(ctx context.Context, profile, host string, port int, token string
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	client := &http.Client{Timeout: 0}
-	resp, err := client.Do(req)
+	sseClient := &http.Client{Timeout: 0}
+	resp, err := sseClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("connect to gateway SSE: %w", err)
 	}
@@ -172,6 +184,12 @@ func runBridge(ctx context.Context, profile, host string, port int, token string
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("gateway returned HTTP %d on %s", resp.StatusCode, sseURL)
 	}
+
+	// Guarantee that closing the response unblocks any blocking read when bridgeCtx cancels
+	go func() {
+		<-bridgeCtx.Done()
+		_ = resp.Body.Close()
+	}()
 
 	reader := bufio.NewReader(resp.Body)
 	endpointCh := make(chan string, 1)
@@ -183,8 +201,13 @@ func runBridge(ctx context.Context, profile, host string, port int, token string
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
-				errCh <- err
-				return
+				select {
+				case <-bridgeCtx.Done():
+					return
+				default:
+					errCh <- err
+					return
+				}
 			}
 
 			trimmed := strings.TrimRight(line, "\r\n")
@@ -212,8 +235,8 @@ func runBridge(ctx context.Context, profile, host string, port int, token string
 	// Wait for the "event: endpoint" handshake
 	var postURLStr string
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-bridgeCtx.Done():
+		return bridgeCtx.Err()
 	case err := <-errCh:
 		return fmt.Errorf("error reading initial SSE handshake: %w", err)
 	case endpoint := <-endpointCh:
@@ -222,13 +245,30 @@ func runBridge(ctx context.Context, profile, host string, port int, token string
 		if err != nil {
 			return fmt.Errorf("invalid endpoint URL '%s': %w", endpoint, err)
 		}
-		postURLStr = base.ResolveReference(rel).String()
+		resolved := base.ResolveReference(rel)
+		// Security: Prevent SSRF / token exfiltration by strictly validating host and scheme
+		if resolved.Host != base.Host || resolved.Scheme != base.Scheme {
+			return fmt.Errorf("SSRF attempt detected: endpoint host '%s' must match gateway host '%s'", resolved.Host, base.Host)
+		}
+		postURLStr = resolved.String()
 	case <-time.After(5 * time.Second):
 		return errors.New("timed out waiting for SSE 'event: endpoint'")
 	}
 
+	// Setup dedicated connection-pooled HTTP client with 30s timeout for POST requests
+	postTransport := &http.Transport{
+		MaxIdleConnsPerHost: 16,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	postClient := &http.Client{
+		Transport: postTransport,
+		Timeout:   30 * time.Second,
+	}
+
 	// Goroutine 2: Read host stdin line by line and POST to postURL
 	stdinScanner := bufio.NewScanner(in)
+	// Support up to 10MB token size for large MCP write_file/schema payloads
+	stdinScanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	stdinDone := make(chan struct{})
 
 	go func() {
@@ -240,7 +280,7 @@ func runBridge(ctx context.Context, profile, host string, port int, token string
 			}
 
 			// Forward JSON-RPC call to gateway
-			pReq, pErr := http.NewRequestWithContext(ctx, http.MethodPost, postURLStr, bytes.NewReader(line))
+			pReq, pErr := http.NewRequestWithContext(bridgeCtx, http.MethodPost, postURLStr, bytes.NewReader(line))
 			if pErr != nil {
 				continue
 			}
@@ -249,19 +289,25 @@ func runBridge(ctx context.Context, profile, host string, port int, token string
 				pReq.Header.Set("Authorization", "Bearer "+token)
 			}
 
-			pResp, pErr := client.Do(pReq)
+			pResp, pErr := postClient.Do(pReq)
 			if pErr == nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(pResp.Body, 4096))
 				_ = pResp.Body.Close()
 			}
 		}
 		if scanErr := stdinScanner.Err(); scanErr != nil {
-			errCh <- scanErr
+			select {
+			case <-bridgeCtx.Done():
+				return
+			default:
+				errCh <- scanErr
+			}
 		}
 	}()
 
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-bridgeCtx.Done():
+		return bridgeCtx.Err()
 	case <-stdinDone:
 		return nil
 	case err := <-errCh:
