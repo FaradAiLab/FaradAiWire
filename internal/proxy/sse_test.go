@@ -20,6 +20,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
+	"github.com/FaradAiLab/FaradAiWire/internal/session"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
@@ -222,7 +223,6 @@ func TestSSEProxy_AgentScopingAndImplicitRouting(t *testing.T) {
 	}
 }
 
-
 func TestSSEProxy_POST_Delegation_And_SimulationHeaders(t *testing.T) {
 	// Setup filter with a rule that allows Developer but blocks guest/Customer
 	authFilter := &testRoleAuthFilter{allowedRole: "Developer"}
@@ -257,12 +257,12 @@ func TestSSEProxy_POST_Delegation_And_SimulationHeaders(t *testing.T) {
 	proxy.Handler().ServeHTTP(wBlocked, reqBlocked)
 
 	var errResp struct {
-		JSONRPC string 
-		ID      string 
+		JSONRPC string
+		ID      string
 		Error   struct {
-			Code    int    
-			Message string 
-		} 
+			Code    int
+			Message string
+		}
 	}
 	if err := json.Unmarshal(wBlocked.Body.Bytes(), &errResp); err != nil {
 		t.Fatalf("failed to parse JSON-RPC error response: %v", err)
@@ -284,9 +284,9 @@ func TestSSEProxy_POST_Delegation_And_SimulationHeaders(t *testing.T) {
 		t.Errorf("expected HTTP 200 OK for allowed simulation, got %d: %s", wAllowed.Code, wAllowed.Body.String())
 	}
 	var okResp struct {
-		JSONRPC string      
-		ID      string      
-		Result  interface{} 
+		JSONRPC string
+		ID      string
+		Result  interface{}
 	}
 	if err := json.Unmarshal(wAllowed.Body.Bytes(), &okResp); err != nil {
 		t.Fatalf("failed to parse JSON-RPC success response: %v", err)
@@ -789,7 +789,7 @@ func TestSSEProxy_HealthEndpoint(t *testing.T) {
 		t.Errorf("expected non-empty version")
 	}
 
-	// 2. POST /health -> 405 Method Not Allowed
+	// 2. POST /health -> 405 Method Not Allowed with Allow header
 	reqPost := httptest.NewRequest(http.MethodPost, "/health", nil)
 	recPost := httptest.NewRecorder()
 	handler.ServeHTTP(recPost, reqPost)
@@ -797,8 +797,222 @@ func TestSSEProxy_HealthEndpoint(t *testing.T) {
 	if recPost.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected HTTP 405 for POST /health, got %d", recPost.Code)
 	}
+	if allow := recPost.Header().Get("Allow"); allow != "GET, HEAD" {
+		t.Errorf("expected Allow: GET, HEAD on POST /health, got %q", allow)
+	}
 }
 
+func TestSSEProxy_NewWithCoordinatorPreservesForwarderHTTPClient(t *testing.T) {
+	calledCustomTransport := false
+	customClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calledCustomTransport = true
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":1,"result":{}}`)),
+			}, nil
+		}),
+	}
+	cStore := NewMemoryCorrelationStore()
+	fwd := session.NewForwarder(customClient, nil, cStore)
+	coord := session.NewInboundCoordinator(nil, nil, nil, nil, nil, cStore, fwd, "http://upstream.example/sse")
 
+	p := NewSSEProxyWithCoordinator(0, "http://upstream.example/sse", coord, config.UserContextConfig{})
+	if p.httpClient != nil {
+		t.Fatalf("expected p.httpClient to remain nil when custom coordinator is injected")
+	}
 
+	req := httptest.NewRequest(http.MethodPost, "/message", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rec, req)
 
+	if !calledCustomTransport {
+		t.Fatalf("expected injected coordinator HTTP client transport to be preserved and invoked")
+	}
+}
+
+func TestSSEProxy_MethodValidationAndHEAD(t *testing.T) {
+	agentDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(agentDir, "agg-head", "current"), 0755)
+	cfg := agent.RouteConfig{
+		AgentName:   "agg-head",
+		RoutingMode: "aggregated",
+		Protocols:   []agent.ProtocolConfig{},
+	}
+	cfgData, _ := json.Marshal(cfg)
+	_ = os.WriteFile(filepath.Join(agentDir, "agg-head", "current", "config.json"), cfgData, 0644)
+
+	repo := agent.NewFSRepository(agentDir, "")
+	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil, config.UserContextConfig{})
+	h := p.Handler()
+
+	// PUT /sse -> 405 Method Not Allowed with Allow header
+	reqPut := httptest.NewRequest(http.MethodPut, "/sse", nil)
+	recPut := httptest.NewRecorder()
+	h.ServeHTTP(recPut, reqPut)
+	if recPut.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for PUT /sse, got %d", recPut.Code)
+	}
+	if allow := recPut.Header().Get("Allow"); allow != "GET, HEAD, POST" {
+		t.Errorf("expected Allow: GET, HEAD, POST on PUT /sse, got %q", allow)
+	}
+
+	// DELETE /message -> 405 Method Not Allowed with Allow header
+	reqDel := httptest.NewRequest(http.MethodDelete, "/message", nil)
+	recDel := httptest.NewRecorder()
+	h.ServeHTTP(recDel, reqDel)
+	if recDel.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for DELETE /message, got %d", recDel.Code)
+	}
+	if allow := recDel.Header().Get("Allow"); allow != "POST" {
+		t.Errorf("expected Allow: POST on DELETE /message, got %q", allow)
+	}
+
+	// HEAD /sse/agg-head -> 200 OK immediately without streaming
+	done := make(chan int, 1)
+	go func() {
+		reqHead := httptest.NewRequest(http.MethodHead, "/sse/agg-head", nil)
+		recHead := httptest.NewRecorder()
+		h.ServeHTTP(recHead, reqHead)
+		done <- recHead.Code
+	}()
+	select {
+	case code := <-done:
+		if code != http.StatusOK {
+			t.Fatalf("expected 200 for HEAD /sse/agg-head, got %d", code)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("HEAD /sse/agg-head blocked instead of returning headers")
+	}
+}
+
+func TestSSEProxy_RejectsCRLFInjectionInSessionOrAgent(t *testing.T) {
+	agentDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(agentDir, "agg-safe", "current"), 0755)
+	cfg := agent.RouteConfig{
+		AgentName:   "agg-safe",
+		RoutingMode: "aggregated",
+		Protocols:   []agent.ProtocolConfig{},
+	}
+	cfgData, _ := json.Marshal(cfg)
+	_ = os.WriteFile(filepath.Join(agentDir, "agg-safe", "current", "config.json"), cfgData, 0644)
+
+	repo := agent.NewFSRepository(agentDir, "")
+	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil, config.UserContextConfig{})
+	h := p.Handler()
+
+	// 1. CRLF in query sessionId on GET /sse
+	reqSSE := httptest.NewRequest(http.MethodGet, "/sse/agg-safe?sessionId=abc%0aevent:%20evil", nil)
+	recSSE := httptest.NewRecorder()
+	h.ServeHTTP(recSSE, reqSSE)
+	if recSSE.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for CRLF sessionId on GET /sse, got %d", recSSE.Code)
+	}
+
+	// 2. CRLF in Mcp-Session-Id header on POST /mcp
+	reqMsg := httptest.NewRequest(http.MethodPost, "/mcp?profile=agg-safe", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	reqMsg.Header.Set("Content-Type", "application/json")
+	reqMsg.Header.Set("Mcp-Session-Id", "sess\r\nevil")
+	recMsg := httptest.NewRecorder()
+	h.ServeHTTP(recMsg, reqMsg)
+	if recMsg.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for CRLF Mcp-Session-Id on POST /mcp, got %d", recMsg.Code)
+	}
+}
+
+func TestSSEProxy_HandleMessageBridgeSurvivesRequestCompletion(t *testing.T) {
+	agentDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(agentDir, "agg-persist", "current"), 0755)
+	cfg := agent.RouteConfig{
+		AgentName:   "agg-persist",
+		RoutingMode: "aggregated",
+		Protocols:   []agent.ProtocolConfig{},
+	}
+	cfgData, _ := json.Marshal(cfg)
+	_ = os.WriteFile(filepath.Join(agentDir, "agg-persist", "current", "config.json"), cfgData, 0644)
+
+	repo := agent.NewFSRepository(agentDir, "")
+	mgr := session.NewManager(repo, nil)
+	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, mgr, config.UserContextConfig{})
+	defer func() { _ = p.Shutdown(context.Background()) }()
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/message?profile=agg-persist", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)).WithContext(reqCtx)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Mcp-Session-Id", "persist-sess-1")
+	rec := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rec, req)
+
+	// Simulate HTTP POST request completion canceling r.Context()
+	cancelReq()
+
+	bridge, ok := mgr.GetBridge("persist-sess-1")
+	if !ok || bridge == nil {
+		t.Fatalf("expected bridge persist-sess-1 to be created")
+	}
+	if bridge.BridgeCtx.Err() != nil {
+		t.Fatalf("expected bridge context to outlive POST request context, got %v", bridge.BridgeCtx.Err())
+	}
+
+	// Shutting down proxy cancels lifecycleCtx and tears down detached bridges
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatalf("unexpected Shutdown error: %v", err)
+	}
+	if bridge.BridgeCtx.Err() == nil {
+		t.Fatalf("expected bridge context to cancel on SSEProxy.Shutdown")
+	}
+}
+
+func TestSSEProxy_DirectMode_EnforcesScopedAPIKey(t *testing.T) {
+	tempAgents := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tempAgents, "alice", "current"), 0755)
+	_ = os.WriteFile(filepath.Join(tempAgents, "alice", "current", "config.json"), []byte(`{"agent_name":"alice","routing_mode":"direct","protocols":[{"id":"github","name":"github","type":"http","url_or_command":"http://127.0.0.1:9999/mcp"}]}`), 0600)
+
+	repo := agent.NewFSRepository(tempAgents, "")
+	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil, config.UserContextConfig{})
+
+	req := httptest.NewRequest(http.MethodGet, "/sse/alice/github", nil)
+	req = req.WithContext(context.WithValue(req.Context(), filter.UserContextKey, &filter.UserContext{
+		UserID:    "dev",
+		Role:      "Developer",
+		AgentName: "bob",
+	}))
+	if _, _, err := p.checkAggregatedAgent(req); err == nil || !strings.Contains(err.Error(), "AGENT_ACCESS_DENIED") {
+		t.Fatalf("expected AGENT_ACCESS_DENIED on direct mode path with bob-scoped key, got %v", err)
+	}
+}
+
+func TestSSEProxy_HandleMessage_RejectsPathAndHeaderOrQueryMismatch(t *testing.T) {
+	tempAgents := t.TempDir()
+	for _, name := range []string{"alpha", "beta"} {
+		_ = os.MkdirAll(filepath.Join(tempAgents, name, "current"), 0755)
+		cfg := `{"agent_name":"` + name + `","routing_mode":"direct","protocols":[{"id":"github","name":"github","type":"http","url_or_command":"http://127.0.0.1:9999/mcp"}]}`
+		_ = os.WriteFile(filepath.Join(tempAgents, name, "current", "config.json"), []byte(cfg), 0600)
+	}
+
+	repo := agent.NewFSRepository(tempAgents, "")
+	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil, config.UserContextConfig{})
+	h := p.Handler()
+
+	// 1. Conflicting X-FaradAiWire-Profile header vs URL path agent
+	reqHdr := httptest.NewRequest(http.MethodPost, "/sse/beta/github/message", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	reqHdr.Header.Set("Content-Type", "application/json")
+	reqHdr.Header.Set("X-FaradAiWire-Profile", "alpha")
+	recHdr := httptest.NewRecorder()
+	h.ServeHTTP(recHdr, reqHdr)
+	if recHdr.Code != http.StatusForbidden || !strings.Contains(recHdr.Body.String(), "AGENT_ACCESS_DENIED") {
+		t.Fatalf("expected 403 AGENT_ACCESS_DENIED for conflicting X-FaradAiWire-Profile header, got %d: %s", recHdr.Code, recHdr.Body.String())
+	}
+
+	// 2. Conflicting ?profile= query param vs URL path agent
+	reqQ := httptest.NewRequest(http.MethodPost, "/sse/beta/github/message?profile=alpha", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
+	reqQ.Header.Set("Content-Type", "application/json")
+	recQ := httptest.NewRecorder()
+	h.ServeHTTP(recQ, reqQ)
+	if recQ.Code != http.StatusForbidden || !strings.Contains(recQ.Body.String(), "AGENT_ACCESS_DENIED") {
+		t.Fatalf("expected 403 AGENT_ACCESS_DENIED for conflicting ?profile query param, got %d: %s", recQ.Code, recQ.Body.String())
+	}
+}

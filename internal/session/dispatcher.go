@@ -278,4 +278,3 @@ func rewriteToolCallRequest(req *mcp.Request, rawToolName string) *mcp.Request {
 	cloned.Params = newParams
 	return &cloned
 }
-

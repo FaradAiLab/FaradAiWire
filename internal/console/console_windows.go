@@ -3,11 +3,10 @@
 package console
 
 import (
-	"bufio"
 	"context"
 	"io"
 	"os"
-	"strings"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -73,7 +72,7 @@ func (c *windowsConsole) Close() error {
 		_ = windows.CancelIoEx(windows.Handle(c.in.Fd()), nil)
 		firstErr = c.in.Close()
 	}
-	if c.out != nil {
+	if c.out != nil && c.out != any(c.in) {
 		if err := c.out.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -84,17 +83,24 @@ func (c *windowsConsole) Close() error {
 // ReadLine awaits a single line from CONIN$ and aborts pending synchronous I/O via CancelIoEx
 // when ctx is canceled so the reader goroutine always exits cleanly.
 func (c *windowsConsole) ReadLine(ctx context.Context) (string, error) {
+	if c == nil || c.in == nil {
+		return "", os.ErrInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	type readResult struct {
 		line string
 		err  error
 	}
 
+	handle := windows.Handle(c.in.Fd())
 	resCh := make(chan readResult, 1)
 	go func() {
-		reader := bufio.NewReader(c.in)
-		text, err := reader.ReadString('\n')
+		line, err := readBoundedLine(c.in)
 		resCh <- readResult{
-			line: strings.TrimRight(text, "\r\n"),
+			line: line,
 			err:  err,
 		}
 	}()
@@ -103,8 +109,15 @@ func (c *windowsConsole) ReadLine(ctx context.Context) (string, error) {
 	case res := <-resCh:
 		return res.line, res.err
 	case <-ctx.Done():
-		_ = windows.CancelIoEx(windows.Handle(c.in.Fd()), nil)
-		<-resCh
-		return "", ctx.Err()
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			_ = windows.CancelIoEx(handle, nil)
+			select {
+			case <-resCh:
+				return "", ctx.Err()
+			case <-ticker.C:
+			}
+		}
 	}
 }

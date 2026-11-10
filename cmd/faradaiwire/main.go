@@ -32,8 +32,13 @@ func isHelpArg(arg string) bool {
 func parseAuditArgs(args []string) (target string, jsonOutput bool, showHelp bool, err error) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if isHelpArg(arg) {
+		if arg == "-h" || arg == "--help" || arg == "-help" {
 			return "", false, true, nil
+		}
+		if arg == "help" && i == 0 && !jsonOutput {
+			if _, statErr := os.Stat(arg); statErr != nil {
+				return "", false, true, nil
+			}
 		}
 		if arg == "-json" || arg == "--json" {
 			jsonOutput = true
@@ -124,13 +129,18 @@ func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fs := flag.NewFlagSet("adopt", flag.ContinueOnError)
 		fs.SetOutput(stderr)
 		fs.Usage = func() { printAdoptUsage(stderr) }
+		defaultDataDir := config.DefaultFaradAiWireDir()
+		cfgPath := fs.String("config", "", "Path to YAML configuration file")
 		rollback := fs.Bool("rollback", false, "Revert client configurations back to pristine pre-adoption backups")
 		dryRun := fs.Bool("dry-run", false, "Preview planned adoption changes without mutating files on disk")
 		yes := fs.Bool("yes", false, "Automatically accept all adoption prompts without interactive confirmation")
 		fs.BoolVar(yes, "y", false, "Alias for --yes")
+		workspace := fs.Bool("workspace", false, "Also scan workspace-local ./.cursor/mcp.json (confirm untrusted workspace commands carefully)")
+		servers := fs.String("servers", "", "Comma-separated list of MCP server names to adopt (default: all discovered)")
+		probeTimeout := fs.Duration("probe-timeout", 0, "Override per-server MCP tool discovery probe timeout (e.g. 10s)")
 		backupDir := fs.String("backup-dir", "", "Custom directory to store client configuration backups")
-		protocolsDir := fs.String("protocols-dir", "./protocols", "Directory to store imported Tool Sources")
-		agentsDir := fs.String("agents-dir", "./agents", "Directory to store client Security Profiles")
+		protocolsDir := fs.String("protocols-dir", filepath.Join(defaultDataDir, "protocols"), "Directory to store imported Tool Sources")
+		agentsDir := fs.String("agents-dir", filepath.Join(defaultDataDir, "agents"), "Directory to store client Security Profiles")
 		if err := fs.Parse(args[1:]); err != nil {
 			if errors.Is(err, flag.ErrHelp) {
 				return 0
@@ -138,9 +148,13 @@ func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return executeAdopt(adoptOptions{
+			configPath:   *cfgPath,
 			rollback:     *rollback,
 			dryRun:       *dryRun,
 			yes:          *yes,
+			workspace:    *workspace,
+			servers:      *servers,
+			probeTimeout: *probeTimeout,
 			backupDir:    *backupDir,
 			protocolsDir: *protocolsDir,
 			agentsDir:    *agentsDir,
@@ -305,12 +319,18 @@ func printUsage() {
 }
 
 func executeRun(configPath string, standalone bool, host string, port int, adminPort int) {
+	if code := runGatewayDaemon(configPath, standalone, host, port, adminPort); code != 0 {
+		os.Exit(code)
+	}
+}
+
+func runGatewayDaemon(configPath string, standalone bool, host string, port int, adminPort int) int {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	provider := config.NewYAMLConfigProvider(configPath)
 	cfg, err := provider.Load()
 	if err != nil {
 		slog.Error("Configuration load failed", slog.String("error", err.Error()))
-		os.Exit(1)
+		return 1
 	}
 
 	// Apply CLI overrides
@@ -350,7 +370,7 @@ func executeRun(configPath string, standalone bool, host string, port int, admin
 	if err := guard.Acquire(); err != nil {
 		slog.Error("Startup aborted: single-instance lock acquisition failed", slog.String("error", err.Error()))
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer func() {
 		if err := guard.Release(); err != nil {
@@ -361,10 +381,11 @@ func executeRun(configPath string, standalone bool, host string, port int, admin
 	server, err := gateway.NewServer(cfg, provider)
 	if err != nil {
 		slog.Error("Server initialization failed", slog.String("error", err.Error()))
-		os.Exit(1)
+		return 1
 	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
 	serverCtx, serverCancel := context.WithCancel(context.Background())
 	defer serverCancel()
@@ -385,6 +406,7 @@ func executeRun(configPath string, standalone bool, host string, port int, admin
 		go func() {
 			if s, ok := <-sigCh; ok {
 				slog.Warn("Second termination signal received, forcing immediate exit", slog.String("signal", s.String()))
+				_ = guard.Release()
 				os.Exit(1)
 			}
 		}()
@@ -394,15 +416,15 @@ func executeRun(configPath string, standalone bool, host string, port int, admin
 
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			slog.Error("Server shutdown completed with error", slog.String("error", err.Error()))
-			os.Exit(1)
+			return 1
 		}
 	case err := <-serverErrCh:
 		if err != nil {
 			slog.Error("Gateway server terminated with error", slog.String("error", err.Error()))
-			os.Exit(1)
+			return 1
 		}
 	}
 
 	slog.Info("FaradAiWire stopped cleanly.")
+	return 0
 }
-

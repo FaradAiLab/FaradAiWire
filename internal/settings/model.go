@@ -21,6 +21,8 @@ type TimeoutsSettings struct {
 	IdleTimeoutSec int `json:"idle_timeout_sec"`
 	// ReadHeaderTimeoutSec is the HTTP server read header timeout in seconds.
 	ReadHeaderTimeoutSec int `json:"read_header_timeout_sec"`
+	// ProbeTimeoutSec is the maximum duration in seconds for active MCP server endpoint probing.
+	ProbeTimeoutSec int `json:"probe_timeout_sec"`
 }
 
 // GuardSettings defines threat detection thresholds and SLA timings for the AI guard engine.
@@ -65,6 +67,7 @@ func DefaultOperationalSettings() *OperationalSettings {
 			ToolExecutionTimeoutSec: 60,
 			IdleTimeoutSec:          90,
 			ReadHeaderTimeoutSec:    5,
+			ProbeTimeoutSec:         5,
 		},
 		Guard: GuardSettings{
 			ThresholdScore: 0.50,
@@ -95,6 +98,7 @@ func (s *OperationalSettings) Clone() *OperationalSettings {
 			ToolExecutionTimeoutSec: s.Timeouts.ToolExecutionTimeoutSec,
 			IdleTimeoutSec:          s.Timeouts.IdleTimeoutSec,
 			ReadHeaderTimeoutSec:    s.Timeouts.ReadHeaderTimeoutSec,
+			ProbeTimeoutSec:         s.Timeouts.ProbeTimeoutSec,
 		},
 		Guard: GuardSettings{
 			ThresholdScore: s.Guard.ThresholdScore,

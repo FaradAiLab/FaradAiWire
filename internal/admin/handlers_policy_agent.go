@@ -14,8 +14,9 @@ import (
 )
 
 // handleAgentDLP handles reading and saving DLP governance configurations for a specific agent:
-//   GET /admin/agents/{name}/dlp -> Get saved config and compiled effective preview
-//   PUT /admin/agents/{name}/dlp -> Save config, atomically compile to dlp.json, and hot-reload
+//
+//	GET /admin/agents/{name}/dlp -> Get saved config and compiled effective preview
+//	PUT /admin/agents/{name}/dlp -> Save config, atomically compile to dlp.json, and hot-reload
 func (a *AdminServer) handleAgentDLP(w http.ResponseWriter, r *http.Request, agentName string) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -84,7 +85,10 @@ func (a *AdminServer) handleAgentDLP(w http.ResponseWriter, r *http.Request, age
 		return
 
 	case http.MethodPut:
-		if a.cfg != nil && a.cfg.IsManaged() {
+		a.mu.RLock()
+		isManaged := a.cfg != nil && a.cfg.IsManaged()
+		a.mu.RUnlock()
+		if isManaged {
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]string{
 				"error":   "FORBIDDEN_MANAGED_MODE",
@@ -290,4 +294,3 @@ func (a *AdminServer) reconcileAgentDLPFromDisk(ctx context.Context, agentName s
 	_ = store.SaveAgentConfig(ctx, cfg)
 	return cfg
 }
-

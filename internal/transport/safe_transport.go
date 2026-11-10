@@ -114,20 +114,19 @@ func DefaultSafeOptions() SafeTransportOptions {
 }
 
 // OptionsFromConfig maps configuration structure to SafeTransportOptions.
+// Omitted pointer fields default to safe-by-default SSRF guardrails from DefaultSafeOptions.
 func OptionsFromConfig(cfg config.SSRFProtectionConfig) SafeTransportOptions {
 	opts := DefaultSafeOptions()
-	opts.Enabled = cfg.Enabled
-	opts.BlockPrivateIPs = cfg.BlockPrivateIPs
+	opts.Enabled = cfg.IsEnabled()
+	opts.BlockPrivateIPs = cfg.ShouldBlockPrivateIPs(opts.BlockPrivateIPs)
 	opts.AllowedDomains = cfg.AllowedDomains
 	return opts
 }
 
 // IsSafeIP validates an IP address against loopback, private, link-local, cloud metadata, and custom blocked CIDRs.
+// Cloud metadata endpoints (169.254.169.254, fd00:ec2::254, IPv4-mapped ::ffff:169.254.169.254)
+// are blocked unconditionally even when SSRF Enabled=false or BlockPrivateIPs=false.
 func IsSafeIP(ip net.IP, opts SafeTransportOptions) error {
-	if !opts.Enabled {
-		return nil
-	}
-
 	if ip == nil {
 		return fmt.Errorf("%w: nil IP", ErrSSRFBlocked)
 	}
@@ -140,6 +139,10 @@ func IsSafeIP(ip net.IP, opts SafeTransportOptions) error {
 	// 1. High-risk Cloud Metadata addresses (AWS, GCP, Azure, OpenStack IMDS) - ALWAYS blocked
 	if (metadataIPv4 != nil && ip.Equal(metadataIPv4)) || (metadataIPv6 != nil && ip.Equal(metadataIPv6)) {
 		return fmt.Errorf("%w (%s)", ErrMetadataIPBlocked, ip.String())
+	}
+
+	if !opts.Enabled {
+		return nil
 	}
 
 	if !opts.BlockPrivateIPs {
@@ -189,6 +192,20 @@ func IsSafeIP(ip net.IP, opts SafeTransportOptions) error {
 	return nil
 }
 
+func isDomainAllowed(host string, allowlist []string) bool {
+	lowerHost := strings.ToLower(host)
+	for _, domain := range allowlist {
+		lowerDomain := strings.ToLower(strings.TrimSpace(domain))
+		if lowerDomain == "" {
+			continue
+		}
+		if lowerHost == lowerDomain || strings.HasSuffix(lowerHost, "."+lowerDomain) {
+			return true
+		}
+	}
+	return false
+}
+
 // ValidateURL checks URL format, scheme, host, and optional domain allowlist.
 func ValidateURL(rawURL string, opts SafeTransportOptions) error {
 	if rawURL == "" {
@@ -210,30 +227,13 @@ func ValidateURL(rawURL string, opts SafeTransportOptions) error {
 		return ErrEmptyHost
 	}
 
-	effectiveOpts := opts
-	// Check domain allowlist if configured
-	if len(opts.AllowedDomains) > 0 {
-		allowed := false
-		lowerHost := strings.ToLower(host)
-		for _, domain := range opts.AllowedDomains {
-			lowerDomain := strings.ToLower(strings.TrimSpace(domain))
-			if lowerDomain == "" {
-				continue
-			}
-			if lowerHost == lowerDomain || strings.HasSuffix(lowerHost, "."+lowerDomain) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return fmt.Errorf("%w: domain '%s' is not allowed", ErrDomainNotAllowed, host)
-		}
-		effectiveOpts.BlockPrivateIPs = false
+	if len(opts.AllowedDomains) > 0 && !isDomainAllowed(host, opts.AllowedDomains) {
+		return fmt.Errorf("%w: domain '%s' is not allowed", ErrDomainNotAllowed, host)
 	}
 
-	// If host is an IP literal, validate directly
+	// If host is an IP literal, validate directly using explicit opts (do not bypass BlockPrivateIPs).
 	if ip := net.ParseIP(host); ip != nil {
-		if err := IsSafeIP(ip, effectiveOpts); err != nil {
+		if err := IsSafeIP(ip, opts); err != nil {
 			return err
 		}
 	}
@@ -261,6 +261,10 @@ func NewSafeTransport(opts SafeTransportOptions) *http.Transport {
 				return nil, fmt.Errorf("invalid destination address '%s': %w", addr, err)
 			}
 
+			if len(opts.AllowedDomains) > 0 && !isDomainAllowed(host, opts.AllowedDomains) {
+				return nil, fmt.Errorf("%w: domain '%s' is not in allowlist", ErrDomainNotAllowed, host)
+			}
+
 			// Validate IP literal or resolve hostname
 			var targetIPs []net.IP
 			if ip := net.ParseIP(host); ip != nil {
@@ -269,27 +273,6 @@ func NewSafeTransport(opts SafeTransportOptions) *http.Transport {
 				}
 				targetIPs = append(targetIPs, ip)
 			} else {
-				// Validate host against domain allowlist if present
-				effectiveOpts := opts
-				if len(opts.AllowedDomains) > 0 {
-					allowed := false
-					lowerHost := strings.ToLower(host)
-					for _, d := range opts.AllowedDomains {
-						ld := strings.ToLower(strings.TrimSpace(d))
-						if ld == "" {
-							continue
-						}
-						if lowerHost == ld || strings.HasSuffix(lowerHost, "."+ld) {
-							allowed = true
-							break
-						}
-					}
-					if !allowed {
-						return nil, fmt.Errorf("%w: domain '%s' is not in allowlist", ErrDomainNotAllowed, host)
-					}
-					effectiveOpts.BlockPrivateIPs = false
-				}
-
 				// DNS Resolution with Context
 				ipAddrs, err := resolver.LookupIPAddr(ctx, host)
 				if err != nil {
@@ -302,7 +285,7 @@ func NewSafeTransport(opts SafeTransportOptions) *http.Transport {
 				// ZERO-TRUST SSRF DEFENSE: Verify ALL resolved IPs.
 				// If any resolved IP points to private/loopback/metadata range, reject connection immediately.
 				for _, ipAddr := range ipAddrs {
-					if err := IsSafeIP(ipAddr.IP, effectiveOpts); err != nil {
+					if err := IsSafeIP(ipAddr.IP, opts); err != nil {
 						return nil, fmt.Errorf("SSRF violation: host '%s' resolved to blocked IP %s: %w", host, ipAddr.IP.String(), err)
 					}
 					targetIPs = append(targetIPs, ipAddr.IP)
@@ -360,6 +343,17 @@ func NewSafeHTTPClient(opts SafeTransportOptions, timeout time.Duration) *http.C
 			}
 			if err := ValidateURL(req.URL.String(), opts); err != nil {
 				return fmt.Errorf("redirect blocked by SSRF policy: %w", err)
+			}
+			if len(via) > 0 && via[0].URL != nil && req.URL != nil {
+				orig := via[0].URL
+				if strings.EqualFold(orig.Scheme, "https") && strings.EqualFold(req.URL.Scheme, "http") {
+					return fmt.Errorf("%w: refusing HTTPS-to-HTTP downgrade redirect", ErrSSRFBlocked)
+				}
+				if !strings.EqualFold(orig.Scheme, req.URL.Scheme) || !strings.EqualFold(orig.Host, req.URL.Host) {
+					for _, h := range []string{"Authorization", "Proxy-Authorization", "X-API-Key", "Api-Key", "X-Auth-Token", "Cookie"} {
+						req.Header.Del(h)
+					}
+				}
 			}
 			return nil
 		},

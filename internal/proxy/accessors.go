@@ -13,8 +13,8 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/auth"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
-	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
+	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
 // SetAgentRepository sets the agent resolver and updates corresponding aggregator, dispatcher, and coordinator.
@@ -163,6 +163,14 @@ func (s *SSEProxy) checkAggregatedAgent(r *http.Request) (string, bool, error) {
 
 	repo := s.getCoordinator().AgentRepository()
 	parts := strings.Split(p, "/")
+	if len(parts) >= 2 && parts[0] != "" {
+		// Fail-closed authorization for Direct Mode paths (/sse/{agent}/{mcp}):
+		// Enforce scoped API key boundaries before delegating to direct-mode path resolution.
+		if keyAgent != "" && keyAgent != "*" && !strings.EqualFold(keyAgent, parts[0]) {
+			return "", false, fmt.Errorf("AGENT_ACCESS_DENIED: API key is scoped to agent '%s', access to '%s' is forbidden", keyAgent, parts[0])
+		}
+		return "", false, nil
+	}
 	if len(parts) == 1 && parts[0] != "" {
 		agentName := parts[0]
 		// Fail-closed authorization: If key is strictly scoped to another agent, reject with 403
@@ -182,18 +190,7 @@ func (s *SSEProxy) checkAggregatedAgent(r *http.Request) (string, bool, error) {
 		}
 	} else if p == "" || len(parts) == 0 || parts[0] == "" {
 		// 1. Check if an explicit profile / agent name was passed via header or query param
-		explicitAgent := ""
-		if r != nil {
-			if prof := strings.TrimSpace(r.Header.Get("X-FaradAiWire-Profile")); prof != "" {
-				explicitAgent = prof
-			} else if r.URL != nil && strings.TrimSpace(r.URL.Query().Get("profile")) != "" {
-				explicitAgent = strings.TrimSpace(r.URL.Query().Get("profile"))
-			} else if ag := strings.TrimSpace(r.Header.Get("X-FaradAiWire-Agent-Name")); ag != "" {
-				explicitAgent = ag
-			} else if r.URL != nil && strings.TrimSpace(r.URL.Query().Get("agent")) != "" {
-				explicitAgent = strings.TrimSpace(r.URL.Query().Get("agent"))
-			}
-		}
+		explicitAgent := extractExplicitAgent(r)
 
 		if explicitAgent != "" {
 			if keyAgent != "" && keyAgent != "*" && !strings.EqualFold(keyAgent, explicitAgent) {
@@ -311,6 +308,9 @@ func (s *SSEProxy) getCoordinator() *session.InboundCoordinator {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.coordinator == nil {
+		if s.httpClient == nil {
+			s.httpClient = &http.Client{Timeout: 0}
+		}
 		cStore := NewMemoryCorrelationStore()
 		fwd := session.NewForwarder(s.httpClient, nil, cStore)
 		s.coordinator = session.NewInboundCoordinator(nil, nil, nil, nil, nil, cStore, fwd, s.targetURL)
@@ -328,7 +328,7 @@ func (s *SSEProxy) streamBridgeEvents(bridge *session.AgentSessionBridge, w io.W
 			select {
 			case ev, ok := <-bridge.EventCh:
 				if ok {
-					_, _ = w.Write([]byte(fmt.Sprintf("event: %s\ndata: %s\n\n", ev.Event, ev.Data)))
+					_, _ = io.WriteString(w, session.FormatSSEFrame(ev.Event, ev.Data))
 					flusher.Flush()
 				}
 			default:
@@ -347,7 +347,7 @@ func (s *SSEProxy) streamBridgeEvents(bridge *session.AgentSessionBridge, w io.W
 					data = fwd.ProcessOutgoingMessage(data, clientSessionID, "")
 				}
 			}
-			_, _ = w.Write([]byte(fmt.Sprintf("event: %s\ndata: %s\n\n", ev.Event, data)))
+			_, _ = io.WriteString(w, session.FormatSSEFrame(ev.Event, data))
 			flusher.Flush()
 			if ev.Event == "shutdown" {
 				return
@@ -397,13 +397,23 @@ func extractAgentNameFromPath(reqPath string) string {
 	return ""
 }
 
-// extractAgentName inspects request headers, query parameters, and URL path for agent/profile identity:
+// isSafeControlFree rejects ASCII control characters (including CR/LF and NUL)
+// to prevent SSE frame / header injection from untrusted session IDs or agent names.
+func isSafeControlFree(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// extractExplicitAgent inspects request headers and query parameters for explicit agent/profile identity:
 // 1. Header: X-FaradAiWire-Profile
 // 2. Query param: profile
 // 3. Header: X-FaradAiWire-Agent-Name
 // 4. Query param: agent
-// 5. URL Path: /sse/{agent}/... or /mcp/{agent}/...
-func extractAgentName(r *http.Request) string {
+func extractExplicitAgent(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
@@ -422,6 +432,16 @@ func extractAgentName(r *http.Request) string {
 		if q := strings.TrimSpace(r.URL.Query().Get("agent")); q != "" {
 			return q
 		}
+	}
+	return ""
+}
+
+// extractAgentName inspects request headers, query parameters, and URL path for agent/profile identity.
+func extractAgentName(r *http.Request) string {
+	if explicit := extractExplicitAgent(r); explicit != "" {
+		return explicit
+	}
+	if r != nil && r.URL != nil {
 		return extractAgentNameFromPath(r.URL.Path)
 	}
 	return ""
@@ -447,4 +467,3 @@ func (s *SSEProxy) forwardMessageToBackend(w http.ResponseWriter, r *http.Reques
 		fwd.ForwardMessage(w, r, userCtx, targetURL, targetSessionID, clientSessionID, body, reqID, authToken)
 	}
 }
-

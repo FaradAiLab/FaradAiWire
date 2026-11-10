@@ -47,10 +47,7 @@ paths:
   /admin/settings:
     get:
       summary: Retrieve Active Gateway Settings
-      description: Returns self-describing operational settings metadata, active values, categories, and override flags.
-      security:
-        - BearerAuth: []
-        - ApiKeyAuth: []
+      description: Returns self-describing operational settings metadata (including timeouts.probe_timeout_sec), active values, categories, and override flags. Accessible in both STANDALONE and MANAGED modes.
       responses:
         '200':
           description: Active gateway settings
@@ -71,9 +68,6 @@ paths:
     post:
       summary: Update Operational Gateway Settings
       description: Validates and persists operational setting overrides to the DuckDB system_settings sparse overlay without modifying config.yaml.
-      security:
-        - BearerAuth: []
-        - ApiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -84,6 +78,9 @@ paths:
                 key: { type: string, example: "guard.threshold_score" }
                 value: {}
                 settings: { type: object }
+                poll_interval_seconds: { type: integer, minimum: 1, maximum: 86400 }
+                auto_sync_mcp: { type: boolean }
+                auto_update_policies: { type: boolean }
       responses:
         '200':
           description: Settings updated successfully
@@ -92,15 +89,37 @@ paths:
         '403':
           description: Forbidden in MANAGED runtime mode
         '500':
-          description: Failed to persist setting to DuckDB
+          description: Failed to persist setting to DuckDB or reload runtime config
+    put:
+      summary: Update Operational Gateway Settings (PUT)
+      description: Equivalent to POST /admin/settings; validates and persists operational setting overrides without modifying config.yaml.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key: { type: string, example: "timeouts.probe_timeout_sec" }
+                value: {}
+                settings: { type: object }
+                poll_interval_seconds: { type: integer, minimum: 1, maximum: 86400 }
+                auto_sync_mcp: { type: boolean }
+                auto_update_policies: { type: boolean }
+      responses:
+        '200':
+          description: Settings updated successfully
+        '400':
+          description: Validation failed or invalid payload
+        '403':
+          description: Forbidden in MANAGED runtime mode
+        '500':
+          description: Failed to persist setting to DuckDB or reload runtime config
 
   /admin/settings/reset:
     post:
       summary: Reset Setting or Filter Override to Baseline Default
       description: Deletes a DuckDB system_settings override (including "filters.<name>" keys) and restores the baseline config.yaml value in memory.
-      security:
-        - BearerAuth: []
-        - ApiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -128,9 +147,6 @@ paths:
       description: >
         Persists a security filter toggle ("filters.<name>") to the DuckDB system_settings sparse overlay
         and atomically swaps the in-memory filter pipeline without modifying config.yaml on disk (ADR-0053 / ADR-0054).
-      security:
-        - BearerAuth: []
-        - ApiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -138,6 +154,9 @@ paths:
             schema:
               type: object
               required: [enabled]
+              anyOf:
+                - required: [filter]
+                - required: [filter_name]
               properties:
                 filter:
                   type: string
@@ -156,7 +175,7 @@ paths:
         '403':
           description: Forbidden in MANAGED runtime mode
         '500':
-          description: Failed to persist filter toggle to DuckDB (fail-closed)
+          description: Failed to persist filter toggle to DuckDB or reload runtime pipeline (fail-closed)
 
   /admin/schemas/clear:
     post:
@@ -234,35 +253,32 @@ paths:
     get:
       summary: List Configured Agents
       description: Returns summary of all local agent domains configured in the agents directory.
-      security:
-        - BearerAuth: []
-        - ApiKeyAuth: []
       responses:
         '200':
           description: List of agent configurations
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/AgentSummary'
+                type: object
+                properties:
+                  agents:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AgentSummary'
 
   /admin/agents/sync-tools:
     post:
       summary: Probe and Sync Agent Tools
       description: Probes upstream MCP servers defined for the agent and caches tool manifests locally.
-      security:
-        - BearerAuth: []
-        - ApiKeyAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [agent]
+              required: [agent_name]
               properties:
-                agent: { type: string, example: "default" }
+                agent_name: { type: string, example: "default" }
       responses:
         '200':
           description: Tools synchronized successfully
@@ -273,9 +289,6 @@ paths:
     get:
       summary: List API Keys
       description: Returns metadata of all active API keys (hashes only; plaintext secrets are never stored or returned).
-      security:
-        - BearerAuth: []
-        - ApiKeyAuth: []
       responses:
         '200':
           description: List of registered API keys
@@ -288,9 +301,6 @@ paths:
     post:
       summary: Create New API Key
       description: Generates a new API key with the specified role, returning the plaintext secret exactly once.
-      security:
-        - BearerAuth: []
-        - ApiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -313,9 +323,6 @@ paths:
     delete:
       summary: Revoke API Key
       description: Immediately revokes and deletes the specified API key.
-      security:
-        - BearerAuth: []
-        - ApiKeyAuth: []
       parameters:
         - name: id
           in: path
@@ -708,17 +715,47 @@ components:
     DashboardStatusResponse:
       type: object
       properties:
+        status: { type: string, example: "Ready" }
         gateway_id: { type: string, example: "farad-ai-gw-01" }
-        version: { type: string, example: "0.3.0" }
-        mode: { type: string, enum: [standalone, managed], example: "standalone" }
-        uptime_seconds: { type: integer, example: 3600 }
-        goroutines: { type: integer, example: 42 }
-        memory_alloc_mb: { type: number, example: 18.5 }
-        active_agents_count: { type: integer, example: 2 }
+        mode: { type: string, enum: [STANDALONE, MANAGED], example: "STANDALONE" }
+        runtime_mode: { type: string, enum: [STANDALONE, MANAGED], example: "STANDALONE" }
+        transport_mode: { type: string, enum: [sse, stdio], example: "sse" }
+        ingress_host: { type: string, example: "127.0.0.1" }
+        ingress_port: { type: integer, example: 8090 }
+        ingress_url: { type: string, example: "http://127.0.0.1:8090" }
+        has_local_overrides: { type: boolean }
+        is_managed: { type: boolean }
+        organization: { type: string, example: "Corporate Organization" }
+        locked_editing: { type: boolean }
+        slm_tier: { type: string, example: "disabled" }
+        slm_model: { type: string, example: "L1 Static Rules (Fallback)" }
+        slm_endpoint: { type: string, example: "In-Memory Precompiled Regex" }
+        slm_latency_ms: { type: number, example: 0.2 }
+        slm_status:
+          type: object
+          properties:
+            tier: { type: string }
+            classifier_url: { type: string }
+            model: { type: string }
+            active: { type: boolean }
         active_filters:
           type: array
           items: { type: string }
           example: ["prefill_block", "schema_validation", "dlp", "rate_limiting"]
+        config:
+          type: object
+          properties:
+            prefill_block: { type: boolean }
+            schema_validation: { type: boolean }
+            injection_scanner: { type: boolean }
+            guard: { type: boolean }
+            dlp: { type: boolean }
+            hitl: { type: boolean }
+            loop_protection: { type: boolean }
+            rate_limiting: { type: boolean }
+            auto_sync_mcp: { type: boolean }
+            auto_update_policies: { type: boolean }
+            poll_interval_seconds: { type: integer }
 
     AuditLogsResponse:
       type: object

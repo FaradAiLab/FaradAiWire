@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -39,9 +40,20 @@ func toolBelongsToProtocol(toolName, protoID, protoName string, manifest []agent
 	return false
 }
 
+func cloneProtocolConfig(p agent.ProtocolConfig) agent.ProtocolConfig {
+	cp := p
+	cp.Args = slices.Clone(p.Args)
+	cp.Env = slices.Clone(p.Env)
+	cp.AllowedTools = slices.Clone(p.AllowedTools)
+	cp.Headers = maps.Clone(p.Headers)
+	return cp
+}
+
 func (a *AdminServer) enrichAgentProtocols(protocols []agent.ProtocolConfig, protocolIDs []string) []agent.ProtocolConfig {
 	res := make([]agent.ProtocolConfig, len(protocols))
-	copy(res, protocols)
+	for i := range protocols {
+		res[i] = cloneProtocolConfig(protocols[i])
+	}
 
 	store := a.getProtocolStore()
 	if store == nil {
@@ -50,7 +62,7 @@ func (a *AdminServer) enrichAgentProtocols(protocols []agent.ProtocolConfig, pro
 
 	for i := range res {
 		if def := findProtocolDef(store, res[i].ID, res[i].Name); def != nil {
-			applyProtocolDefaults(&res[i], def)
+			applyProtocolDefaults(&res[i], def, true)
 		}
 	}
 
@@ -61,7 +73,44 @@ func (a *AdminServer) enrichAgentProtocols(protocols []agent.ProtocolConfig, pro
 		}
 		if def, err := store.Get(id); err == nil && def != nil {
 			var cfg agent.ProtocolConfig
-			applyProtocolDefaults(&cfg, def)
+			applyProtocolDefaults(&cfg, def, true)
+			res = append(res, cfg)
+		}
+	}
+
+	return res
+}
+
+// updateAgentProtocols preserves agent-specific overrides first by hydrating masked placeholders from
+// existing agent protocols before applying non-clobbering metadata/defaults from the global protocol store.
+func (a *AdminServer) updateAgentProtocols(incoming, existing []agent.ProtocolConfig, protocolIDs []string) []agent.ProtocolConfig {
+	res := make([]agent.ProtocolConfig, len(incoming))
+	for i := range incoming {
+		res[i] = cloneProtocolConfig(incoming[i])
+	}
+
+	hadExisting := hydrateProtocolsFromExisting(res, existing)
+
+	store := a.getProtocolStore()
+	if store == nil {
+		return res
+	}
+
+	for i := range res {
+		if def := findProtocolDef(store, res[i].ID, res[i].Name); def != nil {
+			// Only seed default secrets/env/headers when attaching a protocol not already present on the agent.
+			applyProtocolDefaults(&res[i], def, !hadExisting[i])
+		}
+	}
+
+	for _, rawID := range protocolIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" || containsProtocol(res, id) {
+			continue
+		}
+		if def, err := store.Get(id); err == nil && def != nil {
+			var cfg agent.ProtocolConfig
+			applyProtocolDefaults(&cfg, def, true)
 			res = append(res, cfg)
 		}
 	}
@@ -86,33 +135,95 @@ func containsProtocol(list []agent.ProtocolConfig, id string) bool {
 	})
 }
 
-func applyProtocolDefaults(dst *agent.ProtocolConfig, src *protocol.Protocol) {
+func mergeUnmaskedEnv(dstEnv, srcEnv []string, fillWhenEmpty bool) []string {
+	if len(dstEnv) == 0 {
+		if fillWhenEmpty {
+			return slices.Clone(srcEnv)
+		}
+		return dstEnv
+	}
+	if len(srcEnv) == 0 {
+		return dstEnv
+	}
+	srcByKey := make(map[string]string, len(srcEnv))
+	for _, entry := range srcEnv {
+		if k, v, ok := strings.Cut(entry, "="); ok {
+			srcByKey[k] = v
+		}
+	}
+	merged := make([]string, len(dstEnv))
+	for i, entry := range dstEnv {
+		merged[i] = entry
+		k, v, ok := strings.Cut(entry, "=")
+		if ok && strings.Contains(v, "••••••") {
+			if orig, found := srcByKey[k]; found {
+				merged[i] = k + "=" + orig
+			}
+		}
+	}
+	return merged
+}
+
+func hydrateProtocolsFromExisting(dst, existing []agent.ProtocolConfig) []bool {
+	matched := make([]bool, len(dst))
+	if len(dst) == 0 || len(existing) == 0 {
+		return matched
+	}
+	for i := range dst {
+		var match *agent.ProtocolConfig
+		for j := range existing {
+			if (dst[i].ID != "" && strings.EqualFold(dst[i].ID, existing[j].ID)) ||
+				(dst[i].Name != "" && strings.EqualFold(dst[i].Name, existing[j].Name)) {
+				match = &existing[j]
+				break
+			}
+		}
+		if match == nil {
+			continue
+		}
+		matched[i] = true
+		if strings.Contains(dst[i].AuthToken, "••••••") {
+			dst[i].AuthToken = match.AuthToken
+		}
+		dst[i].Env = mergeUnmaskedEnv(dst[i].Env, match.Env, false)
+		for k, v := range dst[i].Headers {
+			if strings.Contains(v, "••••••") {
+				if orig, ok := match.Headers[k]; ok {
+					dst[i].Headers[k] = orig
+				}
+			}
+		}
+	}
+	return matched
+}
+
+func applyProtocolDefaults(dst *agent.ProtocolConfig, src *protocol.Protocol, fillCredentials bool) {
 	dst.ID = cmp.Or(dst.ID, src.ID)
 	dst.Name = cmp.Or(dst.Name, src.Name)
 	dst.Type = cmp.Or(dst.Type, src.Type)
 	dst.Command = cmp.Or(dst.Command, src.Command)
 	dst.URLOrCommand = cmp.Or(dst.URLOrCommand, src.URLOrCommand, src.Command)
 
-	if len(dst.Args) == 0 {
-		dst.Args = src.Args
+	if len(dst.Args) == 0 && len(src.Args) > 0 {
+		dst.Args = slices.Clone(src.Args)
 	}
-	if len(dst.Env) == 0 {
-		dst.Env = src.Env
+	if len(dst.AllowedTools) == 0 && len(src.AllowedTools) > 0 {
+		dst.AllowedTools = slices.Clone(src.AllowedTools)
 	}
-	if len(dst.AllowedTools) == 0 {
-		dst.AllowedTools = src.AllowedTools
-	}
-	if dst.AuthToken == "" || strings.Contains(dst.AuthToken, "••••••") {
-		dst.AuthToken = src.AuthToken
-	}
-	if len(dst.Headers) == 0 {
-		dst.Headers = src.Headers
-		return
-	}
-	for k, v := range dst.Headers {
-		if strings.Contains(v, "••••••") {
-			if orig, ok := src.Headers[k]; ok {
-				dst.Headers[k] = orig
+	dst.Env = mergeUnmaskedEnv(dst.Env, src.Env, fillCredentials)
+	if fillCredentials {
+		if dst.AuthToken == "" || strings.Contains(dst.AuthToken, "••••••") {
+			dst.AuthToken = src.AuthToken
+		}
+		if len(dst.Headers) == 0 {
+			dst.Headers = maps.Clone(src.Headers)
+			return
+		}
+		for k, v := range dst.Headers {
+			if strings.Contains(v, "••••••") {
+				if orig, ok := src.Headers[k]; ok {
+					dst.Headers[k] = orig
+				}
 			}
 		}
 	}
@@ -123,20 +234,31 @@ func (a *AdminServer) syncAgentToolsProbed(ctx context.Context, agentName string
 	var allDiscoveredTools []map[string]interface{}
 	var probeErrors []string
 
+	ssrfOpts := transport.DefaultSafeOptions()
+	a.mu.RLock()
+	cfg := a.cfg
+	a.mu.RUnlock()
+	if cfg != nil {
+		ssrfOpts = transport.OptionsFromConfig(cfg.Security.SSRFProtection)
+	}
+	timeout := a.probeTimeout()
+
 	for _, proto := range agentCfg.Protocols {
 		protoName := proto.Name
 		protoID := proto.ID
 		var rawTools []map[string]interface{}
 		var pErr error
 
+		probeCtx, cancel := context.WithTimeout(ctx, timeout)
 		if proto.IsStdio() {
 			cmd := proto.GetCommand()
 			if cmd != "" {
-				rawTools, pErr = ProbeAndDiscoverMCPToolsStdio(ctx, cmd, proto.Args, proto.Env)
+				rawTools, pErr = ProbeAndDiscoverMCPToolsStdio(probeCtx, cmd, proto.Args, proto.Env)
 			}
 		} else if proto.URLOrCommand != "" {
-			rawTools, pErr = ProbeAndDiscoverMCPToolsWithContextAuthAndHeaders(ctx, a.SafeHTTPClient(), proto.URLOrCommand, proto.AuthToken, proto.Headers, transport.DefaultSafeOptions())
+			rawTools, pErr = ProbeAndDiscoverMCPToolsWithContextAuthAndHeaders(probeCtx, a.SafeHTTPClient(), proto.URLOrCommand, proto.AuthToken, proto.Headers, ssrfOpts)
 		}
+		cancel()
 
 		if pErr != nil || len(rawTools) == 0 {
 			if pErr != nil {
@@ -227,4 +349,3 @@ func (a *AdminServer) handleAgentSyncTools(w http.ResponseWriter, r *http.Reques
 		"tools":  allDiscoveredTools,
 	})
 }
-

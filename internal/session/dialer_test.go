@@ -670,7 +670,7 @@ func TestBuildSafeSubprocessEnv_Unit(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 
 	// 1. Calling with empty/nil protoEnv
-	safeEnv := buildSafeSubprocessEnv(nil)
+	safeEnv := BuildSafeSubprocessEnv(nil, false)
 	if safeEnv == nil {
 		t.Fatalf("expected non-nil safeEnv slice")
 	}
@@ -728,7 +728,7 @@ func TestBuildSafeSubprocessEnv_Unit(t *testing.T) {
 		"ALLOWED_TOOL_KEY=tool_val_1",
 		"PYTHONUNBUFFERED=1",
 	}
-	mergedEnv := buildSafeSubprocessEnv(protoEnv)
+	mergedEnv := BuildSafeSubprocessEnv(protoEnv, false)
 	for _, k := range forbiddenKeys {
 		if hasKey(mergedEnv, k) {
 			t.Errorf("expected secret %q to be absent from mergedEnv", k)
@@ -739,6 +739,27 @@ func TestBuildSafeSubprocessEnv_Unit(t *testing.T) {
 	}
 	if getKeyVal(mergedEnv, "PYTHONUNBUFFERED") != "1" {
 		t.Errorf("expected PYTHONUNBUFFERED=1 in mergedEnv, got: %q", getKeyVal(mergedEnv, "PYTHONUNBUFFERED"))
+	}
+
+	// 3. Explicit host ref expansion only happens when expandHostRefs=true
+	t.Setenv("EXPLICIT_MCP_TOKEN", "expanded-secret-token")
+	rawEnv := BuildSafeSubprocessEnv([]string{"TOKEN=${EXPLICIT_MCP_TOKEN}", "LITERAL=p@ss$123"}, false)
+	if getKeyVal(rawEnv, "TOKEN") != "${EXPLICIT_MCP_TOKEN}" {
+		t.Errorf("expected unexpanded TOKEN when expandHostRefs=false, got: %q", getKeyVal(rawEnv, "TOKEN"))
+	}
+	expandedEnv := BuildSafeSubprocessEnv([]string{"TOKEN=Bearer ${EXPLICIT_MCP_TOKEN}", "LITERAL=p@ss$123"}, true)
+	if getKeyVal(expandedEnv, "TOKEN") != "Bearer expanded-secret-token" {
+		t.Errorf("expected expanded TOKEN, got: %q", getKeyVal(expandedEnv, "TOKEN"))
+	}
+	if getKeyVal(expandedEnv, "LITERAL") != "p@ss$123" {
+		t.Errorf("expected bare $ literal preserved, got: %q", getKeyVal(expandedEnv, "LITERAL"))
+	}
+
+	// 4. Sensitive gateway secrets must NOT be expanded even when expandHostRefs=true
+	t.Setenv("ADMIN_API_KEY", "secret-gateway-admin-key")
+	blockedEnv := BuildSafeSubprocessEnv([]string{"LEAK=${ADMIN_API_KEY}"}, true)
+	if strings.Contains(getKeyVal(blockedEnv, "LEAK"), "secret-gateway-admin-key") {
+		t.Fatalf("CRITICAL LEAK: expandBracedHostRefs must block gateway secret ADMIN_API_KEY")
 	}
 }
 
@@ -1079,5 +1100,3 @@ func TestHTTPDialer_UpstreamHeaderStripping_NoToken(t *testing.T) {
 		t.Errorf("expected Cookie to be stripped, got %q", v)
 	}
 }
-
-

@@ -116,24 +116,28 @@ export const OperationalSettingsTab: React.FC = () => {
     setDrafts((prev) => ({ ...prev, [key]: value }))
   }
 
+  const getSettingType = (s: SettingItem): 'int' | 'float' | 'string' | 'bool' | undefined =>
+    s.type ?? s.data_type
+
   const handleSave = async (key: string) => {
     const target = settings.find((s) => s.key === key)
     if (!target) return
 
+    const settingType = getSettingType(target)
     let val = drafts[key]
-    if (target.data_type === 'int') {
+    if (settingType === 'int') {
       val = parseInt(String(val), 10)
       if (isNaN(val)) {
         setNotification({ type: 'error', text: `Invalid integer value for ${key}` })
         return
       }
-    } else if (target.data_type === 'float') {
+    } else if (settingType === 'float') {
       val = parseFloat(String(val))
       if (isNaN(val)) {
         setNotification({ type: 'error', text: `Invalid float value for ${key}` })
         return
       }
-    } else if (target.data_type === 'bool') {
+    } else if (settingType === 'bool') {
       val = Boolean(val)
     }
 
@@ -485,7 +489,7 @@ export const OperationalSettingsTab: React.FC = () => {
                           {/* Right: Interactive Input & Controls */}
                           <div className="flex flex-col sm:items-end gap-2 shrink-0">
                             <div className="flex items-center gap-2">
-                              {item.data_type === 'float' ? (
+                              {getSettingType(item) === 'float' ? (
                                 <div className="flex items-center gap-2.5">
                                   <input
                                     type="range"
@@ -502,7 +506,7 @@ export const OperationalSettingsTab: React.FC = () => {
                                     {Number(currentDraft).toFixed(2)}
                                   </span>
                                 </div>
-                              ) : item.data_type === 'bool' ? (
+                              ) : getSettingType(item) === 'bool' ? (
                                 <button
                                   type="button"
                                   onClick={() => handleDraftChange(item.key, !currentDraft)}

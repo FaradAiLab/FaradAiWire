@@ -460,4 +460,3 @@ func TestStdioProxy_SubprocessCrash_AutoRestart(t *testing.T) {
 		t.Fatalf("StdioProxy did not terminate on Stop()")
 	}
 }
-

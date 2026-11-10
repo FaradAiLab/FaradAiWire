@@ -15,8 +15,8 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
-	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
+	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
 // StdioProxy wraps an MCP server command running as a subprocess via session.Dialer
@@ -360,4 +360,3 @@ func (s *StdioProxy) SendNotification(ctx context.Context, method string, params
 	}
 	return s.writeJSON(notif)
 }
-

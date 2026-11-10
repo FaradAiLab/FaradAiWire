@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
@@ -22,14 +24,17 @@ func TestSSEProxy_SecurityHeadersAndCORS(t *testing.T) {
 	}
 
 	pipeline := filter.NewPipeline(nil)
-	proxy := NewSSEProxy(8080, "http://localhost:8081/sse", pipeline, nil, nil, userCtxCfg, secCfg)
+	// Use a closed/invalid port rather than a common dev port like 8081 so local services never hold GET /sse open
+	proxy := NewSSEProxy(8080, "http://127.0.0.1:1/sse", pipeline, nil, nil, userCtxCfg, secCfg)
 	handler := proxy.Handler()
 
 	t.Run("Security headers on /sse and /message", func(t *testing.T) {
 		for _, path := range []string{"/sse", "/message"} {
-			req := httptest.NewRequest("GET", path, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			req := httptest.NewRequest("GET", path, nil).WithContext(ctx)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
+			cancel()
 
 			res := rec.Result()
 			defer res.Body.Close()

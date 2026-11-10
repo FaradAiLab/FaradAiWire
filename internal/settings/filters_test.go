@@ -263,3 +263,51 @@ func TestDuckDBStore_FilterTogglePersistence(t *testing.T) {
 		t.Error("expected SchemaValidation to be enabled via DuckDB override")
 	}
 }
+
+func TestApplyFilterToggleToConfig_SchemaDirIndependentHydration(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Filters: config.FiltersConfig{
+			SchemaValidation: config.SchemaValidationConfig{
+				DynamicCapture: true,
+				SchemasDir:     "",
+			},
+		},
+	}
+
+	if ok := ApplyFilterToggleToConfig(cfg, "schema_validation", true); !ok {
+		t.Fatal("expected ApplyFilterToggleToConfig to return true")
+	}
+	if cfg.Filters.SchemaValidation.SchemasDir == "" {
+		t.Fatal("expected SchemasDir to be hydrated even when DynamicCapture was already true")
+	}
+	if cfg.Filters.SchemaValidation.BaselinePinning {
+		t.Fatal("expected BaselinePinning not to be forced on when already partially initialized")
+	}
+}
+
+func BenchmarkApplyFilterOverrides(b *testing.B) {
+	overrides := map[string]string{
+		"filters.prefill_block":     "false",
+		"filters.rate_limiting":     "true",
+		"filters.dlp":               "true",
+		"filters.schema_validation": "true",
+		"filters.hitl":              "false",
+		"filters.injection_scanner": "true",
+		"guard.threshold_score":     "0.75",
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		cfg := config.Config{
+			Filters: config.FiltersConfig{
+				PrefillBlock: config.PrefillBlockConfig{Enabled: true},
+				RateLimiting: config.RateLimitingConfig{MaxBurst: 25, RefillRate: 5.0},
+			},
+		}
+		ApplyFilterOverrides(&cfg, overrides)
+	}
+}

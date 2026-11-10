@@ -17,6 +17,8 @@ var (
 // closing braces or brackets, while preserving newlines and string literals.
 // Optimized for zero-heap growth in the common path by preallocating output buffers.
 func StripCommentsAndTrailingCommas(src []byte) ([]byte, error) {
+	// Strip UTF-8 BOM if present (common on Windows editors / PowerShell)
+	src = bytes.TrimPrefix(src, []byte{0xEF, 0xBB, 0xBF})
 	n := len(src)
 	if n == 0 {
 		return src, nil

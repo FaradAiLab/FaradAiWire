@@ -21,36 +21,80 @@ func (a *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	cfg := a.cfg
+	mgr := a.guardManager
+	catalog := a.guardCatalog
+	a.mu.RUnlock()
 
-	var activeFilters []string
-	if a.cfg.Filters.PrefillBlock.Enabled {
+	var (
+		activeFilters      []string
+		listenPort         = 8090
+		listenHost         = "127.0.0.1"
+		runtimeMode        string
+		transportMode      string
+		isManaged          bool
+		injScannerEnabled  bool
+		injClassifierURL   string
+		prefillEnabled     bool
+		schemaEnabled      bool
+		guardEnabled       bool
+		dlpEnabled         bool
+		hitlEnabled        bool
+		loopEnabled        bool
+		rateLimitEnabled   bool
+		autoSyncMCP        bool
+		autoUpdatePolicies bool
+		pollIntervalSec    int
+	)
+
+	if cfg != nil {
+		prefillEnabled = cfg.Filters.PrefillBlock.Enabled
+		rateLimitEnabled = cfg.Filters.RateLimiting.Enabled
+		loopEnabled = cfg.Filters.LoopProtection.Enabled
+		schemaEnabled = cfg.Filters.SchemaValidation.Enabled
+		dlpEnabled = cfg.Filters.DLP.Enabled
+		hitlEnabled = cfg.Filters.HITL.Enabled
+		guardEnabled = cfg.Filters.Guard.Enabled
+		injScannerEnabled = cfg.Filters.InjectionScanner.Enabled
+		injClassifierURL = cfg.Filters.InjectionScanner.ClassifierURL
+		autoSyncMCP = cfg.AutoSyncMCP
+		autoUpdatePolicies = cfg.AutoUpdatePolicies
+		pollIntervalSec = cfg.PollIntervalSeconds
+		runtimeMode = cfg.GetRuntimeMode()
+		transportMode = cfg.Mode
+		isManaged = cfg.IsManaged()
+		if cfg.GetListenPort() > 0 {
+			listenPort = cfg.GetListenPort()
+		}
+		if cfg.GetListenHost() != "" {
+			listenHost = cfg.GetListenHost()
+		}
+	}
+
+	if prefillEnabled {
 		activeFilters = append(activeFilters, "prefill_block")
 	}
-	if a.cfg.Filters.RateLimiting.Enabled {
+	if rateLimitEnabled {
 		activeFilters = append(activeFilters, "rate_limiting")
 	}
-	if a.cfg.Filters.LoopProtection.Enabled {
+	if loopEnabled {
 		activeFilters = append(activeFilters, "loop_protection")
 	}
-	if a.cfg.Filters.SchemaValidation.Enabled {
+	if schemaEnabled {
 		activeFilters = append(activeFilters, "schema_validation")
 	}
-	if a.cfg.Filters.DLP.Enabled {
+	if dlpEnabled {
 		activeFilters = append(activeFilters, "dlp")
 	}
-	if a.cfg.Filters.HITL.Enabled {
+	if hitlEnabled {
 		activeFilters = append(activeFilters, "hitl")
 	}
-	if a.cfg.Filters.Guard.Enabled {
+	if guardEnabled {
 		activeFilters = append(activeFilters, "guard")
 	}
 
 	gatewayID := strings.TrimSpace(os.Getenv("GATEWAY_ID"))
-
-	mgr := a.guardManager
-	catalog := a.guardCatalog
 
 	classifierURL := ""
 	slmTier := "disabled"
@@ -76,9 +120,9 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		classifierURL = slmEndpoint
-	} else if a.cfg != nil && a.cfg.Filters.InjectionScanner.Enabled {
+	} else if injScannerEnabled {
 		// Priority 2: Check legacy/external HTTP classifier URL
-		classifierURL = strings.TrimSpace(a.cfg.Filters.InjectionScanner.ClassifierURL)
+		classifierURL = strings.TrimSpace(injClassifierURL)
 		if classifierURL != "" {
 			slmTier = "neural_active"
 			slmStatus = "active"
@@ -91,14 +135,6 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	listenPort := 8090
-	if a.cfg != nil {
-		listenPort = a.cfg.GetListenPort()
-	}
-	listenHost := "127.0.0.1"
-	if a.cfg != nil && a.cfg.GetListenHost() != "" {
-		listenHost = a.cfg.GetListenHost()
-	}
 	ingressURL := fmt.Sprintf("http://%s:%d", listenHost, listenPort)
 
 	resp := map[string]interface{}{
@@ -108,13 +144,13 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"ingress_port":        listenPort,
 		"ingress_host":        listenHost,
 		"ingress_url":         ingressURL,
-		"mode":                a.cfg.GetRuntimeMode(),
-		"runtime_mode":        a.cfg.GetRuntimeMode(),
-		"transport_mode":      a.cfg.Mode,
+		"mode":                runtimeMode,
+		"runtime_mode":        runtimeMode,
+		"transport_mode":      transportMode,
 		"has_local_overrides": false,
-		"is_managed":          a.cfg.IsManaged(),
+		"is_managed":          isManaged,
 		"organization":        "Corporate Organization",
-		"locked_editing":      a.cfg.IsManaged(),
+		"locked_editing":      isManaged,
 		"slm_tier":            slmTier,
 		"slm_model":           slmModel,
 		"slm_endpoint":        slmEndpoint,
@@ -127,17 +163,17 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		},
 
 		"config": map[string]interface{}{
-			"prefill_block":         a.cfg.Filters.PrefillBlock.Enabled,
-			"schema_validation":     a.cfg.Filters.SchemaValidation.Enabled,
-			"injection_scanner":     a.cfg.Filters.InjectionScanner.Enabled,
-			"guard":                 a.cfg.Filters.Guard.Enabled,
-			"dlp":                   a.cfg.Filters.DLP.Enabled,
-			"hitl":                  a.cfg.Filters.HITL.Enabled,
-			"loop_protection":       a.cfg.Filters.LoopProtection.Enabled,
-			"rate_limiting":         a.cfg.Filters.RateLimiting.Enabled,
-			"auto_sync_mcp":         a.cfg.AutoSyncMCP,
-			"auto_update_policies":  a.cfg.AutoUpdatePolicies,
-			"poll_interval_seconds": a.cfg.PollIntervalSeconds,
+			"prefill_block":         prefillEnabled,
+			"schema_validation":     schemaEnabled,
+			"injection_scanner":     injScannerEnabled,
+			"guard":                 guardEnabled,
+			"dlp":                   dlpEnabled,
+			"hitl":                  hitlEnabled,
+			"loop_protection":       loopEnabled,
+			"rate_limiting":         rateLimitEnabled,
+			"auto_sync_mcp":         autoSyncMCP,
+			"auto_update_policies":  autoUpdatePolicies,
+			"poll_interval_seconds": pollIntervalSec,
 		},
 	}
 
@@ -171,11 +207,17 @@ func validateSLMURL(rawURL string) error {
 		return errors.New("missing host in URL")
 	}
 
-	// Unconditional guard: Block link-local cloud metadata (AWS, GCP, Azure, OpenStack)
+	// Unconditional guard: Block link-local and cloud metadata (AWS/GCP/Azure/OpenStack IMDS v4 & v6)
 	if host == "169.254.169.254" || strings.HasPrefix(host, "169.254.") {
 		return errors.New("access to link-local cloud metadata is strictly prohibited")
 	}
 	if ip := net.ParseIP(host); ip != nil {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			ip = ipv4
+		}
+		if ip.Equal(net.ParseIP("169.254.169.254")) || ip.Equal(net.ParseIP("fd00:ec2::254")) {
+			return errors.New("access to cloud metadata service is strictly prohibited")
+		}
 		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 			return errors.New("access to link-local metadata is strictly prohibited")
 		}

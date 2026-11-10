@@ -997,5 +997,63 @@ func TestAdminEndpoints_Agents_EnrichAgentProtocols_HydratesSecrets(t *testing.T
 	}
 }
 
+func TestAdminEndpoints_Agents_PUT_HydratesExistingBeforeTemplateStore(t *testing.T) {
+	server, protoDir, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
 
+	store, _ := protocol.NewFSStore(protoDir)
+	_ = store.Save(&protocol.Protocol{
+		ID:           "shared-proto",
+		Name:         "Shared Proto",
+		Type:         "http",
+		URLOrCommand: "https://api.example.com/mcp",
+		AuthToken:    "global-template-token-000",
+	})
+	server.SetProtocolStore(store)
 
+	repo := server.getAgentRepository()
+	if err := repo.SaveAgentConfig("agent-override", &agent.RouteConfig{
+		AgentName:   "agent-override",
+		RoutingMode: "aggregated",
+		Protocols: []agent.ProtocolConfig{
+			{
+				ID:           "shared-proto",
+				Name:         "Shared Proto",
+				Type:         "http",
+				URLOrCommand: "https://api.example.com/mcp",
+				AuthToken:    "agent-specific-secret-999",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("SaveAgentConfig: %v", err)
+	}
+
+	// PUT echoing masked secret placeholder must preserve agent-specific secret, NOT global template
+	putBody, _ := json.Marshal(map[string]interface{}{
+		"description": "Updated description",
+		"protocols": []map[string]interface{}{
+			{
+				"id":             "shared-proto",
+				"name":           "Shared Proto",
+				"type":           "http",
+				"url_or_command": "https://api.example.com/mcp",
+				"auth_token":     "age••••••99",
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPut, "/admin/agents/agent-override", bytes.NewReader(putBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on PUT, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	gotCfg, err := repo.GetAgentConfig("agent-override")
+	if err != nil || len(gotCfg.Protocols) != 1 {
+		t.Fatalf("GetAgentConfig failed: cfg=%+v err=%v", gotCfg, err)
+	}
+	if gotCfg.Protocols[0].AuthToken != "agent-specific-secret-999" {
+		t.Fatalf("expected agent-specific secret preserved before global template, got %q", gotCfg.Protocols[0].AuthToken)
+	}
+}

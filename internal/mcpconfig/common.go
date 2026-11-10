@@ -5,46 +5,49 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 )
 
-// expandHome expands leading '~' or Windows environment variables into absolute path.
+// expandPath expands leading '~/' (or '~') as well as $VAR/${VAR} and %VAR% environment variables.
 func expandPath(p string) string {
 	if p == "" {
 		return ""
 	}
 
-	if strings.HasPrefix(p, "~") {
+	if p == "~" || strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "~\\") {
 		home, err := os.UserHomeDir()
 		if err == nil {
-			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
+			rest := strings.TrimPrefix(strings.TrimPrefix(p[1:], "/"), "\\")
+			p = filepath.Join(home, rest)
 		}
 	}
 
-	if runtime.GOOS == "windows" {
-		p = os.ExpandEnv(p)
-	}
-
+	p = expandPercentVars(os.ExpandEnv(p))
 	return filepath.Clean(p)
 }
 
-// rawServerDef captures typical server fields found in client MCP JSON files.
-type rawServerDef struct {
-	Command   string            `json:"command,omitempty"`
-	Args      []string          `json:"args,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	URL       string            `json:"url,omitempty"`
-	ServerURL string            `json:"serverUrl,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-}
-
-// rawClientConfig represents the root JSON structure common to MCP IDEs.
-type rawClientConfig struct {
-	MCPServers map[string]rawServerDef `json:"mcpServers"`
-	// Preserve other arbitrary top-level fields
-	ExtraFields map[string]interface{} `json:"-"`
+func expandPercentVars(p string) string {
+	if !strings.ContainsRune(p, '%') {
+		return p
+	}
+	var b strings.Builder
+	b.Grow(len(p))
+	for i := 0; i < len(p); {
+		if p[i] == '%' {
+			if end := strings.IndexByte(p[i+1:], '%'); end > 0 {
+				varName := p[i+1 : i+1+end]
+				if val, ok := os.LookupEnv(varName); ok {
+					b.WriteString(val)
+					i = i + 1 + end + 1
+					continue
+				}
+			}
+		}
+		b.WriteByte(p[i])
+		i++
+	}
+	return b.String()
 }
 
 // isSelfReference checks if an MCP server definition points to FaradAiWire itself,
@@ -71,7 +74,8 @@ func isSelfReference(name string, cmd string, args []string, url string) bool {
 	for _, arg := range args {
 		if arg == "connect" {
 			for _, a := range args {
-				if a == "--profile" || a == "-profile" {
+				if a == "--profile" || a == "-profile" ||
+					strings.HasPrefix(a, "--profile=") || strings.HasPrefix(a, "-profile=") {
 					return true
 				}
 			}
@@ -93,20 +97,20 @@ func isSelfReference(name string, cmd string, args []string, url string) bool {
 }
 
 // readConfigFile reads and deserializes a client JSON/JSONC configuration file.
-func readConfigFile(path string) (map[string]interface{}, []DiscoveredServer, ClientID, string, error) {
+func readConfigFile(path string) (map[string]interface{}, []DiscoveredServer, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, "", "", fmt.Errorf("read config file '%s': %w", path, err)
+		return nil, nil, fmt.Errorf("read config file '%s': %w", path, err)
 	}
 
 	cleaned, err := StripCommentsAndTrailingCommas(data)
 	if err != nil {
-		return nil, nil, "", "", fmt.Errorf("strip comments in '%s': %w", path, err)
+		return nil, nil, fmt.Errorf("strip comments in '%s': %w", path, err)
 	}
 
 	var rawMap map[string]interface{}
 	if err := json.Unmarshal(cleaned, &rawMap); err != nil {
-		return nil, nil, "", "", fmt.Errorf("unmarshal config '%s': %w", path, err)
+		return nil, nil, fmt.Errorf("unmarshal config '%s': %w", path, err)
 	}
 
 	var servers []DiscoveredServer
@@ -168,12 +172,12 @@ func readConfigFile(path string) (map[string]interface{}, []DiscoveredServer, Cl
 		return servers[i].Name < servers[j].Name
 	})
 
-	return rawMap, servers, "", "", nil
+	return rawMap, servers, nil
 }
 
 // mutateConfigFile updates the target file by removing adoptedServerNames and injecting farad-ai-wire.
 func mutateConfigFile(configPath string, profileName string, adoptedServerNames []string) error {
-	rawMap, _, _, _, err := readConfigFile(configPath)
+	rawMap, _, err := readConfigFile(configPath)
 	if err != nil {
 		return err
 	}
@@ -209,6 +213,9 @@ func mutateConfigFile(configPath string, profileName string, adoptedServerNames 
 		if sMap, ok := val.(map[string]interface{}); ok {
 			cmd, _ := sMap["command"].(string)
 			url, _ := sMap["url"].(string)
+			if url == "" {
+				url, _ = sMap["serverUrl"].(string)
+			}
 			var args []string
 			if aRaw, aOk := sMap["args"].([]interface{}); aOk {
 				for _, a := range aRaw {
@@ -241,18 +248,8 @@ func mutateConfigFile(configPath string, profileName string, adoptedServerNames 
 		perm = fi.Mode().Perm()
 	}
 
-	// Atomic write via temp file
-	tmpPath := configPath + ".faw_tmp"
-	if err := os.WriteFile(tmpPath, formatted, perm); err != nil {
-		return fmt.Errorf("write temp config: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, configPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename temp config to '%s': %w", configPath, err)
-	}
-
-	return nil
+	// Atomic write via unpredictable temp file with symlink check and fsync
+	return atomicWriteFile(configPath, formatted, perm)
 }
 
 // restoreConfigFile restores configPath directly from backupPath.
@@ -270,15 +267,46 @@ func restoreConfigFile(configPath, backupPath string) error {
 		perm = fi.Mode().Perm()
 	}
 
-	tmpPath := configPath + ".faw_restore_tmp"
-	if err := os.WriteFile(tmpPath, data, perm); err != nil {
-		return fmt.Errorf("write restore tmp file: %w", err)
+	return atomicWriteFile(configPath, data, perm)
+}
+
+// atomicWriteFile safely writes data to path via a unique temp file in the target directory,
+// refusing to overwrite symlinks, enforcing explicit permissions, syncing to disk, and renaming.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to write through symlink %q", path)
 	}
 
-	if err := os.Rename(tmpPath, configPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename restore file: %w", err)
+	dir := filepath.Dir(path)
+	tmpFile, err := os.CreateTemp(dir, "."+filepath.Base(path)+".faw-*")
+	if err != nil {
+		return fmt.Errorf("create temp file in '%s': %w", dir, err)
 	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
+	if err := tmpFile.Chmod(perm); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("chmod temp file '%s': %w", tmpPath, err)
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("write temp file '%s': %w", tmpPath, err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("sync temp file '%s': %w", tmpPath, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close temp file '%s': %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("commit file '%s': %w", path, err)
+	}
+	tmpPath = ""
 	return nil
 }

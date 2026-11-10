@@ -31,12 +31,12 @@ var (
 type StoredAPIKey struct {
 	ID           string        `json:"id"`
 	Name         string        `json:"name"`
-	AgentName    string        `json:"agent_name"` // Bound Agent (e.g. "Claude", "coder") or "*"
-	Prefix       string        `json:"prefix"`     // e.g. "faw_live_a89c" (first 12 chars of raw key)
+	AgentName    string        `json:"agent_name"`        // Bound Agent (e.g. "Claude", "coder") or "*"
+	Prefix       string        `json:"prefix"`            // e.g. "faw_live_a89c" (first 12 chars of raw key)
 	RawKey       string        `json:"raw_key,omitempty"` // Preserved for local workstation reveal (ADR-0031)
-	Hash         string        `json:"hash"`       // hex-encoded SHA-256(salt + ":" + rawToken)
-	Salt         string        `json:"salt"`       // hex-encoded random 16-byte salt
-	Role         string        `json:"role"`       // "Developer", "Admin", etc.
+	Hash         string        `json:"hash"`              // hex-encoded SHA-256(salt + ":" + rawToken)
+	Salt         string        `json:"salt"`              // hex-encoded random 16-byte salt
+	Role         string        `json:"role"`              // "Developer", "Admin", etc.
 	CreatedAt    time.Time     `json:"created_at"`
 	LastUsedAt   time.Time     `json:"last_used_at"`
 	Revoked      bool          `json:"revoked"`
@@ -133,10 +133,13 @@ type storagePayload struct {
 
 // FileKeyStore implements KeyStore backed by an atomic local JSON file with in-memory usage buffering.
 type FileKeyStore struct {
-	filePath string
-	mu       sync.RWMutex
-	keys     map[string]*StoredAPIKey // ID -> StoredAPIKey
-	dirty    atomic.Bool              // tracks whether in-memory LastUsedAt updates require disk flush
+	filePath          string
+	mu                sync.RWMutex
+	keys              map[string]*StoredAPIKey // ID -> StoredAPIKey
+	dirty             atomic.Bool              // tracks whether in-memory LastUsedAt updates require disk flush
+	lastModUnix       int64
+	lastSize          int64
+	lastStatCheckUnix atomic.Int64
 }
 
 // IsDirty reports whether the keystore has in-memory modifications awaiting persistence.
@@ -173,9 +176,22 @@ func NewMemoryKeyStore() *FileKeyStore {
 func (f *FileKeyStore) Load() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.loadLocked()
+}
 
+func (f *FileKeyStore) loadLocked() error {
 	if f.filePath == "" {
 		return nil
+	}
+
+	info, statErr := os.Stat(f.filePath)
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			f.lastModUnix = 0
+			f.lastSize = 0
+			return nil
+		}
+		return statErr
 	}
 
 	data, err := os.ReadFile(f.filePath)
@@ -191,22 +207,83 @@ func (f *FileKeyStore) Load() error {
 		return fmt.Errorf("failed to unmarshal api_keys.json: %w", err)
 	}
 
-	f.keys = make(map[string]*StoredAPIKey, len(payload.APIKeys))
+	loaded := make(map[string]*StoredAPIKey, len(payload.APIKeys))
 	for _, k := range payload.APIKeys {
 		if k != nil && k.ID != "" {
 			k.initMemory()
-			f.keys[k.ID] = k
+			if old, ok := f.keys[k.ID]; ok && old != nil && old.lastUsedNano != nil && k.lastUsedNano != nil {
+				if oldNano := old.lastUsedNano.Load(); oldNano > k.lastUsedNano.Load() {
+					k.lastUsedNano.Store(oldNano)
+				}
+			}
+			loaded[k.ID] = k
 		}
 	}
 
+	f.keys = loaded
+	f.lastModUnix = info.ModTime().UnixNano()
+	f.lastSize = info.Size()
 	return nil
 }
 
-// Save writes the current key state atomically to disk with 0600 permissions.
-func (f *FileKeyStore) Save() error {
+// reloadIfChanged checks disk metadata (throttled unless force=true) and reloads api_keys.json
+// when modified by another process (such as `faradaiwire adopt` updating keys while the daemon runs).
+func (f *FileKeyStore) reloadIfChanged(force bool) bool {
+	if f.filePath == "" {
+		return false
+	}
+
+	now := time.Now().UnixNano()
+	if !force {
+		prev := f.lastStatCheckUnix.Load()
+		if now-prev < int64(time.Second) {
+			return false
+		}
+		if !f.lastStatCheckUnix.CompareAndSwap(prev, now) {
+			return false
+		}
+	} else {
+		f.lastStatCheckUnix.Store(now)
+	}
+
+	info, err := os.Stat(f.filePath)
+	if err != nil {
+		return false
+	}
+	modUnix := info.ModTime().UnixNano()
+	size := info.Size()
+
+	f.mu.RLock()
+	unchanged := modUnix == f.lastModUnix && size == f.lastSize
+	f.mu.RUnlock()
+	if unchanged {
+		return false
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if modUnix == f.lastModUnix && size == f.lastSize {
+		return false
+	}
+	return f.loadLocked() == nil
+}
 
+// reloadIfChangedLocked must be called with f.mu.Lock() held.
+func (f *FileKeyStore) reloadIfChangedLocked() bool {
+	if f.filePath == "" {
+		return false
+	}
+	info, err := os.Stat(f.filePath)
+	if err != nil {
+		return false
+	}
+	if info.ModTime().UnixNano() == f.lastModUnix && info.Size() == f.lastSize {
+		return false
+	}
+	return f.loadLocked() == nil
+}
+
+func (f *FileKeyStore) syncLastUsedLocked() {
 	for _, k := range f.keys {
 		if k != nil && k.lastUsedNano != nil {
 			if nano := k.lastUsedNano.Load(); nano > 0 {
@@ -214,6 +291,15 @@ func (f *FileKeyStore) Save() error {
 			}
 		}
 	}
+}
+
+// Save writes the current key state atomically to disk with 0600 permissions.
+func (f *FileKeyStore) Save() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	_ = f.reloadIfChangedLocked()
+	f.syncLastUsedLocked()
 
 	if err := f.saveLocked(); err != nil {
 		return err
@@ -223,7 +309,8 @@ func (f *FileKeyStore) Save() error {
 	return nil
 }
 
-// FlushDirty atomically persists buffered in-memory keystore updates to disk if dirty.
+// FlushDirty atomically persists buffered in-memory keystore updates to disk if dirty,
+// reloading any external additions/revocations before writing so external keys are never overwritten.
 func (f *FileKeyStore) FlushDirty() error {
 	if !f.dirty.Load() {
 		return nil
@@ -236,13 +323,8 @@ func (f *FileKeyStore) FlushDirty() error {
 		return nil
 	}
 
-	for _, k := range f.keys {
-		if k != nil && k.lastUsedNano != nil {
-			if nano := k.lastUsedNano.Load(); nano > 0 {
-				k.LastUsedAt = time.Unix(0, nano).UTC()
-			}
-		}
-	}
+	_ = f.reloadIfChangedLocked()
+	f.syncLastUsedLocked()
 
 	if err := f.saveLocked(); err != nil {
 		return err
@@ -289,6 +371,10 @@ func (f *FileKeyStore) saveLocked() error {
 	if err := os.Rename(tmpFile, f.filePath); err != nil {
 		_ = os.Remove(tmpFile)
 		return fmt.Errorf("failed to atomic replace keystore file: %w", err)
+	}
+	if info, statErr := os.Stat(f.filePath); statErr == nil {
+		f.lastModUnix = info.ModTime().UnixNano()
+		f.lastSize = info.Size()
 	}
 
 	return nil
@@ -357,13 +443,8 @@ func (f *FileKeyStore) GenerateKey(name, role string, agentName ...string) (stri
 	record.initMemory()
 
 	f.mu.Lock()
-	for _, k := range f.keys {
-		if k != nil && k.lastUsedNano != nil {
-			if nano := k.lastUsedNano.Load(); nano > 0 {
-				k.LastUsedAt = time.Unix(0, nano).UTC()
-			}
-		}
-	}
+	_ = f.reloadIfChangedLocked()
+	f.syncLastUsedLocked()
 	f.keys[id] = record
 	err := f.saveLocked()
 	if err == nil {
@@ -382,17 +463,33 @@ func (f *FileKeyStore) GenerateKey(name, role string, agentName ...string) (stri
 
 // ValidateKey validates an incoming raw token against registered unrevoked keys in constant time.
 // If valid, updates LastUsedAt in memory without disk I/O or background goroutine allocations (SEC-018 / DEC-06).
+// On lookup miss (or once per second on disk change), reloads api_keys.json transparently so keys created
+// externally (e.g. `faradaiwire adopt`) take effect without restarting a running daemon.
 func (f *FileKeyStore) ValidateKey(rawToken string) (*StoredAPIKey, bool) {
 	rawToken = strings.TrimSpace(rawToken)
 	if rawToken == "" {
 		return nil, false
 	}
 
+	if f.filePath != "" {
+		f.reloadIfChanged(false)
+	}
+
+	if keyCopy, ok := f.validateCachedKey(rawToken); ok {
+		return keyCopy, true
+	}
+
+	if f.filePath != "" && f.reloadIfChanged(true) {
+		return f.validateCachedKey(rawToken)
+	}
+	return nil, false
+}
+
+func (f *FileKeyStore) validateCachedKey(rawToken string) (*StoredAPIKey, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
 	var matchedKey *StoredAPIKey
-
 	for _, k := range f.keys {
 		if k == nil || k.Revoked {
 			continue
@@ -428,18 +525,13 @@ func (f *FileKeyStore) RevokeKey(id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	_ = f.reloadIfChangedLocked()
 	k, exists := f.keys[id]
 	if !exists {
 		return ErrKeyNotFound
 	}
 
-	for _, key := range f.keys {
-		if key != nil && key.lastUsedNano != nil {
-			if nano := key.lastUsedNano.Load(); nano > 0 {
-				key.LastUsedAt = time.Unix(0, nano).UTC()
-			}
-		}
-	}
+	f.syncLastUsedLocked()
 
 	k.Revoked = true
 	if err := f.saveLocked(); err != nil {
@@ -451,6 +543,10 @@ func (f *FileKeyStore) RevokeKey(id string) error {
 
 // ListKeys returns all keys as metadata without exposing hashes or salts.
 func (f *FileKeyStore) ListKeys() []*KeyMetadata {
+	if f.filePath != "" {
+		f.reloadIfChanged(true)
+	}
+
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
@@ -465,6 +561,10 @@ func (f *FileKeyStore) ListKeys() []*KeyMetadata {
 
 // GetKey returns metadata for a single key by ID.
 func (f *FileKeyStore) GetKey(id string) (*KeyMetadata, error) {
+	if f.filePath != "" {
+		f.reloadIfChanged(true)
+	}
+
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 

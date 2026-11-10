@@ -3,21 +3,23 @@ package agent
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
 )
 
 // ProtocolConfig represents an upstream Model Context Protocol backend endpoint (stdio subprocess or HTTP/SSE gateway).
 type ProtocolConfig struct {
-	ID           string   `json:"protocol_id"`
-	Name         string   `json:"protocol_name"`
-	Type         string   `json:"type"` // "stdio", "sse", "http"
-	URLOrCommand string   `json:"url_or_command"`
-	Command      string   `json:"command,omitempty"`
-	Args         []string `json:"args,omitempty"`
-	Env          []string `json:"env,omitempty"`
+	ID           string            `json:"protocol_id"`
+	Name         string            `json:"protocol_name"`
+	Type         string            `json:"type"` // "stdio", "sse", "http"
+	URLOrCommand string            `json:"url_or_command"`
+	Command      string            `json:"command,omitempty"`
+	Args         []string          `json:"args,omitempty"`
+	Env          []string          `json:"env,omitempty"`
 	AuthToken    string            `json:"auth_token,omitempty"`
 	Headers      map[string]string `json:"headers,omitempty"`
 	TargetScope  string            `json:"target_scope,omitempty"` // "local" or "corporate" / "upstream"
-	AllowedTools []string `json:"allowed_tools,omitempty"`
+	AllowedTools []string          `json:"allowed_tools,omitempty"`
 }
 
 // IsToolAllowed returns true if toolName is permitted under the protocol's allowed_tools whitelist.
@@ -172,7 +174,7 @@ type RouteConfig struct {
 	RoutingMode        string                                   `json:"routing_mode"` // "aggregated" (default) or "direct"
 	Protocols          []ProtocolConfig                         `json:"protocols"`
 	EnabledTools       []string                                 `json:"enabled_tools,omitempty"`       // Layer 2 scoping whitelist
-	ToolOverrides      *ToolOverrides                           `json:"tool_overrides,omitempty"`     // Layer 2 scoping overrides
+	ToolOverrides      *ToolOverrides                           `json:"tool_overrides,omitempty"`      // Layer 2 scoping overrides
 	ToolGovernance     map[string]ToolGovernanceMode            `json:"tool_governance,omitempty"`     // Layer 3 tool governance & HITL matrix
 	RetainedGovernance map[string]map[string]ToolGovernanceMode `json:"retained_governance,omitempty"` // Layer 3 configuration retention per detached protocol
 	RateLimit          *RateLimitOverride                       `json:"rate_limit,omitempty"`          // Agent-level Rate Limiting override (ADR-0042)
@@ -272,6 +274,35 @@ func (r *RouteConfig) Clone() *RouteConfig {
 	return clone
 }
 
+// MaskSecrets returns a copy of ProtocolConfig with sensitive credentials masked for Admin API responses.
+func (p ProtocolConfig) MaskSecrets() ProtocolConfig {
+	cp := p.Clone()
+	for i, envStr := range cp.Env {
+		cp.Env[i] = protocol.MaskEnvString(envStr)
+	}
+	if cp.AuthToken != "" {
+		cp.AuthToken = protocol.MaskSecretValue(cp.AuthToken)
+	}
+	for k, v := range cp.Headers {
+		cp.Headers[k] = protocol.MaskHeaderValue(k, v)
+	}
+	cp.URLOrCommand = protocol.RedactURLCredentials(cp.URLOrCommand)
+	return cp
+}
+
+// MaskSecrets returns a deep copy of RouteConfig safe for Admin API responses with embedded
+// protocol credentials (Env, AuthToken, Headers, URL userinfo) masked.
+func (r *RouteConfig) MaskSecrets() *RouteConfig {
+	if r == nil {
+		return nil
+	}
+	masked := r.Clone()
+	for i := range masked.Protocols {
+		masked.Protocols[i] = masked.Protocols[i].MaskSecrets()
+	}
+	return masked
+}
+
 // ToolMetadata describes an individual tool within an agent's tools_manifest.json.
 type ToolMetadata struct {
 	Name          string                 `json:"name"`
@@ -285,19 +316,19 @@ type ToolMetadata struct {
 
 // ToolTargetInfo contains resolved target MCP routing details for executing a specific tool.
 type ToolTargetInfo struct {
-	ProtocolID   string   `json:"protocol_id"`
-	ProtocolName string   `json:"protocol_name"`
-	TargetURL    string   `json:"target_url"`
-	ToolName     string   `json:"tool_name"`
-	RawToolName  string   `json:"raw_tool_name,omitempty"`
-	Type         string   `json:"type"` // "stdio", "sse", "http"
-	Command      string   `json:"command,omitempty"`
-	Args         []string `json:"args,omitempty"`
-	Env          []string `json:"env,omitempty"`
+	ProtocolID   string            `json:"protocol_id"`
+	ProtocolName string            `json:"protocol_name"`
+	TargetURL    string            `json:"target_url"`
+	ToolName     string            `json:"tool_name"`
+	RawToolName  string            `json:"raw_tool_name,omitempty"`
+	Type         string            `json:"type"` // "stdio", "sse", "http"
+	Command      string            `json:"command,omitempty"`
+	Args         []string          `json:"args,omitempty"`
+	Env          []string          `json:"env,omitempty"`
 	AuthToken    string            `json:"auth_token,omitempty"`
 	Headers      map[string]string `json:"headers,omitempty"`
 	TargetScope  string            `json:"target_scope,omitempty"` // "local" or "corporate" / "upstream"
-	AllowedTools []string `json:"allowed_tools,omitempty"`
+	AllowedTools []string          `json:"allowed_tools,omitempty"`
 }
 
 // IsToolAllowed returns true if toolName is permitted under the resolved target's allowed_tools whitelist.
@@ -435,7 +466,7 @@ func (r *RouteConfig) IsToolAllowed(toolName string) bool {
 }
 
 // GetToolGovernanceMode returns the configured ToolGovernanceMode for a tool, or fallback if unconfigured.
-// It checks both the full (potentially namespaced) toolName and the clean un-prefixed tool name in O(1) time.
+// Fast-path exact lookup avoids heap allocations; case-insensitive EqualFold fallback prevents bypass via casing variations.
 func (r *RouteConfig) GetToolGovernanceMode(toolName string) (ToolGovernanceMode, bool) {
 	if r == nil || len(r.ToolGovernance) == 0 {
 		return "", false
@@ -443,9 +474,21 @@ func (r *RouteConfig) GetToolGovernanceMode(toolName string) (ToolGovernanceMode
 	if mode, ok := r.ToolGovernance[toolName]; ok && mode.IsValid() {
 		return mode, true
 	}
+	var rawTool string
+	hasPrefix := false
 	if strings.Contains(toolName, "__") {
 		parts := strings.SplitN(toolName, "__", 2)
-		if mode, ok := r.ToolGovernance[parts[1]]; ok && mode.IsValid() {
+		rawTool = parts[1]
+		hasPrefix = true
+		if mode, ok := r.ToolGovernance[rawTool]; ok && mode.IsValid() {
+			return mode, true
+		}
+	}
+	for configuredName, mode := range r.ToolGovernance {
+		if !mode.IsValid() {
+			continue
+		}
+		if strings.EqualFold(configuredName, toolName) || (hasPrefix && strings.EqualFold(configuredName, rawTool)) {
 			return mode, true
 		}
 	}
@@ -477,5 +520,3 @@ func (r *RouteConfig) ComputeEffectiveTools(manifestTools []ToolMetadata) []Tool
 	}
 	return effective
 }
-
-

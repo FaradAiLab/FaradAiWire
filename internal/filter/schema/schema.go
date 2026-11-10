@@ -14,9 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
 	"github.com/FaradAiLab/FaradAiWire/pkg/filter"
+	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 	"github.com/xeipuuv/gojsonschema"
 )
 
@@ -41,10 +41,11 @@ type SchemaFilter struct {
 	dynamicCapture  bool   // Capture schemas dynamically from tools/list response
 	baselinePinning bool   // Pin first-seen tool schemas and update on changes
 
-	schemaCache     map[string]json.RawMessage // tool_name -> raw JSON schema
-	schemaBaselines map[string]string          // tool_name -> sha256 hex string
-	duckdbStore     Store                      // Optional persistent DuckDB storage
-	mu              sync.RWMutex
+	schemaCache      map[string]json.RawMessage // tool_name -> raw JSON schema
+	schemaCacheLower map[string]json.RawMessage // strings.ToLower(tool_name) -> raw JSON schema
+	schemaBaselines  map[string]string          // tool_name -> sha256 hex string
+	duckdbStore      Store                      // Optional persistent DuckDB storage
+	mu               sync.RWMutex
 
 	writeChan chan schemaWriteTask
 	doneChan  chan struct{}
@@ -70,14 +71,15 @@ func (s *SchemaFilter) GetDuckDBStore() Store {
 // NewSchemaFilter creates a new SchemaFilter instance.
 func NewSchemaFilter(enabled bool, schemasDir string, dynamicCapture bool, baselinePinning bool) *SchemaFilter {
 	f := &SchemaFilter{
-		enabled:         enabled,
-		schemasDir:      schemasDir,
-		dynamicCapture:  dynamicCapture,
-		baselinePinning: baselinePinning,
-		schemaCache:     make(map[string]json.RawMessage),
-		schemaBaselines: make(map[string]string),
-		writeChan:       make(chan schemaWriteTask, 512),
-		doneChan:        make(chan struct{}),
+		enabled:          enabled,
+		schemasDir:       schemasDir,
+		dynamicCapture:   dynamicCapture,
+		baselinePinning:  baselinePinning,
+		schemaCache:      make(map[string]json.RawMessage),
+		schemaCacheLower: make(map[string]json.RawMessage),
+		schemaBaselines:  make(map[string]string),
+		writeChan:        make(chan schemaWriteTask, 512),
+		doneChan:         make(chan struct{}),
 	}
 
 	// Start asynchronous write-behind background worker
@@ -272,7 +274,7 @@ func (s *SchemaFilter) LoadSchemasFromDisk() error {
 				continue
 			}
 
-			normalized, err := normalizeJSON(content)
+			normalized, err := NormalizeJSON(content)
 			if err != nil {
 				slog.Error("Failed to normalize schema", slog.String("tool", toolName), slog.String("error", err.Error()))
 				continue
@@ -290,6 +292,7 @@ func (s *SchemaFilter) LoadSchemasFromDisk() error {
 	s.mu.Lock()
 	for k, v := range loadedCache {
 		s.schemaCache[k] = v
+		s.schemaCacheLower[strings.ToLower(k)] = v
 	}
 	for k, v := range loadedBaselines {
 		s.schemaBaselines[k] = v
@@ -320,6 +323,9 @@ func (s *SchemaFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mc
 
 	s.mu.RLock()
 	schemaRaw, exists := s.schemaCache[callParams.Name]
+	if !exists && callParams.Name != "" {
+		schemaRaw, exists = s.schemaCacheLower[strings.ToLower(callParams.Name)]
+	}
 	s.mu.RUnlock()
 
 	if !exists {
@@ -449,6 +455,7 @@ func (s *SchemaFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (
 		}
 
 		s.schemaCache[pt.name] = pt.inputSchema
+		s.schemaCacheLower[strings.ToLower(pt.name)] = pt.inputSchema
 	}
 	s.mu.Unlock()
 
@@ -480,6 +487,7 @@ func (s *SchemaFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (
 func (s *SchemaFilter) ClearBaselines() {
 	s.mu.Lock()
 	s.schemaCache = make(map[string]json.RawMessage)
+	s.schemaCacheLower = make(map[string]json.RawMessage)
 	s.schemaBaselines = make(map[string]string)
 	s.mu.Unlock()
 
@@ -496,7 +504,8 @@ func (s *SchemaFilter) ClearBaselines() {
 	slog.Info("Pinned baselines and cache cleared on disk and in-memory")
 }
 
-func normalizeJSON(raw json.RawMessage) ([]byte, error) {
+// NormalizeJSON produces a deterministic canonical JSON representation for hashing.
+func NormalizeJSON(raw json.RawMessage) ([]byte, error) {
 	var obj interface{}
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, err
@@ -504,3 +513,6 @@ func normalizeJSON(raw json.RawMessage) ([]byte, error) {
 	return json.Marshal(obj)
 }
 
+func normalizeJSON(raw json.RawMessage) ([]byte, error) {
+	return NormalizeJSON(raw)
+}

@@ -14,7 +14,7 @@ FaradAiWire is distributed as a single-tenant host-native binary to ensure seaml
 - **Supported Operating Systems:**
   - macOS 12+ (Apple Silicon `arm64` & Intel `amd64`)
   - Linux Kernel 5.4+ (Ubuntu, Debian, Fedora, Arch; `x86_64` & `aarch64`)
-  - Windows 10 / 11 / Server 2022 (`x64` & `arm64`)
+  - Windows 10 / 11 / Server 2022 (`x64`)
 - **Memory & CPU:** $\ge 256\text{ MB}$ RAM, 1 vCPU (static regex engine consumes $<30\text{ MB}$ at idle).
 - **Compilation Requirements (Source only):** Go 1.23+ with `CGO_ENABLED=1` (required for embedded DuckDB analytics engine) and a C compiler (`clang` on macOS, `gcc` on Linux).
 
@@ -55,15 +55,10 @@ brew services stop faradaiwire
 
 ### 2. Linux & macOS (Universal Shell Installer)
 
-A zero-dependency POSIX shell script that auto-detects OS architecture, verifies SHA-256 checksums, installs the binary to `~/.local/bin` (or `/usr/local/bin`), and provisions initial configuration in `~/.faradaiwire/config.yaml`:
+A zero-dependency POSIX shell script that auto-detects OS architecture and installs the binary to `/usr/local/bin` (or `~/.local/bin` when non-root):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/install.sh | sh
-```
-
-To install into a custom directory:
-```bash
-INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/install.sh | sh
 ```
 
 ---
@@ -76,7 +71,7 @@ Run in a PowerShell terminal (requires PowerShell 5.1+):
 irm https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/install.ps1 | iex
 ```
 
-The script installs `faradaiwire.exe` to `$HOME\.faradaiwire\bin` and appends it to your User `PATH`.
+The script installs `faradaiwire.exe` to `%LOCALAPPDATA%\Programs\faradaiwire` (`$env:LOCALAPPDATA\Programs\faradaiwire`) and appends it to your User `PATH`.
 
 ---
 
@@ -164,17 +159,47 @@ curl -fsSL https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/install
 
 ## Uninstalling
 
-### Homebrew:
+> [!NOTE]
+> By default, uninstalling removes the binary (and restores any adopted IDE configs via `faradaiwire adopt --rollback` if backups exist) while preserving `~/.faradaiwire` (`config.yaml`, API keys, and DuckDB analytics). Pass `--purge` to `uninstall.sh` (or `-Purge` to `uninstall.ps1` / set `FARADAI_WIRE_PURGE=1`) to remove runtime data as well.
+
+### Homebrew (macOS & Linux):
 ```bash
 brew services stop faradaiwire
 brew uninstall faradaiwire
 brew untap FaradAiLab/tap
-```
-
-### Manual Removal:
-```bash
-rm -f /usr/local/bin/faradaiwire
 # Optionally remove runtime data & analytics:
 rm -rf ~/.faradaiwire
 ```
+
+### Shell Uninstaller (macOS & Linux):
+```bash
+curl -fsSL https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/uninstall.sh | sh
+
+# Or also purge runtime data & analytics:
+curl -fsSL https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/uninstall.sh | sh -s -- --purge
+```
+
+### Windows (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/uninstall.ps1 | iex
+
+# Or also purge runtime data & analytics:
+$env:FARADAI_WIRE_PURGE = "1"; irm https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/uninstall.ps1 | iex
+```
+
+### Manual Removal:
+- **macOS & Linux:**
+  ```bash
+  pkill -x faradaiwire || true
+  rm -f /usr/local/bin/faradaiwire ~/.local/bin/faradaiwire
+  # Optionally remove runtime data & analytics:
+  rm -rf ~/.faradaiwire
+  ```
+- **Windows (PowerShell):**
+  ```powershell
+  Stop-Process -Name faradaiwire -Force -ErrorAction SilentlyContinue
+  Remove-Item -Path "$env:LOCALAPPDATA\Programs\faradaiwire" -Recurse -Force -ErrorAction SilentlyContinue
+  # Optionally remove runtime data & analytics:
+  Remove-Item -Path "$env:USERPROFILE\.faradaiwire" -Recurse -Force -ErrorAction SilentlyContinue
+  ```
 

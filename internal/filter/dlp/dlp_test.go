@@ -10,7 +10,7 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
-	"github.com/FaradAiLab/FaradAiWire/internal/guard"
+	"github.com/FaradAiLab/FaradAiWire/internal/guard/hitltypes"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
@@ -556,11 +556,11 @@ func TestDLPFilter_DirectionalToolExemptions_BlockAndEdgeCases(t *testing.T) {
 }
 
 type mockHITLApprover struct {
-	approveFn func(ctx context.Context, req *guard.HITLRequest) (bool, error)
+	approveFn func(ctx context.Context, req *hitltypes.HITLRequest) (bool, error)
 	callCount int
 }
 
-func (m *mockHITLApprover) RequestApproval(ctx context.Context, req *guard.HITLRequest) (bool, error) {
+func (m *mockHITLApprover) RequestApproval(ctx context.Context, req *hitltypes.HITLRequest) (bool, error) {
 	m.callCount++
 	if m.approveFn != nil {
 		return m.approveFn(ctx, req)
@@ -597,7 +597,7 @@ func TestDLPFilter_ActionHITL(t *testing.T) {
 
 	t.Run("DispatcherApproved_SetsHumanApprovedContext", func(t *testing.T) {
 		approver := &mockHITLApprover{
-			approveFn: func(ctx context.Context, req *guard.HITLRequest) (bool, error) {
+			approveFn: func(ctx context.Context, req *hitltypes.HITLRequest) (bool, error) {
 				return true, nil
 			},
 		}
@@ -625,7 +625,7 @@ func TestDLPFilter_ActionHITL(t *testing.T) {
 
 	t.Run("DispatcherDenied_ReturnsErrHITLDenied", func(t *testing.T) {
 		approver := &mockHITLApprover{
-			approveFn: func(ctx context.Context, req *guard.HITLRequest) (bool, error) {
+			approveFn: func(ctx context.Context, req *hitltypes.HITLRequest) (bool, error) {
 				return false, nil
 			},
 		}
@@ -647,4 +647,54 @@ func TestDLPFilter_ActionHITL(t *testing.T) {
 	})
 }
 
+func TestDLPFilter_AgentOverride_CompilesBothPatternsAndCustomPatterns(t *testing.T) {
+	tempDir := t.TempDir()
+	agentDir := filepath.Join(tempDir, "Dual-Rules-Agent", "current")
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatalf("failed to create agent dir: %v", err)
+	}
 
+	agentDLP := `{
+		"enabled": true,
+		"patterns": [
+			{"name": "card", "regex": "\\b\\d{4}-\\d{4}-\\d{4}-\\d{4}\\b", "action": "mask"}
+		],
+		"custom_patterns": [
+			{"name": "internal_tok", "regex": "faw_secret_[0-9]+", "action": "block"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(agentDir, "dlp.json"), []byte(agentDLP), 0644); err != nil {
+		t.Fatalf("failed to write dlp.json: %v", err)
+	}
+
+	filter, err := NewDLPFilter(true, nil, nil, tempDir)
+	if err != nil {
+		t.Fatalf("NewDLPFilter failed: %v", err)
+	}
+	ctx := context.WithValue(context.Background(), types.AgentNameContextKey, "Dual-Rules-Agent")
+
+	// Rule from "patterns" must still mask
+	resp := &mcp.Response{
+		JSONRPC: "2.0",
+		ID:      1,
+		Result:  json.RawMessage(`{"data": "4543-9821-2341-9872"}`),
+	}
+	outResp, mcpErr := filter.FilterResponse(ctx, resp)
+	if mcpErr != nil {
+		t.Fatalf("unexpected FilterResponse error: %v", mcpErr)
+	}
+	if string(outResp.Result) != `{"data": "[REDACTED:CARD]"}` {
+		t.Fatalf("expected patterns rule to mask card, got: %s", string(outResp.Result))
+	}
+
+	// Rule from "custom_patterns" must also enforce block (must not be dropped when patterns is non-empty)
+	req := &mcp.Request{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"secret": "faw_secret_12345"}`),
+	}
+	_, blockErr := filter.FilterRequest(ctx, req)
+	if blockErr == nil || blockErr.Code != mcp.ErrDLPViolation {
+		t.Fatalf("expected custom_patterns rule to block secret when patterns is also present, got %+v", blockErr)
+	}
+}

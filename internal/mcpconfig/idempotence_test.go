@@ -112,7 +112,7 @@ func TestIdempotentAdoption_RepeatedRuns(t *testing.T) {
 	}
 
 	// 2. First pass: readConfigFile should ONLY discover "github", completely ignoring "faradaimcp"
-	_, servers, _, _, err := readConfigFile(cfgPath)
+	_, servers, err := readConfigFile(cfgPath)
 	if err != nil {
 		t.Fatalf("readConfigFile failed: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestIdempotentAdoption_RepeatedRuns(t *testing.T) {
 
 	// 4. Second pass (Repeated adopt on already-shielded config):
 	// Should discover 0 servers because all active servers are already FaradAiWire!
-	_, serversSecondPass, _, _, err := readConfigFile(cfgPath)
+	_, serversSecondPass, err := readConfigFile(cfgPath)
 	if err != nil {
 		t.Fatalf("second readConfigFile failed: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestIdempotentAdoption_RepeatedRuns(t *testing.T) {
 	_ = os.WriteFile(cfgPath, updatedBytes, 0600)
 
 	// Third read: should discover ONLY "slack", ignoring "farad-ai-wire"
-	_, serversThirdPass, _, _, err := readConfigFile(cfgPath)
+	_, serversThirdPass, err := readConfigFile(cfgPath)
 	if err != nil {
 		t.Fatalf("third readConfigFile failed: %v", err)
 	}

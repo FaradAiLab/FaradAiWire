@@ -76,20 +76,51 @@ func (s *SSEProxy) Start(ctx context.Context) error {
 	}
 }
 
-// Shutdown initiates graceful termination of the SSE proxy server listener.
-func (s *SSEProxy) Shutdown(ctx context.Context) error {
+func (s *SSEProxy) lifecycleCtx() context.Context {
 	s.mu.RLock()
-	server := s.server
+	closed := s.closed
+	ctx := s.baseCtx
 	s.mu.RUnlock()
-
-	if server == nil {
-		return nil
+	if closed {
+		canceledCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return canceledCtx
+	}
+	if ctx != nil {
+		return ctx
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		canceledCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return canceledCtx
+	}
+	if s.baseCtx == nil {
+		s.baseCtx, s.baseCancel = context.WithCancel(context.Background())
+	}
+	return s.baseCtx
+}
+
+// Shutdown initiates graceful termination of the SSE proxy server listener,
+// canceling detached message bridges only after active HTTP requests drain.
+func (s *SSEProxy) Shutdown(ctx context.Context) error {
 	var shutdownErr error
 	s.shutdownOnce.Do(func() {
-		slog.Info("Shutting down SSE proxy server...")
-		shutdownErr = server.Shutdown(ctx)
+		s.mu.Lock()
+		s.closed = true
+		server := s.server
+		cancel := s.baseCancel
+		s.mu.Unlock()
+
+		if server != nil {
+			slog.Info("Shutting down SSE proxy server...")
+			shutdownErr = server.Shutdown(ctx)
+		}
+		if cancel != nil {
+			cancel()
+		}
 	})
 	return shutdownErr
 }

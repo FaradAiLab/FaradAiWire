@@ -596,3 +596,47 @@ func TestSchemaFilter_Flush_ContextCancellation(t *testing.T) {
 	}
 }
 
+func TestSchemaFilter_CaseInsensitiveToolLookup(t *testing.T) {
+	tmpDir := t.TempDir()
+	f := schema.NewSchemaFilter(true, tmpDir, true, true)
+	defer f.Close()
+
+	listResp := &mcp.Response{
+		JSONRPC: "2.0",
+		ID:      1,
+		Result: json.RawMessage(fmt.Sprintf(`{
+			"tools": [
+				{
+					"name": "search_docs",
+					"description": "Search documentation",
+					"inputSchema": %s
+				}
+			]
+		}`, sampleSchema)),
+	}
+	if _, mErr := f.FilterResponse(context.Background(), listResp); mErr != nil {
+		t.Fatalf("unexpected FilterResponse error: %v", mErr)
+	}
+
+	ctx := context.Background()
+	reqValid := &mcp.Request{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name": "SEARCH_DOCS", "arguments": {"query": "auth", "limit": 5}}`),
+		ID:      10,
+	}
+	if _, err := f.FilterRequest(ctx, reqValid); err != nil {
+		t.Fatalf("expected uppercase tool name with valid args to pass, got %v", err)
+	}
+
+	reqInvalid := &mcp.Request{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name": "Search_Docs", "arguments": {"limit": 5}}`),
+		ID:      11,
+	}
+	_, err := f.FilterRequest(ctx, reqInvalid)
+	if err == nil || err.Code != mcp.ErrSchemaValidation {
+		t.Fatalf("expected ErrSchemaValidation for mixed-case tool missing required param, got %+v", err)
+	}
+}

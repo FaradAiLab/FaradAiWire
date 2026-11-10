@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,17 +41,20 @@ type EventBroadcaster interface {
 
 // AdminServer manages gateway configuration, inspection, diff previews, approval, and live telemetry.
 type AdminServer struct {
-	cfg             *config.Config
-	cfgProvider     *config.YAMLConfigProvider
-	agentRepo        agent.Repository
-	reloadFunc       func() error
-	reloadConfigFunc func(*config.Config) error
-	schemaClear      func()
-	telemetryEngine TelemetryReader
-	eventBroker     EventBroadcaster
-	server          *http.Server
-	safeHTTPClient  *http.Client
-	mu              sync.RWMutex
+	cfg                  *config.Config
+	cfgProvider          *config.YAMLConfigProvider
+	agentRepo            agent.Repository
+	reloadFunc           func() error
+	reloadConfigFunc     func(*config.Config) error
+	schemaClear          func()
+	telemetryEngine      TelemetryReader
+	eventBroker          EventBroadcaster
+	server               *http.Server
+	safeHTTPClient       *http.Client
+	safeHTTPClientCustom bool
+	safeHTTPClientOpts   transport.SafeTransportOptions
+	mu                   sync.RWMutex
+	configMutMu          sync.Mutex
 	keyStore             auth.KeyStore
 	protocolStore        protocol.Store
 	guardCatalog         guard.CatalogStore
@@ -75,11 +79,10 @@ func NewAdminServer(cfg *config.Config, reloadFunc func() error, schemaClear fun
 		hub.SetAllowedOrigins(cfg.Security.CORSAllowedOrigins)
 	}
 	s := &AdminServer{
-		cfg:            cfg,
-		reloadFunc:     reloadFunc,
-		schemaClear:    schemaClear,
-		safeHTTPClient: transport.NewSafeHTTPClient(transport.DefaultSafeOptions(), 10*time.Second),
-		wsHub:          hub,
+		cfg:         cfg,
+		reloadFunc:  reloadFunc,
+		schemaClear: schemaClear,
+		wsHub:       hub,
 	}
 
 	hub.SetOnConnect(func(client *wsClient) {
@@ -234,8 +237,95 @@ func (a *AdminServer) SetGuardHITL(d *guard.HITLDispatcher) {
 // SetConfig updates the active configuration safely on the AdminServer.
 func (a *AdminServer) SetConfig(cfg *config.Config) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.cfg = cfg
+	var stale *http.Client
+	if !a.safeHTTPClientCustom {
+		stale = a.safeHTTPClient
+		a.safeHTTPClient = nil
+	}
+	a.mu.Unlock()
+	if stale != nil {
+		stale.CloseIdleConnections()
+	}
+}
+
+func safeTransportOptsEqual(a, b transport.SafeTransportOptions) bool {
+	return a.Enabled == b.Enabled &&
+		a.BlockPrivateIPs == b.BlockPrivateIPs &&
+		slices.Equal(a.AllowedDomains, b.AllowedDomains)
+}
+
+func (a *AdminServer) invalidateSafeHTTPClient() {
+	a.mu.Lock()
+	var stale *http.Client
+	if !a.safeHTTPClientCustom {
+		stale = a.safeHTTPClient
+		a.safeHTTPClient = nil
+	}
+	a.mu.Unlock()
+	if stale != nil {
+		stale.CloseIdleConnections()
+	}
+}
+
+// SafeHTTPClient returns the cached SSRF-safe HTTP client with connection pooling,
+// kept synchronized with active cfg.Security.SSRFProtection and timeouts.probe_timeout_sec.
+func (a *AdminServer) SafeHTTPClient() *http.Client {
+	timeout := a.probeTimeout()
+
+	a.mu.RLock()
+	custom := a.safeHTTPClientCustom
+	client := a.safeHTTPClient
+	cfg := a.cfg
+	curOpts := a.safeHTTPClientOpts
+	a.mu.RUnlock()
+
+	if custom && client != nil {
+		return client
+	}
+
+	wantOpts := transport.DefaultSafeOptions()
+	if cfg != nil {
+		wantOpts = transport.OptionsFromConfig(cfg.Security.SSRFProtection)
+	}
+
+	if client != nil && client.Timeout == timeout && safeTransportOptsEqual(curOpts, wantOpts) {
+		return client
+	}
+
+	a.mu.Lock()
+	if a.safeHTTPClientCustom && a.safeHTTPClient != nil {
+		c := a.safeHTTPClient
+		a.mu.Unlock()
+		return c
+	}
+	wantOpts = transport.DefaultSafeOptions()
+	if a.cfg != nil {
+		wantOpts = transport.OptionsFromConfig(a.cfg.Security.SSRFProtection)
+	}
+	if a.safeHTTPClient != nil && a.safeHTTPClient.Timeout == timeout && safeTransportOptsEqual(a.safeHTTPClientOpts, wantOpts) {
+		c := a.safeHTTPClient
+		a.mu.Unlock()
+		return c
+	}
+	stale := a.safeHTTPClient
+	a.safeHTTPClient = transport.NewSafeHTTPClient(wantOpts, timeout)
+	a.safeHTTPClientOpts = wantOpts
+	c := a.safeHTTPClient
+	a.mu.Unlock()
+
+	if stale != nil {
+		stale.CloseIdleConnections()
+	}
+	return c
+}
+
+// SetSafeHTTPClient sets the safe HTTP client for probing and egress.
+func (a *AdminServer) SetSafeHTTPClient(client *http.Client) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.safeHTTPClient = client
+	a.safeHTTPClientCustom = client != nil
 }
 
 // SetPipeline sets the security filter pipeline for dynamic filter injection and rewiring.
@@ -266,32 +356,17 @@ func (a *AdminServer) SetActiveSessionChecker(checker func(agentName string) boo
 	a.activeSessionChecker = checker
 }
 
-// SafeHTTPClient returns the cached SSRF-safe HTTP client with connection pooling.
-func (a *AdminServer) SafeHTTPClient() *http.Client {
+// probeTimeout resolves the active MCP probe timeout from settings cache, defaulting to 5s.
+func (a *AdminServer) probeTimeout() time.Duration {
 	a.mu.RLock()
-	client := a.safeHTTPClient
+	sCache := a.settingsCache
 	a.mu.RUnlock()
-	if client != nil {
-		return client
-	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.safeHTTPClient == nil {
-		opts := transport.DefaultSafeOptions()
-		if a.cfg != nil {
-			opts = transport.OptionsFromConfig(a.cfg.Security.SSRFProtection)
+	if sCache != nil {
+		if active := sCache.Get(); active != nil && active.Timeouts.ProbeTimeoutSec > 0 {
+			return time.Duration(active.Timeouts.ProbeTimeoutSec) * time.Second
 		}
-		a.safeHTTPClient = transport.NewSafeHTTPClient(opts, 10*time.Second)
 	}
-	return a.safeHTTPClient
-}
-
-// SetSafeHTTPClient sets the safe HTTP client for probing and egress.
-func (a *AdminServer) SetSafeHTTPClient(client *http.Client) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.safeHTTPClient = client
+	return 5 * time.Second
 }
 
 // withMutationGuard enforces read-only access to policies and agents when running in MANAGED mode.
@@ -299,7 +374,10 @@ func (a *AdminServer) SetSafeHTTPClient(client *http.Client) {
 // returns HTTP 403 Forbidden with {"error": "FORBIDDEN_MANAGED_MODE", "message": "Policy editing is locked: Gateway is managed by organization."}.
 func (a *AdminServer) withMutationGuard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if a.cfg != nil && a.cfg.IsManaged() {
+		a.mu.RLock()
+		cfg := a.cfg
+		a.mu.RUnlock()
+		if cfg != nil && cfg.IsManaged() {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]string{
@@ -309,6 +387,18 @@ func (a *AdminServer) withMutationGuard(next http.HandlerFunc) http.HandlerFunc 
 			return
 		}
 		next(w, r)
+	}
+}
+
+// withWriteMutationGuard enforces MANAGED-mode lockouts only on mutating HTTP methods
+// so read-only GET/HEAD queries (such as GET /admin/settings) remain accessible.
+func (a *AdminServer) withWriteMutationGuard(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+			next(w, r)
+			return
+		}
+		a.withMutationGuard(next)(w, r)
 	}
 }
 
@@ -358,7 +448,7 @@ func (a *AdminServer) Handler() http.Handler {
 	mux.HandleFunc("/admin/agents", a.handleAgents)
 	mux.HandleFunc("/admin/agents/", a.handleAgents)
 	mux.HandleFunc("/admin/agents/archives", a.handleAgentArchives)
-	mux.HandleFunc("/admin/settings", a.withMutationGuard(a.handleSettings))
+	mux.HandleFunc("/admin/settings", a.withWriteMutationGuard(a.handleSettings))
 	mux.HandleFunc("/admin/settings/reset", a.withMutationGuard(a.handleSettingsReset))
 	mux.HandleFunc("/admin/api-keys", a.handleAPIKeys)
 	mux.HandleFunc("/admin/api-keys/", a.handleAPIKeys)

@@ -25,24 +25,56 @@ type SSEEvent struct {
 	ProtocolName string `json:"protocol_name,omitempty"`
 }
 
+// FormatSSEFrame encodes an SSE frame safely, splitting multi-line data across separate
+// "data:" lines and stripping newlines from eventName so upstream data cannot inject extra frames.
+func FormatSSEFrame(eventName, data string) string {
+	var b strings.Builder
+	b.Grow(len(eventName) + len(data) + 16)
+	if eventName != "" {
+		b.WriteString("event: ")
+		for i := 0; i < len(eventName); i++ {
+			c := eventName[i]
+			if c != '\r' && c != '\n' {
+				b.WriteByte(c)
+			}
+		}
+		b.WriteByte('\n')
+	}
+	if !strings.ContainsAny(data, "\r\n") {
+		b.WriteString("data: ")
+		b.WriteString(data)
+		b.WriteString("\n\n")
+		return b.String()
+	}
+	normalized := strings.ReplaceAll(data, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	for _, line := range strings.Split(normalized, "\n") {
+		b.WriteString("data: ")
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
+	return b.String()
+}
+
 // UpstreamSession maintains the active connection state to an individual MCP backend (HTTP/SSE or stdio subprocess).
 type UpstreamSession struct {
-	ProtocolID        string             `json:"protocol_id"`
-	ProtocolName      string             `json:"protocol_name"`
-	URLOrCommand      string             `json:"url_or_command"`
-	BackendSessionID  string             `json:"backend_session_id"`
-	BackendMessageURL string             `json:"backend_message_url"`
-	Type              string             `json:"type"`         // "stdio", "sse", "http"
-	TargetScope       string             `json:"target_scope"` // "local", "corporate", "upstream"
-	AuthToken         string             `json:"auth_token,omitempty"`
-	Headers           map[string]string  `json:"headers,omitempty"`
-	Cancel            context.CancelFunc `json:"-"`
+	ProtocolID         string             `json:"protocol_id"`
+	ProtocolName       string             `json:"protocol_name"`
+	URLOrCommand       string             `json:"url_or_command"`
+	BackendSessionID   string             `json:"backend_session_id"`
+	BackendMessageURL  string             `json:"backend_message_url"`
+	Type               string             `json:"type"`         // "stdio", "sse", "http"
+	TargetScope        string             `json:"target_scope"` // "local", "corporate", "upstream"
+	AuthToken          string             `json:"auth_token,omitempty"`
+	Headers            map[string]string  `json:"headers,omitempty"`
+	Cancel             context.CancelFunc `json:"-"`
 	Status             string             `json:"status"` // "READY", "CONNECTING", "DEGRADED", "CLOSED"
 	LastPing           time.Time          `json:"last_ping"`
 	lastDialStatusCode int
 	settingsCache      *settings.Cache
-	mu                sync.RWMutex
-	closeOnce         sync.Once
+	mu                 sync.RWMutex
+	closeOnce          sync.Once
 
 	// Local stdio subprocess fields
 	cmd            *exec.Cmd

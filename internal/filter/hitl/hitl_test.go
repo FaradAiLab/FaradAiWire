@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FaradAiLab/FaradAiWire/internal/guard"
+	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
+	"github.com/FaradAiLab/FaradAiWire/internal/guard/hitltypes"
+	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
@@ -178,15 +180,17 @@ func TestHITLFilter_Webhook_ContextCancellation(t *testing.T) {
 }
 
 type mockHITLApprover struct {
-	called   bool
-	lastReq  *guard.HITLRequest
-	approved bool
-	err      error
+	called      bool
+	lastReq     *hitltypes.HITLRequest
+	hasDeadline bool
+	approved    bool
+	err         error
 }
 
-func (m *mockHITLApprover) RequestApproval(ctx context.Context, req *guard.HITLRequest) (bool, error) {
+func (m *mockHITLApprover) RequestApproval(ctx context.Context, req *hitltypes.HITLRequest) (bool, error) {
 	m.called = true
 	m.lastReq = req
+	_, m.hasDeadline = ctx.Deadline()
 	return m.approved, m.err
 }
 
@@ -211,11 +215,14 @@ func TestHITLFilter_DelegatesToHITLDispatcher(t *testing.T) {
 		if !approver.called || approver.lastReq == nil || approver.lastReq.ToolName != "delete_database" {
 			t.Fatalf("expected HITLApprover to be called with delete_database, got called=%v req=%+v", approver.called, approver.lastReq)
 		}
+		if !approver.hasDeadline {
+			t.Fatalf("expected FilterRequest to pass bounded timeout deadline to dispatcher")
+		}
 	})
 
 	t.Run("DeniedViaDispatcher", func(t *testing.T) {
 		f := NewHITLFilter(true, []string{"delete_database"}, "cli", "", 60)
-		approver := &mockHITLApprover{approved: false, err: guard.ErrHITLDenied}
+		approver := &mockHITLApprover{approved: false, err: hitltypes.ErrHITLDenied}
 		f.SetHITLDispatcher(approver)
 
 		req := &mcp.Request{
@@ -231,7 +238,7 @@ func TestHITLFilter_DelegatesToHITLDispatcher(t *testing.T) {
 
 	t.Run("HeadlessFailClosed", func(t *testing.T) {
 		f := NewHITLFilter(true, []string{"delete_database"}, "cli", "", 60)
-		approver := &mockHITLApprover{approved: false, err: guard.ErrHeadlessFailClosed}
+		approver := &mockHITLApprover{approved: false, err: hitltypes.ErrHeadlessFailClosed}
 		f.SetHITLDispatcher(approver)
 
 		req := &mcp.Request{
@@ -243,7 +250,7 @@ func TestHITLFilter_DelegatesToHITLDispatcher(t *testing.T) {
 		if mErr == nil || mErr.Code != mcp.ErrHITLDenied {
 			t.Fatalf("expected ErrHITLDenied on headless fail-closed, got %+v", mErr)
 		}
-		if !errors.Is(guard.ErrHeadlessFailClosed, approver.err) || !strings.Contains(mErr.Message, "headless") {
+		if !errors.Is(hitltypes.ErrHeadlessFailClosed, approver.err) || !strings.Contains(mErr.Message, "headless") {
 			t.Fatalf("expected headless error detail, got %s", mErr.Message)
 		}
 	})
@@ -264,3 +271,139 @@ func TestHITLFilter_DelegatesToHITLDispatcher(t *testing.T) {
 		}
 	})
 }
+
+func TestHITLFilter_SafetyEdgeCases(t *testing.T) {
+	t.Run("NilRequest", func(t *testing.T) {
+		f := NewHITLFilter(true, []string{"delete_database"}, "cli", "", 5)
+		res, mErr := f.FilterRequest(context.Background(), nil)
+		if mErr != nil || res != nil {
+			t.Fatalf("expected (nil, nil) for nil request, got (%v, %v)", res, mErr)
+		}
+	})
+
+	t.Run("AlreadyHumanApproved_SkipsDoublePrompt", func(t *testing.T) {
+		f := NewHITLFilter(true, []string{"delete_database"}, "cli", "", 5)
+		approver := &mockHITLApprover{approved: false, err: errors.New("should not be called")}
+		f.SetHITLDispatcher(approver)
+
+		ctx := types.WithHumanApproved(context.Background(), true)
+		req := &mcp.Request{
+			Method: "tools/call",
+			Params: json.RawMessage(`{"name":"delete_database","arguments":{"target":"prod"}}`),
+		}
+		res, mErr := f.FilterRequest(ctx, req)
+		if mErr != nil || res == nil {
+			t.Fatalf("expected pre-approved context to pass without re-prompting, got (%v, %v)", res, mErr)
+		}
+		if approver.called {
+			t.Fatal("dispatcher should not be called when request is already human approved")
+		}
+	})
+
+	t.Run("WebhookModeWithEmptyURL_FailsClosed", func(t *testing.T) {
+		f := NewHITLFilter(true, []string{"delete_database"}, "WEBHOOK", "   ", 5)
+		approver := &mockHITLApprover{approved: true}
+		f.SetHITLDispatcher(approver)
+
+		req := &mcp.Request{
+			Method: "tools/call",
+			Params: json.RawMessage(`{"name":"delete_database","arguments":{"target":"prod"}}`),
+		}
+		_, mErr := f.FilterRequest(context.Background(), req)
+		if mErr == nil || mErr.Code != mcp.ErrHITLDenied {
+			t.Fatalf("expected ErrHITLDenied when webhook URL is missing, got %+v", mErr)
+		}
+		if approver.called {
+			t.Fatal("webhook mode without URL must fail-closed, not fall back to dispatcher")
+		}
+	})
+
+	t.Run("WebhookSSRFError_StripsRawURLSecrets", func(t *testing.T) {
+		f := NewHITLFilter(true, []string{"delete_database"}, "webhook", "https://user:secretpass@127.0.0.1:8080/hook?token=topsecret", 5)
+		req := &mcp.Request{
+			Method: "tools/call",
+			Params: json.RawMessage(`{"name":"delete_database","arguments":{"target":"prod"}}`),
+		}
+		_, mErr := f.FilterRequest(context.Background(), req)
+		if mErr == nil {
+			t.Fatal("expected SSRF error")
+		}
+		if strings.Contains(mErr.Message, "secretpass") || strings.Contains(mErr.Message, "topsecret") {
+			t.Fatalf("raw webhook URL credentials/query leaked in error message: %s", mErr.Message)
+		}
+	})
+
+	t.Run("WebhookResponseSizeCapped", func(t *testing.T) {
+		f := NewHITLFilterWithSSRF(true, []string{"delete_database"}, "webhook", "https://hooks.example.com/approve", 5, transport.SafeTransportOptions{Enabled: false})
+		hugePadding := strings.Repeat(" ", (1<<20)+64)
+		f.SetHTTPClient(&http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(hugePadding + `{"approved":true}`)),
+				}, nil
+			}),
+		})
+
+		req := &mcp.Request{
+			Method: "tools/call",
+			Params: json.RawMessage(`{"name":"delete_database","arguments":{"target":"prod"}}`),
+		}
+		_, mErr := f.FilterRequest(context.Background(), req)
+		if mErr == nil {
+			t.Fatal("expected decode failure when webhook response exceeds 1 MiB limit")
+		}
+	})
+
+	t.Run("CLITimeout_ReturnsErrHITLTimeout", func(t *testing.T) {
+		f := NewHITLFilter(true, []string{"delete_database"}, "cli", "", 1)
+		f.timeout = 30 * time.Millisecond
+		pr, pw := io.Pipe()
+		defer pr.Close()
+		defer pw.Close()
+		f.SetCLIReaderWriter(pr, &bytes.Buffer{})
+
+		req := &mcp.Request{
+			Method: "tools/call",
+			Params: json.RawMessage(`{"name":"delete_database","arguments":{"target":"prod"}}`),
+		}
+		_, mErr := f.FilterRequest(context.Background(), req)
+		if mErr == nil || !strings.Contains(mErr.Message, hitltypes.ErrHITLTimeout.Error()) {
+			t.Fatalf("expected ErrHITLTimeout message, got %+v", mErr)
+		}
+	})
+
+	t.Run("MatchesAggregatedPrefixedDestructiveTool", func(t *testing.T) {
+		f := NewHITLFilter(true, []string{"delete_file"}, "cli", "", 5)
+		f.SetCLIReaderWriter(strings.NewReader("n\n"), &bytes.Buffer{})
+
+		req := &mcp.Request{
+			Method: "tools/call",
+			Params: json.RawMessage(`{"name":"fs_abc123__delete_file","arguments":{"path":"/tmp/x"}}`),
+		}
+		_, mErr := f.FilterRequest(context.Background(), req)
+		if mErr == nil || mErr.Code != mcp.ErrHITLDenied {
+			t.Fatalf("expected aggregated prefixed tool to hit destructive_tools HITL gate, got %+v", mErr)
+		}
+	})
+
+	t.Run("MatchesCaseInsensitiveDestructiveTool", func(t *testing.T) {
+		f := NewHITLFilter(true, []string{"Delete_File"}, "cli", "", 5)
+		f.SetCLIReaderWriter(strings.NewReader("n\n"), &bytes.Buffer{})
+
+		for _, toolName := range []string{"DELETE_FILE", "fs__DELETE_FILE", "fs_abc123__Delete_File"} {
+			req := &mcp.Request{
+				Method: "tools/call",
+				Params: json.RawMessage(`{"name":"` + toolName + `","arguments":{"path":"/tmp/x"}}`),
+			}
+			_, mErr := f.FilterRequest(context.Background(), req)
+			if mErr == nil || mErr.Code != mcp.ErrHITLDenied {
+				t.Fatalf("expected tool %q to hit case-insensitive destructive_tools HITL gate, got %+v", toolName, mErr)
+			}
+		}
+	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return fn(r) }

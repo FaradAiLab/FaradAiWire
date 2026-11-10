@@ -697,7 +697,7 @@ func TestAdminServer_ProtocolProbe_WithAuthTokenAndCustomHeaders(t *testing.T) {
 	defer upstream.Close()
 
 	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = false
+	server.cfg.Security.SSRFProtection.Enabled = new(bool)
 	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
 	handler := server.Handler()
 
@@ -788,7 +788,7 @@ func TestAdminServer_ProtocolProbe_MaskedTokenHydration(t *testing.T) {
 	defer upstream.Close()
 
 	server, _, protoDir := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = false
+	server.cfg.Security.SSRFProtection.Enabled = new(bool)
 	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
 
 	// Save real protocol to store
@@ -850,7 +850,7 @@ func TestAdminServer_Probe_UpstreamHTTPError_StatusCodes(t *testing.T) {
 			defer upstream.Close()
 
 			server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-			server.cfg.Security.SSRFProtection.Enabled = false
+			server.cfg.Security.SSRFProtection.Enabled = new(bool)
 			server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
 			handler := server.Handler()
 
@@ -906,7 +906,7 @@ func TestAdminServer_Probe_UpstreamHTTPError_WithCredentials(t *testing.T) {
 	defer upstream.Close()
 
 	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = false
+	server.cfg.Security.SSRFProtection.Enabled = new(bool)
 	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
 	handler := server.Handler()
 
@@ -1025,7 +1025,7 @@ func TestAutoNegotiation_SSE_Success(t *testing.T) {
 	defer upstream.Close()
 
 	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = false
+	server.cfg.Security.SSRFProtection.Enabled = new(bool)
 	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
 	handler := server.Handler()
 
@@ -1101,7 +1101,7 @@ func TestAutoNegotiation_StreamableHTTP_Success(t *testing.T) {
 	defer upstream.Close()
 
 	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = false
+	server.cfg.Security.SSRFProtection.Enabled = new(bool)
 	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
 	handler := server.Handler()
 
@@ -1174,7 +1174,7 @@ func TestAutoNegotiation_SSE_NoEndpoint_FallbackToStreamableHTTP(t *testing.T) {
 	defer upstream.Close()
 
 	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = false
+	server.cfg.Security.SSRFProtection.Enabled = new(bool)
 	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
 	handler := server.Handler()
 
@@ -1210,7 +1210,7 @@ func TestAutoNegotiation_FatalHTTPError_NoFallback(t *testing.T) {
 	defer upstream.Close()
 
 	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = false
+	server.cfg.Security.SSRFProtection.Enabled = new(bool)
 	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
 	handler := server.Handler()
 
@@ -1266,5 +1266,52 @@ func TestExtractJSONFromSSEOrDirect(t *testing.T) {
 				t.Errorf("expected %q, got %q", tc.expected, result)
 			}
 		})
+	}
+}
+
+func TestAdminServer_ProtocolProbe_RejectsDestinationMismatchSecretExfiltration(t *testing.T) {
+	var receivedAuth string
+	var receivedCustom string
+	attacker := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		receivedCustom = r.Header.Get("X-Secret-Key")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`))
+	}))
+	if attacker == nil {
+		return
+	}
+	defer attacker.Close()
+
+	server, _, protoDir := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
+
+	store, _ := protocol.NewFSStore(protoDir)
+	_ = store.Save(&protocol.Protocol{
+		ID:           "trusted-remote",
+		Name:         "Trusted Remote",
+		Type:         "http",
+		URLOrCommand: "https://trusted.example.com/mcp",
+		AuthToken:    "super-secret-token-xyz",
+		Headers:      map[string]string{"X-Secret-Key": "header-secret-xyz"},
+	})
+	server.SetProtocolStore(store)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"id":         "trusted-remote",
+		"type":       "http",
+		"url":        attacker.URL + "/mcp",
+		"auth_token": "sup••••••yz",
+		"headers":    map[string]string{"X-Secret-Key": "hea••••••yz"},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/protocols/probe", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if receivedAuth == "Bearer super-secret-token-xyz" || receivedCustom == "header-secret-xyz" {
+		t.Fatalf("CRITICAL LEAK: stored protocol credentials sent to mismatched probe URL (auth=%q custom=%q)", receivedAuth, receivedCustom)
 	}
 }

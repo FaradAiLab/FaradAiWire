@@ -26,8 +26,8 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/proxy"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
 	"github.com/FaradAiLab/FaradAiWire/internal/settings"
-	duckdbTelemetry "github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/broker"
+	duckdbTelemetry "github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
 )
 
 // Dependencies contains the fully wired, immutable runtime components of FaradAiWire.
@@ -257,8 +257,8 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		}
 		cancel()
 
-		effective := settings.ResolveEffectiveSettings(cfg, overrides)
 		settings.ApplyFilterOverrides(cfg, overrides)
+		effective := settings.ResolveEffectiveSettings(cfg, overrides)
 		settingsCache = settings.NewCache(effective)
 		settingsStore = sStore
 	} else {

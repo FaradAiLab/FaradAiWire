@@ -213,10 +213,9 @@ func (p *AgentFileProvider) loadAndCompile(path string) (*agentDLPConfig, error)
 		return nil, fmt.Errorf("parse dlp json: %w", err)
 	}
 
-	rawPatterns := payload.Patterns
-	if len(rawPatterns) == 0 {
-		rawPatterns = payload.CustomPatterns
-	}
+	rawPatterns := make([]rawPatternJSON, 0, len(payload.Patterns)+len(payload.CustomPatterns))
+	rawPatterns = append(rawPatterns, payload.Patterns...)
+	rawPatterns = append(rawPatterns, payload.CustomPatterns...)
 
 	compiled := make([]CompiledPattern, 0, len(rawPatterns))
 	for _, raw := range rawPatterns {

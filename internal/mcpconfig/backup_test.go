@@ -88,8 +88,9 @@ func TestPersistAdoptedProtocols(t *testing.T) {
 		t.Fatalf("PersistAdoptedProtocols failed: %v", err)
 	}
 
-	// Verify protocol file exists
-	expectedProto := filepath.Join(protoDir, "claude_desktop_filesystem.json")
+	// Verify protocol file exists (collision-safe prefix)
+	expectedProtoID := sanitizeIdentifier("claude-desktop", "filesystem")
+	expectedProto := filepath.Join(protoDir, expectedProtoID+".json")
 	if fi, err := os.Stat(expectedProto); err != nil || fi.Size() == 0 {
 		t.Fatalf("protocol file %s was not written properly: %v", expectedProto, err)
 	}
@@ -117,39 +118,120 @@ func TestPersistAdoptedProtocols(t *testing.T) {
 
 	// Verify both protocols exist in config.json
 	data, _ := os.ReadFile(expectedAgentCfg)
-	if !strings.Contains(string(data), "claude_desktop_filesystem") || !strings.Contains(string(data), "claude_desktop_github_com_upstash_context7_mcp") {
+	secondProtoID := sanitizeIdentifier("claude-desktop", "github.com/upstash/context7-mcp")
+	if !strings.Contains(string(data), expectedProtoID) || !strings.Contains(string(data), secondProtoID) {
 		t.Errorf("expected both protocols merged in config.json, got:\n%s", string(data))
 	}
 }
 
 func TestSanitizeIdentifier(t *testing.T) {
 	tests := []struct {
-		profile  string
-		name     string
-		expected string
+		profile string
+		name    string
+		prefix  string
 	}{
 		{
-			profile:  "cline",
-			name:     "github.com/upstash/context7-mcp",
-			expected: "cline_github_com_upstash_context7_mcp",
+			profile: "cline",
+			name:    "github.com/upstash/context7-mcp",
+			prefix:  "cline_github_com_upstash_context7_mcp_",
 		},
 		{
-			profile:  "cursor",
-			name:     "../../../../etc/passwd",
-			expected: "cursor_etc_passwd",
+			profile: "cursor",
+			name:    "../../../../etc/passwd",
+			prefix:  "cursor_etc_passwd_",
 		},
 		{
-			profile:  "antigravity",
-			name:     "@modelcontextprotocol/server-postgres",
-			expected: "antigravity_modelcontextprotocol_server_postgres",
+			profile: "antigravity",
+			name:    "@modelcontextprotocol/server-postgres",
+			prefix:  "antigravity_modelcontextprotocol_server_postgres_",
 		},
 	}
 
 	for _, tc := range tests {
 		got := sanitizeIdentifier(tc.profile, tc.name)
-		if got != tc.expected {
-			t.Errorf("sanitizeIdentifier(%q, %q) = %q; want %q", tc.profile, tc.name, got, tc.expected)
+		if !strings.HasPrefix(got, tc.prefix) {
+			t.Errorf("sanitizeIdentifier(%q, %q) = %q; want prefix %q", tc.profile, tc.name, got, tc.prefix)
 		}
+		if sanitizeIdentifier(tc.profile, tc.name) != got {
+			t.Errorf("sanitizeIdentifier must be deterministic for (%q, %q)", tc.profile, tc.name)
+		}
+	}
+
+	if sanitizeIdentifier("prof", "my-app") == sanitizeIdentifier("prof", "my_app") {
+		t.Fatal("expected distinct identifiers for punctuation variants")
+	}
+	if sanitizeIdentifier("a_b", "c") == sanitizeIdentifier("a", "b_c") {
+		t.Fatal("expected distinct identifiers for profile/name boundary split")
+	}
+}
+
+func TestBackupManager_IsolationZeroByteAndLegacyFallback(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	bm, err := NewBackupManager(filepath.Join(tmp, "backups"))
+	if err != nil {
+		t.Fatalf("NewBackupManager: %v", err)
+	}
+
+	// 1. Two distinct config paths for ClientCursor must stay isolated
+	globalCfg := filepath.Join(tmp, "global", "mcp.json")
+	wsCfg := filepath.Join(tmp, "repo", ".cursor", "mcp.json")
+	_ = os.MkdirAll(filepath.Dir(globalCfg), 0700)
+	_ = os.MkdirAll(filepath.Dir(wsCfg), 0700)
+	_ = os.WriteFile(globalCfg, []byte(`{"mcpServers":{"g":{}}}`), 0600)
+	_ = os.WriteFile(wsCfg, []byte(`{"mcpServers":{"w":{}}}`), 0600)
+
+	b1, err := bm.CreateBackup(ClientCursor, globalCfg)
+	if err != nil {
+		t.Fatalf("backup global: %v", err)
+	}
+	b2, err := bm.CreateBackup(ClientCursor, wsCfg)
+	if err != nil {
+		t.Fatalf("backup ws: %v", err)
+	}
+	if b1 == b2 {
+		t.Fatalf("expected isolated backup paths for distinct config locations, got same %s", b1)
+	}
+	_ = os.WriteFile(globalCfg, []byte(`{}`), 0600)
+	_ = os.WriteFile(wsCfg, []byte(`{}`), 0600)
+
+	if err := bm.RestoreBackup(ClientCursor, globalCfg); err != nil {
+		t.Fatalf("restore global: %v", err)
+	}
+	if err := bm.RestoreBackup(ClientCursor, wsCfg); err != nil {
+		t.Fatalf("restore ws: %v", err)
+	}
+	if g, _ := os.ReadFile(globalCfg); !strings.Contains(string(g), `"g"`) {
+		t.Fatalf("global config restored wrong content: %s", g)
+	}
+	if w, _ := os.ReadFile(wsCfg); !strings.Contains(string(w), `"w"`) {
+		t.Fatalf("workspace config restored wrong content: %s", w)
+	}
+
+	// 2. 0-byte original file backup is valid and HasBackup/HasBackupForConfig return true
+	emptyCfg := filepath.Join(tmp, "empty.json")
+	_ = os.WriteFile(emptyCfg, []byte{}, 0600)
+	if _, err := bm.CreateBackup(ClientWindsurf, emptyCfg); err != nil {
+		t.Fatalf("backup empty file: %v", err)
+	}
+	if !bm.HasBackupForConfig(ClientWindsurf, emptyCfg) || !bm.HasBackup(ClientWindsurf) {
+		t.Fatal("expected HasBackup and HasBackupForConfig to be true for 0-byte backup")
+	}
+
+	// 3. Legacy single-filename backup fallback works for RestoreBackup & HasBackupForConfig
+	legacyTarget := filepath.Join(tmp, "cline.json")
+	_ = os.WriteFile(legacyTarget, []byte(`{"mutated":true}`), 0600)
+	_ = os.WriteFile(bm.BackupPath(ClientCline), []byte(`{"legacy_orig":true}`), 0600)
+	if !bm.HasBackupForConfig(ClientCline, legacyTarget) {
+		t.Fatal("expected legacy fallback to report HasBackupForConfig=true")
+	}
+	if err := bm.RestoreBackup(ClientCline, legacyTarget); err != nil {
+		t.Fatalf("RestoreBackup legacy fallback failed: %v", err)
+	}
+	restoredLegacy, _ := os.ReadFile(legacyTarget)
+	if string(restoredLegacy) != `{"legacy_orig":true}` {
+		t.Fatalf("unexpected legacy restored content: %s", restoredLegacy)
 	}
 }
 
@@ -187,5 +269,40 @@ func TestBackupManager_PreservesPristineBackup(t *testing.T) {
 	backupData, _ := os.ReadFile(dest1)
 	if string(backupData) != origContent {
 		t.Errorf("pristine backup was overwritten! got %s, want %s", string(backupData), origContent)
+	}
+}
+
+func TestBackupManager_CursorWorkspaceDoesNotFallbackToLegacyGlobalBackup(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	bm, err := NewBackupManager(filepath.Join(tmp, "backups"))
+	if err != nil {
+		t.Fatalf("NewBackupManager: %v", err)
+	}
+
+	// Legacy global cursor backup exists
+	if err := os.WriteFile(bm.BackupPath(ClientCursor), []byte(`{"global_legacy":true}`), 0600); err != nil {
+		t.Fatalf("write legacy backup: %v", err)
+	}
+
+	wsDir := filepath.Join(tmp, ".cursor")
+	if err := os.MkdirAll(wsDir, 0700); err != nil {
+		t.Fatalf("mkdir .cursor: %v", err)
+	}
+	wsCfg := filepath.Join(wsDir, "mcp.json")
+	if err := os.WriteFile(wsCfg, []byte(`{"workspace_current":true}`), 0600); err != nil {
+		t.Fatalf("write workspace cfg: %v", err)
+	}
+
+	if bm.HasBackupForConfig(ClientCursorWorkspace, wsCfg) {
+		t.Fatal("expected ClientCursorWorkspace not to match legacy global ClientCursor backup")
+	}
+	if err := bm.RestoreBackup(ClientCursorWorkspace, wsCfg); err == nil {
+		t.Fatal("expected RestoreBackup for ClientCursorWorkspace without workspace backup to fail")
+	}
+	got, _ := os.ReadFile(wsCfg)
+	if string(got) != `{"workspace_current":true}` {
+		t.Fatalf("workspace config must remain intact, got %s", got)
 	}
 }

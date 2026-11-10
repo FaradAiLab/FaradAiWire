@@ -1,6 +1,7 @@
 package mcpconfig
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/admin"
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
+	"github.com/FaradAiLab/FaradAiWire/internal/config"
+	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
 )
 
 // ProbeResult holds the outcome of an individual MCP server probe attempt.
@@ -28,17 +31,23 @@ type ProbeResult struct {
 // If any server fails or times out, it does NOT abort the adoption; it logs a warning
 // and persists whatever tools were discovered (or an empty manifest ready for dynamic capture).
 func ProbeAndCompileManifest(ctx context.Context, profileName string, servers []DiscoveredServer, agentsBaseDir string, timeoutPerServer time.Duration) ([]ProbeResult, error) {
+	if err := pathguard.ValidateSafeIdentifier(profileName); err != nil {
+		return nil, fmt.Errorf("invalid profile identifier %q: %w", profileName, err)
+	}
 	if timeoutPerServer <= 0 {
 		timeoutPerServer = 5 * time.Second
 	}
 	if agentsBaseDir == "" {
-		agentsBaseDir = "./agents"
+		agentsBaseDir = filepath.Join(config.DefaultFaradAiWireDir(), "agents")
 	}
 
 	results := make([]ProbeResult, 0, len(servers))
 	var allTools []agent.ToolMetadata
 
 	for _, s := range servers {
+		if err := ctx.Err(); err != nil {
+			return results, err
+		}
 		pr := ProbeResult{
 			ServerName: s.Name,
 		}
@@ -69,10 +78,14 @@ func ProbeAndCompileManifest(ctx context.Context, profileName string, servers []
 				pr.ToolCount = len(rawTools)
 				pr.Tools = rawTools
 
-				// Transform to agent.ToolMetadata format
+				// Transform to agent.ToolMetadata format matching PersistAdoptedProtocols slugs
 				protoSlug := sanitizeIdentifier(profileName, s.Name)
+				protoDisplayName := fmt.Sprintf("%s (%s)", s.Name, profileName)
 				for _, rt := range rawTools {
 					rawName, _ := rt["name"].(string)
+					if strings.TrimSpace(rawName) == "" {
+						continue
+					}
 					desc, _ := rt["description"].(string)
 					schema, _ := rt["inputSchema"].(map[string]interface{})
 
@@ -83,8 +96,8 @@ func ProbeAndCompileManifest(ctx context.Context, profileName string, servers []
 						Name:          canonical,
 						RawName:       rawName,
 						CanonicalName: canonical,
-						ProtocolName:  s.Name,
-						ProtocolID:    s.Name,
+						ProtocolName:  protoDisplayName,
+						ProtocolID:    protoSlug,
 						Description:   desc,
 						InputSchema:   schema,
 					})
@@ -99,22 +112,34 @@ func ProbeAndCompileManifest(ctx context.Context, profileName string, servers []
 	}
 
 	// Persist tools_manifest.json to agents/<profileName>/current/
-	targetDir := filepath.Join(agentsBaseDir, profileName, "current")
+	agentDir, err := pathguard.ResolveSandboxedPath(agentsBaseDir, profileName)
+	if err != nil {
+		return results, fmt.Errorf("resolve profile directory '%s': %w", profileName, err)
+	}
+	targetDir, err := pathguard.ResolveSandboxedPath(agentDir, "current")
+	if err != nil {
+		return results, fmt.Errorf("resolve profile current directory: %w", err)
+	}
 	if err := os.MkdirAll(targetDir, 0700); err != nil {
 		return results, fmt.Errorf("create profile directory '%s': %w", targetDir, err)
 	}
 
 	manifestPath := filepath.Join(targetDir, "tools_manifest.json")
 
-	// Merge with existing tools_manifest.json if present
+	// Merge with existing tools_manifest.json if present (fail explicitly on corrupted JSON)
 	toolMap := make(map[string]agent.ToolMetadata)
-	if existingData, err := os.ReadFile(manifestPath); err == nil && len(existingData) > 0 {
-		var existingTools []agent.ToolMetadata
-		if err := json.Unmarshal(existingData, &existingTools); err == nil {
+	if existingData, err := os.ReadFile(manifestPath); err == nil {
+		if len(bytes.TrimSpace(existingData)) > 0 {
+			var existingTools []agent.ToolMetadata
+			if uErr := json.Unmarshal(existingData, &existingTools); uErr != nil {
+				return results, fmt.Errorf("parse existing tools manifest '%s': %w", manifestPath, uErr)
+			}
 			for _, t := range existingTools {
 				toolMap[t.Name] = t
 			}
 		}
+	} else if !os.IsNotExist(err) {
+		return results, fmt.Errorf("read existing tools manifest '%s': %w", manifestPath, err)
 	}
 
 	for _, t := range allTools {
@@ -134,12 +159,7 @@ func ProbeAndCompileManifest(ctx context.Context, profileName string, servers []
 		return results, fmt.Errorf("marshal tools manifest: %w", err)
 	}
 
-	tmpManifestPath := manifestPath + ".tmp"
-	if err := os.WriteFile(tmpManifestPath, manifestBytes, 0600); err != nil {
-		return results, fmt.Errorf("write tools manifest temp '%s': %w", tmpManifestPath, err)
-	}
-	if err := os.Rename(tmpManifestPath, manifestPath); err != nil {
-		_ = os.Remove(tmpManifestPath)
+	if err := atomicWriteFile(manifestPath, manifestBytes, 0600); err != nil {
 		return results, fmt.Errorf("commit tools manifest '%s': %w", manifestPath, err)
 	}
 

@@ -144,12 +144,12 @@ func TestParseAndValidate(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		key       string
-		strVal    string
-		wantVal   any
-		wantErr   bool
-		errIs     error
+		name    string
+		key     string
+		strVal  string
+		wantVal any
+		wantErr bool
+		errIs   error
 	}{
 		{
 			name:    "valid parse int",
@@ -265,5 +265,36 @@ func TestGetAllMetadata(t *testing.T) {
 		} else if prev.Category == curr.Category && prev.Key > curr.Key {
 			t.Errorf("metadata within category not sorted by key: %s > %s", prev.Key, curr.Key)
 		}
+	}
+}
+
+func TestProbeTimeoutSec_RegistrationAndBounds(t *testing.T) {
+	t.Parallel()
+
+	s := DefaultOperationalSettings()
+	if s.Timeouts.ProbeTimeoutSec != 5 {
+		t.Fatalf("expected default ProbeTimeoutSec=5, got %d", s.Timeouts.ProbeTimeoutSec)
+	}
+
+	if err := Validate("timeouts.probe_timeout_sec", 10); err != nil {
+		t.Fatalf("expected 10s probe timeout to be valid, got: %v", err)
+	}
+	if err := Validate("timeouts.probe_timeout_sec", 0); err == nil {
+		t.Fatal("expected 0s probe timeout to fail Min validation")
+	}
+	if err := Validate("timeouts.probe_timeout_sec", 61); err == nil {
+		t.Fatal("expected 61s probe timeout to fail Max validation")
+	}
+
+	parsed, err := ParseAndValidate("timeouts.probe_timeout_sec", "15")
+	if err != nil {
+		t.Fatalf("ParseAndValidate failed: %v", err)
+	}
+	if err := ApplySetting(s, "timeouts.probe_timeout_sec", parsed); err != nil {
+		t.Fatalf("ApplySetting failed: %v", err)
+	}
+	got, err := ExtractSetting(s, "timeouts.probe_timeout_sec")
+	if err != nil || got != 15 {
+		t.Fatalf("expected ExtractSetting=15, got %v (err=%v)", got, err)
 	}
 }

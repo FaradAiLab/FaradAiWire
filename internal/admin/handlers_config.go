@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -34,9 +36,14 @@ func (a *AdminServer) handleClearSchemas(w http.ResponseWriter, r *http.Request)
 }
 
 func (a *AdminServer) handleMCPTools(w http.ResponseWriter, r *http.Request) {
-	schemasDir := a.cfg.Filters.SchemaValidation.SchemasDir
+	a.mu.RLock()
+	var schemasDir string
+	if a.cfg != nil {
+		schemasDir = a.cfg.Filters.SchemaValidation.SchemasDir
+	}
+	a.mu.RUnlock()
 	if schemasDir == "" {
-		schemasDir = "./schemas/"
+		schemasDir = filepath.Join(config.DefaultFaradAiWireDir(), "schemas")
 	}
 	mcpToolsPath := filepath.Join(schemasDir, "mcp_tools.json")
 
@@ -62,7 +69,7 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 	var req struct {
 		FilterName string `json:"filter_name"`
 		Filter     string `json:"filter"`
-		Enabled    bool   `json:"enabled"`
+		Enabled    *bool  `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -71,6 +78,11 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 	if req.FilterName == "" && req.Filter != "" {
 		req.FilterName = req.Filter
 	}
+	if req.Enabled == nil {
+		http.Error(w, "Missing required boolean field: enabled", http.StatusBadRequest)
+		return
+	}
+	enabled := *req.Enabled
 
 	isFilter := settings.IsSupportedFilterName(req.FilterName)
 	isLegacyToggle := req.FilterName == "auto_sync_mcp" || req.FilterName == "auto_update_policies"
@@ -79,15 +91,30 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	a.configMutMu.Lock()
+	defer a.configMutMu.Unlock()
+
 	a.mu.RLock()
 	sStore := a.settingsStore
 	a.mu.RUnlock()
 
-	// Persist filter enablement to DuckDB system_settings sparse overlay (ADR-0053 / ADR-0054)
-	// before mutating runtime configuration so persistence failures fail closed.
+	filterKey := settings.FilterKeyPrefix + req.FilterName
+	ctx := r.Context()
+
+	var (
+		prevOverride string
+		hadOverride  bool
+	)
 	if isFilter && sStore != nil {
-		if err := sStore.Set(r.Context(), settings.FilterKeyPrefix+req.FilterName, strconv.FormatBool(req.Enabled)); err != nil {
-			slog.ErrorContext(r.Context(), "Failed to persist filter toggle to DuckDB", slog.String("filter", req.FilterName), slog.String("error", err.Error()))
+		var getErr error
+		prevOverride, hadOverride, getErr = sStore.Get(ctx, filterKey)
+		if getErr != nil {
+			slog.ErrorContext(ctx, "Failed to read prior filter toggle from DuckDB", slog.String("filter", req.FilterName), slog.String("error", getErr.Error()))
+			http.Error(w, fmt.Sprintf("Failed to read current state for filter %q", req.FilterName), http.StatusInternalServerError)
+			return
+		}
+		if err := sStore.Set(ctx, filterKey, strconv.FormatBool(enabled)); err != nil {
+			slog.ErrorContext(ctx, "Failed to persist filter toggle to DuckDB", slog.String("filter", req.FilterName), slog.String("error", err.Error()))
 			http.Error(w, fmt.Sprintf("Failed to persist filter toggle %q", req.FilterName), http.StatusInternalServerError)
 			return
 		}
@@ -95,17 +122,32 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 
 	nextCfg := a.cloneAndMutateConfig(func(c *config.Config) {
 		if isFilter {
-			settings.ApplyFilterToggleToConfig(c, req.FilterName, req.Enabled)
+			settings.ApplyFilterToggleToConfig(c, req.FilterName, enabled)
 		} else if req.FilterName == "auto_sync_mcp" {
-			c.AutoSyncMCP = req.Enabled
+			c.AutoSyncMCP = enabled
 		} else if req.FilterName == "auto_update_policies" {
-			c.AutoUpdatePolicies = req.Enabled
+			c.AutoUpdatePolicies = enabled
 		}
 	})
 
 	// Trigger runtime reload in memory without touching config.yaml on disk (ADR-0053 / ADR-0054)
 	if err := a.applyConfigReload(nextCfg); err != nil {
-		slog.ErrorContext(r.Context(), "Failed to reload after config toggle", slog.String("filter", req.FilterName), slog.String("error", err.Error()))
+		slog.ErrorContext(ctx, "Failed to reload after config toggle", slog.String("filter", req.FilterName), slog.String("error", err.Error()))
+		if isFilter && sStore != nil {
+			rbCtx, rbCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			var rbErr error
+			if hadOverride {
+				rbErr = sStore.Set(rbCtx, filterKey, prevOverride)
+			} else {
+				rbErr = sStore.Delete(rbCtx, filterKey)
+			}
+			rbCancel()
+			if rbErr != nil {
+				slog.ErrorContext(ctx, "Failed to roll back DuckDB filter override after reload error", slog.String("key", filterKey), slog.String("error", rbErr.Error()))
+			}
+		}
+		http.Error(w, fmt.Sprintf("Failed to reload configuration after toggling %q: %v", req.FilterName, err), http.StatusInternalServerError)
+		return
 	}
 
 	// Emit configuration audit trail event (Task 7)
@@ -115,7 +157,7 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 		ToolName:   req.FilterName,
 		FilterName: "admin_config",
 		Decision:   "ALLOWED",
-		Message:    fmt.Sprintf("Filter %s toggled to %v", req.FilterName, req.Enabled),
+		Message:    fmt.Sprintf("Filter %s toggled to %v", req.FilterName, enabled),
 		User:       a.extractUserContext(r),
 	})
 
@@ -124,8 +166,8 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 		"status":      "success",
 		"filter":      req.FilterName,
 		"filter_name": req.FilterName,
-		"enabled":     req.Enabled,
-		"message":     fmt.Sprintf("Setting '%s' successfully set to %v", req.FilterName, req.Enabled),
+		"enabled":     enabled,
+		"message":     fmt.Sprintf("Setting '%s' successfully set to %v", req.FilterName, enabled),
 	})
 }
 
@@ -218,10 +260,13 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.mu.Lock()
+	a.configMutMu.Lock()
+	defer a.configMutMu.Unlock()
+
+	a.mu.RLock()
 	sStore := a.settingsStore
 	sCache := a.settingsCache
-	a.mu.Unlock()
+	a.mu.RUnlock()
 
 	toUpdate := make(map[string]any)
 
@@ -242,30 +287,45 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Support legacy fields
-	hasLegacy := false
-	if poll, ok := payload["poll_interval_seconds"].(float64); ok && int(poll) > 0 {
-		a.mu.Lock()
-		if a.cfg != nil {
-			a.cfg.PollIntervalSeconds = int(poll)
+	// Validate legacy fields upfront before mutating DuckDB or runtime config.
+	var (
+		hasLegacy        bool
+		setPollInterval  bool
+		pollIntervalVal  int
+		setAutoSyncMCP   bool
+		autoSyncMCPVal   bool
+		setAutoUpdatePol bool
+		autoUpdatePolVal bool
+	)
+	if rawPoll, present := payload["poll_interval_seconds"]; present {
+		pollFloat, ok := rawPoll.(float64)
+		pollInt := int(pollFloat)
+		if !ok || float64(pollInt) != pollFloat || pollInt < 1 || pollInt > 86400 {
+			http.Error(w, "Invalid poll_interval_seconds: must be an integer between 1 and 86400", http.StatusBadRequest)
+			return
 		}
-		a.mu.Unlock()
+		setPollInterval = true
+		pollIntervalVal = pollInt
 		hasLegacy = true
 	}
-	if syncMCP, ok := payload["auto_sync_mcp"].(bool); ok {
-		a.mu.Lock()
-		if a.cfg != nil {
-			a.cfg.AutoSyncMCP = syncMCP
+	if rawSync, present := payload["auto_sync_mcp"]; present {
+		b, ok := rawSync.(bool)
+		if !ok {
+			http.Error(w, "Invalid auto_sync_mcp: must be a boolean", http.StatusBadRequest)
+			return
 		}
-		a.mu.Unlock()
+		setAutoSyncMCP = true
+		autoSyncMCPVal = b
 		hasLegacy = true
 	}
-	if updatePol, ok := payload["auto_update_policies"].(bool); ok {
-		a.mu.Lock()
-		if a.cfg != nil {
-			a.cfg.AutoUpdatePolicies = updatePol
+	if rawUpdatePol, present := payload["auto_update_policies"]; present {
+		b, ok := rawUpdatePol.(bool)
+		if !ok {
+			http.Error(w, "Invalid auto_update_policies: must be a boolean", http.StatusBadRequest)
+			return
 		}
-		a.mu.Unlock()
+		setAutoUpdatePol = true
+		autoUpdatePolVal = b
 		hasLegacy = true
 	}
 
@@ -290,33 +350,99 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 		currentSettings = settings.DefaultOperationalSettings()
 	}
 
-	for k, v := range toUpdate {
-		strVal := fmt.Sprintf("%v", v)
+	keys := make([]string, 0, len(toUpdate))
+	for k := range toUpdate {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var prevOverrides map[string]string
+	if sStore != nil && len(keys) > 0 {
+		var getErr error
+		prevOverrides, getErr = sStore.GetAll(ctx)
+		if getErr != nil {
+			slog.ErrorContext(ctx, "Failed to read prior settings from DuckDB", slog.String("error", getErr.Error()))
+			http.Error(w, fmt.Sprintf("Database error reading current settings: %v", getErr), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	appliedKeys := make([]string, 0, len(keys))
+	rollbackPersisted := func() {
+		rollbackDuckDBSettings(ctx, sStore, appliedKeys, prevOverrides)
+	}
+
+	type pendingAudit struct {
+		key    string
+		oldVal any
+		newVal any
+	}
+	audits := make([]pendingAudit, 0, len(keys))
+
+	for _, k := range keys {
+		v := toUpdate[k]
+		strVal := formatSettingString(k, v)
 		if sStore != nil {
 			if err := sStore.Set(ctx, k, strVal); err != nil {
 				slog.ErrorContext(ctx, "Failed to persist setting to DuckDB", slog.String("key", k), slog.String("error", err.Error()))
+				rollbackPersisted()
 				http.Error(w, fmt.Sprintf("Database error updating %q: %v", k, err), http.StatusInternalServerError)
 				return
 			}
+			appliedKeys = append(appliedKeys, k)
 		}
 
 		oldVal, _ := settings.ExtractSetting(currentSettings, k)
 		_ = settings.ApplySetting(currentSettings, k, v)
+		audits = append(audits, pendingAudit{key: k, oldVal: oldVal, newVal: v})
+	}
 
-		// Emit Audit Event (Task 7)
+	if hasLegacy {
+		nextCfg := a.cloneAndMutateConfig(func(c *config.Config) {
+			if setPollInterval {
+				c.PollIntervalSeconds = pollIntervalVal
+			}
+			if setAutoSyncMCP {
+				c.AutoSyncMCP = autoSyncMCPVal
+			}
+			if setAutoUpdatePol {
+				c.AutoUpdatePolicies = autoUpdatePolVal
+			}
+		})
+		if setPollInterval {
+			toUpdate["poll_interval_seconds"] = pollIntervalVal
+		}
+		if setAutoSyncMCP {
+			toUpdate["auto_sync_mcp"] = autoSyncMCPVal
+		}
+		if setAutoUpdatePol {
+			toUpdate["auto_update_policies"] = autoUpdatePolVal
+		}
+		if err := a.applyConfigReload(nextCfg); err != nil {
+			slog.ErrorContext(ctx, "Failed to reload config after legacy settings update", slog.String("error", err.Error()))
+			rollbackPersisted()
+			http.Error(w, fmt.Sprintf("Failed to reload configuration after settings update: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	for _, aEv := range audits {
 		a.logAuditEvent(&filter.AuditEvent{
 			Timestamp:  time.Now(),
 			Method:     "SETTINGS_MUTATE",
-			ToolName:   k,
+			ToolName:   aEv.key,
 			FilterName: "admin_settings",
 			Decision:   "ALLOWED",
-			Message:    fmt.Sprintf("Setting %q updated from %v to %v", k, oldVal, v),
+			Message:    fmt.Sprintf("Setting %q updated from %v to %v", aEv.key, aEv.oldVal, aEv.newVal),
 			User:       a.extractUserContext(r),
 		})
 	}
 
 	if sCache != nil {
 		sCache.Update(currentSettings)
+	}
+	if _, timeoutUpdated := toUpdate["timeouts.probe_timeout_sec"]; timeoutUpdated {
+		a.invalidateSafeHTTPClient()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -326,6 +452,62 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 		"updated":  toUpdate,
 		"settings": currentSettings,
 	})
+}
+
+func formatSettingString(key string, val any) string {
+	meta, exists := settings.LookupMeta(key)
+	if !exists {
+		return fmt.Sprintf("%v", val)
+	}
+	switch meta.Type {
+	case settings.TypeInt:
+		switch v := val.(type) {
+		case int:
+			return strconv.FormatInt(int64(v), 10)
+		case int64:
+			return strconv.FormatInt(v, 10)
+		case float64:
+			return strconv.FormatInt(int64(v), 10)
+		case float32:
+			return strconv.FormatInt(int64(v), 10)
+		}
+	case settings.TypeFloat:
+		switch v := val.(type) {
+		case float64:
+			return strconv.FormatFloat(v, 'f', -1, 64)
+		case float32:
+			return strconv.FormatFloat(float64(v), 'f', -1, 32)
+		case int:
+			return strconv.FormatInt(int64(v), 10)
+		case int64:
+			return strconv.FormatInt(v, 10)
+		}
+	case settings.TypeBool:
+		if b, ok := val.(bool); ok {
+			return strconv.FormatBool(b)
+		}
+	}
+	return fmt.Sprintf("%v", val)
+}
+
+func rollbackDuckDBSettings(reqCtx context.Context, sStore settings.Store, appliedKeys []string, prev map[string]string) {
+	if sStore == nil || len(appliedKeys) == 0 {
+		return
+	}
+	rbCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for i := len(appliedKeys) - 1; i >= 0; i-- {
+		k := appliedKeys[i]
+		var err error
+		if oldVal, existed := prev[k]; existed {
+			err = sStore.Set(rbCtx, k, oldVal)
+		} else {
+			err = sStore.Delete(rbCtx, k)
+		}
+		if err != nil {
+			slog.ErrorContext(reqCtx, "Failed to roll back DuckDB setting override", slog.String("key", k), slog.String("error", err.Error()))
+		}
+	}
 }
 
 // handleSettingsReset removes an override from DuckDB and reverts to the config.yaml baseline default.
@@ -355,16 +537,30 @@ func (a *AdminServer) handleSettingsReset(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	a.mu.Lock()
+	a.configMutMu.Lock()
+	defer a.configMutMu.Unlock()
+
+	a.mu.RLock()
 	sStore := a.settingsStore
 	sCache := a.settingsCache
 	cfg := a.cfg
 	cfgProv := a.cfgProvider
 	reloadFn := a.reloadFunc
-	a.mu.Unlock()
+	a.mu.RUnlock()
 
 	ctx := r.Context()
+	var (
+		prevVal     string
+		hadOverride bool
+	)
 	if sStore != nil {
+		var getErr error
+		prevVal, hadOverride, getErr = sStore.Get(ctx, req.Key)
+		if getErr != nil {
+			slog.ErrorContext(ctx, "Failed to read setting override before reset", slog.String("key", req.Key), slog.String("error", getErr.Error()))
+			http.Error(w, fmt.Sprintf("Failed to read current state for %q", req.Key), http.StatusInternalServerError)
+			return
+		}
 		if err := sStore.Delete(ctx, req.Key); err != nil {
 			slog.ErrorContext(ctx, "Failed to delete setting override from DuckDB", slog.String("key", req.Key), slog.String("error", err.Error()))
 			http.Error(w, fmt.Sprintf("Failed to reset setting %q", req.Key), http.StatusInternalServerError)
@@ -373,11 +569,11 @@ func (a *AdminServer) handleSettingsReset(w http.ResponseWriter, r *http.Request
 	}
 
 	if settings.IsFilterKey(req.Key) {
+		var reloadErr error
 		if reloadFn != nil {
-			if err := reloadFn(); err != nil {
-				slog.ErrorContext(ctx, "Failed to reload baseline config after filter reset", slog.String("key", req.Key), slog.String("error", err.Error()))
-			}
-		} else if cfg != nil {
+			reloadErr = reloadFn()
+		}
+		if (reloadFn == nil || errors.Is(reloadErr, config.ErrNoConfigProvider)) && cfg != nil {
 			filterName := req.Key[len(settings.FilterKeyPrefix):]
 			baselineVal, _ := meta.DefaultVal.(bool)
 			if cfgProv != nil {
@@ -390,19 +586,38 @@ func (a *AdminServer) handleSettingsReset(w http.ResponseWriter, r *http.Request
 			nextCfg := a.cloneAndMutateConfig(func(c *config.Config) {
 				settings.ApplyFilterToggleToConfig(c, filterName, baselineVal)
 			})
-			if err := a.applyConfigReload(nextCfg); err != nil {
-				slog.ErrorContext(ctx, "Failed to apply fallback filter reset", slog.String("key", req.Key), slog.String("error", err.Error()))
+			reloadErr = a.applyConfigReload(nextCfg)
+		}
+		if reloadErr != nil {
+			slog.ErrorContext(ctx, "Failed to reload configuration after filter reset", slog.String("key", req.Key), slog.String("error", reloadErr.Error()))
+			if sStore != nil && hadOverride {
+				rbCtx, rbCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				if rbErr := sStore.Set(rbCtx, req.Key, prevVal); rbErr != nil {
+					slog.ErrorContext(ctx, "Failed to restore DuckDB setting override after reset failure", slog.String("key", req.Key), slog.String("error", rbErr.Error()))
+				}
+				rbCancel()
 			}
+			http.Error(w, fmt.Sprintf("Failed to reload configuration after resetting %q: %v", req.Key, reloadErr), http.StatusInternalServerError)
+			return
 		}
 	} else {
 		// Recompute effective operational settings from YAML baseline + remaining DuckDB overrides
 		var overrides map[string]string
 		if sStore != nil {
-			overrides, _ = sStore.GetAll(ctx)
+			var gErr error
+			overrides, gErr = sStore.GetAll(ctx)
+			if gErr != nil {
+				slog.ErrorContext(ctx, "Failed to reload remaining overrides from DuckDB after reset", slog.String("key", req.Key), slog.String("error", gErr.Error()))
+				http.Error(w, fmt.Sprintf("Failed to recompute settings after resetting %q: %v", req.Key, gErr), http.StatusInternalServerError)
+				return
+			}
 		}
 		effective := settings.ResolveEffectiveSettings(cfg, overrides)
 		if sCache != nil {
 			sCache.Update(effective)
+		}
+		if req.Key == "timeouts.probe_timeout_sec" {
+			a.invalidateSafeHTTPClient()
 		}
 	}
 

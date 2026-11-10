@@ -11,7 +11,8 @@ type CursorAdapter struct {
 	baseClientAdapter
 }
 
-// NewCursorAdapter initializes a new adapter, optionally accepting a custom config file path.
+// NewCursorAdapter initializes an adapter for Cursor's global user config (~/.cursor/mcp.json)
+// or a custom explicit config path. Workspace .cursor/mcp.json files require NewCursorWorkspaceAdapter.
 func NewCursorAdapter(customPath ...string) *CursorAdapter {
 	var cp string
 	if len(customPath) > 0 && customPath[0] != "" {
@@ -26,13 +27,6 @@ func NewCursorAdapter(customPath ...string) *CursorAdapter {
 					return expandPath(cp), nil
 				}
 
-				// 1. Check current directory workspace .cursor/mcp.json
-				localPath := filepath.Join(".", ".cursor", "mcp.json")
-				if fi, err := os.Stat(localPath); err == nil && !fi.IsDir() {
-					return filepath.Abs(localPath)
-				}
-
-				// 2. Global user home ~/.cursor/mcp.json
 				home, err := os.UserHomeDir()
 				if err != nil {
 					return "", err
@@ -46,6 +40,26 @@ func NewCursorAdapter(customPath ...string) *CursorAdapter {
 				}
 
 				return filepath.Join(home, ".cursor", "mcp.json"), nil
+			},
+		),
+	}
+}
+
+// NewCursorWorkspaceAdapter initializes a Cursor adapter explicitly scoped to a workspace's .cursor/mcp.json.
+func NewCursorWorkspaceAdapter(workDir ...string) *CursorAdapter {
+	var wd string
+	if len(workDir) > 0 && workDir[0] != "" {
+		wd = workDir[0]
+	}
+	return &CursorAdapter{
+		baseClientAdapter: newBaseClientAdapter(
+			ClientCursorWorkspace,
+			"Cursor (Workspace)",
+			func() (string, error) {
+				if wd != "" {
+					return filepath.Abs(filepath.Join(expandPath(wd), ".cursor", "mcp.json"))
+				}
+				return filepath.Abs(filepath.Join(".", ".cursor", "mcp.json"))
 			},
 		),
 	}

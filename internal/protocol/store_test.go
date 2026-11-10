@@ -413,5 +413,10 @@ func TestProtocolAuthTokenAndHeaders(t *testing.T) {
 	if resHeaders["X-Tenant"] != "tenant-eu-prod-42" {
 		t.Errorf("GetResolvedHeaders failed, got: %s", resHeaders["X-Tenant"])
 	}
-}
 
+	// Composite ${A}secret${B} strings must still be masked (only pure single ${VAR} placeholders pass)
+	mixed := MaskSecretValue("${A}literal_secret${B}")
+	if strings.Contains(mixed, "literal_secret") || !strings.Contains(mixed, "••••••") {
+		t.Errorf("expected composite env-wrapped secret to be masked, got: %q", mixed)
+	}
+}

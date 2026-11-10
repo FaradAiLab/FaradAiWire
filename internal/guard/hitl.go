@@ -14,31 +14,22 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/console"
+	"github.com/FaradAiLab/FaradAiWire/internal/guard/hitltypes"
 )
 
 var (
 	// ErrHITLDenied indicates human-in-the-loop approval was denied by an operator.
-	ErrHITLDenied = errors.New("human-in-the-loop approval denied")
+	ErrHITLDenied = hitltypes.ErrHITLDenied
 
 	// ErrHITLTimeout indicates approval timed out after 60s without operator interaction.
-	ErrHITLTimeout = errors.New("human-in-the-loop approval timed out after 60s without operator interaction")
+	ErrHITLTimeout = hitltypes.ErrHITLTimeout
 
 	// ErrHeadlessFailClosed indicates approval failed-closed because no interactive channels are attached.
-	ErrHeadlessFailClosed = errors.New("human-in-the-loop approval denied: headless environment with neither TTY nor Web Console attached")
+	ErrHeadlessFailClosed = hitltypes.ErrHeadlessFailClosed
 )
 
 // HITLRequest holds the payload and semantic risk metadata for human-in-the-loop review.
-type HITLRequest struct {
-	CallID         string                 `json:"call_id"`
-	ToolName       string                 `json:"tool_name"`
-	Arguments      map[string]interface{} `json:"arguments"`
-	RiskScore      float64                `json:"risk_score"`
-	ThreatDomain   string                 `json:"threat_domain"`
-	CWE            string                 `json:"cwe"`
-	DecisionEngine string                 `json:"decision_engine"`
-	CreatedAt      time.Time              `json:"created_at"`
-	ExpiresAt      time.Time              `json:"expires_at"`
-}
+type HITLRequest = hitltypes.HITLRequest
 
 // WebSocketHub abstracts real-time event distribution and client presence for HITL escalations.
 type WebSocketHub interface {
@@ -46,11 +37,18 @@ type WebSocketHub interface {
 	ClientCount() int
 }
 
+const (
+	hitlStatePending int32 = iota
+	hitlStateApproved
+	hitlStateDenied
+	hitlStateTimeout
+	hitlStateCancelled
+)
+
 type pendingApproval struct {
-	req      *HITLRequest
-	respCh   chan bool
-	resolved atomic.Bool
-	approved atomic.Bool
+	req    *HITLRequest
+	respCh chan bool
+	state  atomic.Int32
 }
 
 // HITLDispatcherConfig provides tuning and channel bindings for the HITL safety engine.
@@ -72,9 +70,11 @@ func DefaultHITLDispatcherConfig() HITLDispatcherConfig {
 
 // HITLDispatcher coordinates dual-channel human verification across terminal TTY and Web Console.
 type HITLDispatcher struct {
-	cfg     HITLDispatcherConfig
-	pending map[string]*pendingApproval
-	mu      sync.RWMutex
+	cfg        HITLDispatcherConfig
+	pending    map[string]*pendingApproval
+	mu         sync.RWMutex
+	ttySemOnce sync.Once
+	ttySem     chan struct{}
 }
 
 // NewHITLDispatcher constructs an initialized HITLDispatcher.
@@ -85,6 +85,21 @@ func NewHITLDispatcher(cfg HITLDispatcherConfig) *HITLDispatcher {
 	return &HITLDispatcher{
 		cfg:     cfg,
 		pending: make(map[string]*pendingApproval),
+		ttySem:  make(chan struct{}, 1),
+	}
+}
+
+func (d *HITLDispatcher) acquireTTYSem(ctx context.Context) (func(), bool) {
+	d.ttySemOnce.Do(func() {
+		if d.ttySem == nil {
+			d.ttySem = make(chan struct{}, 1)
+		}
+	})
+	select {
+	case d.ttySem <- struct{}{}:
+		return func() { <-d.ttySem }, true
+	case <-ctx.Done():
+		return nil, false
 	}
 }
 
@@ -234,17 +249,18 @@ func (d *HITLDispatcher) RequestApproval(ctx context.Context, req *HITLRequest) 
 		return false, ErrHITLDenied
 
 	case <-timer.C:
-		if pa.resolved.CompareAndSwap(false, true) {
-			slog.WarnContext(ctx, "HITL tool call timed out after 60s: failing-closed",
+		if pa.state.CompareAndSwap(hitlStatePending, hitlStateTimeout) {
+			slog.WarnContext(ctx, "HITL tool call timed out: failing-closed",
 				slog.String("call_id", req.CallID),
 				slog.String("tool", req.ToolName),
+				slog.Duration("timeout", timeout),
 			)
 			d.broadcastResolution(req.CallID, false, "timeout")
 		}
 		return false, ErrHITLTimeout
 
 	case <-ctx.Done():
-		if pa.resolved.CompareAndSwap(false, true) {
+		if pa.state.CompareAndSwap(hitlStatePending, hitlStateCancelled) {
 			d.broadcastResolution(req.CallID, false, "cancelled")
 		}
 		return false, ctx.Err()
@@ -255,6 +271,17 @@ func (d *HITLDispatcher) RequestApproval(ctx context.Context, req *HITLRequest) 
 func (d *HITLDispatcher) promptTTY(ctx context.Context, req *HITLRequest, pa *pendingApproval, customIn io.Reader, customOut io.Writer, promptDone chan struct{}) {
 	if promptDone != nil {
 		defer close(promptDone)
+	}
+
+	// Serialize concurrent TTY prompts without head-of-line blocking canceled or web-resolved requests.
+	releaseTTY, acquired := d.acquireTTYSem(ctx)
+	if !acquired {
+		return
+	}
+	defer releaseTTY()
+
+	if ctx.Err() != nil {
+		return
 	}
 
 	argsJSON, _ := json.Marshal(req.Arguments)
@@ -271,29 +298,29 @@ func (d *HITLDispatcher) promptTTY(ctx context.Context, req *HITLRequest, pa *pe
 		console.SanitizeTerminalText(string(argsJSON)),
 	)
 
+	var out io.Writer
+	var readFn func(context.Context) (string, error)
 	if customIn != nil && customOut != nil {
-		_, _ = fmt.Fprint(customOut, prompt)
-		answer, err := console.ReadLineFromReader(ctx, customIn)
-		if err == nil {
-			d.Resolve(req.CallID, console.ParseYesNoAnswer(answer))
-		} else if errors.Is(err, context.Canceled) && pa.resolved.Load() {
-			writeExternalResolutionNotice(customOut, pa.approved.Load())
+		out = customOut
+		readFn = func(readCtx context.Context) (string, error) {
+			return console.ReadLineFromReader(readCtx, customIn)
 		}
-		return
+	} else {
+		c, err := console.OpenInteractiveConsole()
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		out = c
+		readFn = c.ReadLine
 	}
 
-	c, err := console.OpenInteractiveConsole()
-	if err != nil {
-		return
-	}
-	defer func() { _ = c.Close() }()
+	_, _ = fmt.Fprint(out, prompt)
 
-	_, _ = fmt.Fprint(c, prompt)
-
-	line, err := c.ReadLine(ctx)
+	line, err := readFn(ctx)
 	if err != nil {
-		if errors.Is(err, context.Canceled) && pa.resolved.Load() {
-			writeExternalResolutionNotice(c, pa.approved.Load())
+		if errors.Is(err, context.Canceled) {
+			writeExternalResolutionNotice(out, pa.state.Load())
 		}
 		return
 	}
@@ -301,12 +328,15 @@ func (d *HITLDispatcher) promptTTY(ctx context.Context, req *HITLRequest, pa *pe
 	d.Resolve(req.CallID, console.ParseYesNoAnswer(line))
 }
 
-func writeExternalResolutionNotice(w io.Writer, approved bool) {
-	if approved {
+func writeExternalResolutionNotice(w io.Writer, state int32) {
+	switch state {
+	case hitlStateApproved:
 		_, _ = fmt.Fprint(w, "\n✅ Action approved via Web Console\n\n")
-		return
+	case hitlStateDenied:
+		_, _ = fmt.Fprint(w, "\n❌ Action rejected via Web Console\n\n")
+	case hitlStateTimeout:
+		_, _ = fmt.Fprint(w, "\n⏱️ Action timed out without operator approval\n\n")
 	}
-	_, _ = fmt.Fprint(w, "\n❌ Action rejected via Web Console\n\n")
 }
 
 // Resolve resolves a pending approval request by CallID.
@@ -320,15 +350,16 @@ func (d *HITLDispatcher) Resolve(callID string, approved bool) bool {
 		return false
 	}
 
-	pa.approved.Store(approved)
-	if !pa.resolved.CompareAndSwap(false, true) {
+	targetState := hitlStateDenied
+	reason := "denied"
+	if approved {
+		targetState = hitlStateApproved
+		reason = "approved"
+	}
+	if !pa.state.CompareAndSwap(hitlStatePending, targetState) {
 		return false
 	}
 
-	reason := "denied"
-	if approved {
-		reason = "approved"
-	}
 	d.broadcastResolution(callID, approved, reason)
 	d.removePending(callID)
 	pa.respCh <- approved

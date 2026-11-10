@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +16,12 @@ import (
 )
 
 func (a *AdminServer) getAgentsDir() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.getAgentsDirLocked()
+}
+
+func (a *AdminServer) getAgentsDirLocked() string {
 	if a.cfg != nil && a.cfg.AgentsDir != "" {
 		return a.cfg.AgentsDir
 	}
@@ -36,18 +43,19 @@ func (a *AdminServer) getAgentRepository() agent.Repository {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.agentRepo == nil {
-		a.agentRepo = agent.NewFSRepository(a.getAgentsDir())
+		a.agentRepo = agent.NewFSRepository(a.getAgentsDirLocked())
 	}
 	return a.agentRepo
 }
 
 // handleAgents manages full CRUD lifecycle operations for AI agents.
 // Endpoints:
-//   GET    /admin/agents         -> List all agents with tools and status
-//   GET    /admin/agents/{name}  -> Get single agent with effective tools
-//   POST   /admin/agents         -> Create new agent, probe tools, save manifest
-//   PUT    /admin/agents/{name}  -> Update agent config, archive prior snapshot
-//   DELETE /admin/agents/{name}  -> Delete agent (blocked if active sessions exist)
+//
+//	GET    /admin/agents         -> List all agents with tools and status
+//	GET    /admin/agents/{name}  -> Get single agent with effective tools
+//	POST   /admin/agents         -> Create new agent, probe tools, save manifest
+//	PUT    /admin/agents/{name}  -> Update agent config, archive prior snapshot
+//	DELETE /admin/agents/{name}  -> Delete agent (blocked if active sessions exist)
 func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 	relPath := strings.TrimPrefix(r.URL.Path, "/admin/agents")
 	relPath = strings.Trim(relPath, "/")
@@ -64,7 +72,10 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 
 	// Managed mode guard for mutations
 	if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
-		if a.cfg != nil && a.cfg.IsManaged() {
+		a.mu.RLock()
+		cfg := a.cfg
+		a.mu.RUnlock()
+		if cfg != nil && cfg.IsManaged() {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]string{
@@ -119,7 +130,7 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 				agents = append(agents, map[string]interface{}{
 					"name":            agentName,
 					"routing_mode":    routingMode,
-					"config":          cfg,
+					"config":          cfg.MaskSecrets(),
 					"tools":           tools,
 					"effective_tools": effectiveTools,
 					"status":          "active",
@@ -158,7 +169,7 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"name":            relPath,
 			"routing_mode":    routingMode,
-			"config":          cfg,
+			"config":          cfg.MaskSecrets(),
 			"tools":           tools,
 			"effective_tools": effectiveTools,
 			"status":          "active",
@@ -292,11 +303,13 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 		toolsMeta, _ := repo.GetAgentManifest(agentName)
 		effectiveTools := cfg.ComputeEffectiveTools(toolsMeta)
 
-		a.mu.Lock()
+		a.mu.RLock()
 		reloadFn := a.reloadFunc
-		a.mu.Unlock()
+		a.mu.RUnlock()
 		if reloadFn != nil {
-			_ = reloadFn()
+			if err := reloadFn(); err != nil {
+				slog.WarnContext(r.Context(), "Failed to reload runtime configuration after agent mutation", slog.String("agent", agentName), slog.String("error", err.Error()))
+			}
 		}
 
 		w.WriteHeader(http.StatusCreated)
@@ -305,7 +318,7 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 			"agent": map[string]interface{}{
 				"name":            agentName,
 				"routing_mode":    routingMode,
-				"config":          cfg,
+				"config":          cfg.MaskSecrets(),
 				"tools":           discoveredTools,
 				"effective_tools": effectiveTools,
 				"status":          "active",
@@ -415,7 +428,7 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 			updatedCfg.Protocols = []agent.ProtocolConfig{}
 			protocolsUpdated = true
 		} else if len(payload.Protocols) > 0 || len(validProtocolIDs) > 0 {
-			updatedCfg.Protocols = a.enrichAgentProtocols(payload.Protocols, validProtocolIDs)
+			updatedCfg.Protocols = a.updateAgentProtocols(payload.Protocols, existingCfg.Protocols, validProtocolIDs)
 			protocolsUpdated = true
 		}
 		// If neither ClearAllProtocols nor valid protocols were provided, preserve existingCfg.Protocols defensively.
@@ -524,11 +537,13 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 		toolsMeta, _ := repo.GetAgentManifest(agentName)
 		effectiveTools := updatedCfg.ComputeEffectiveTools(toolsMeta)
 
-		a.mu.Lock()
+		a.mu.RLock()
 		reloadFn := a.reloadFunc
-		a.mu.Unlock()
+		a.mu.RUnlock()
 		if reloadFn != nil {
-			_ = reloadFn()
+			if err := reloadFn(); err != nil {
+				slog.WarnContext(r.Context(), "Failed to reload runtime configuration after agent mutation", slog.String("agent", agentName), slog.String("error", err.Error()))
+			}
 		}
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -536,7 +551,7 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 			"agent": map[string]interface{}{
 				"name":            agentName,
 				"routing_mode":    updatedCfg.RoutingMode,
-				"config":          updatedCfg,
+				"config":          updatedCfg.MaskSecrets(),
 				"tools":           toolsMeta,
 				"effective_tools": effectiveTools,
 				"status":          "active",
@@ -599,11 +614,13 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		a.mu.Lock()
+		a.mu.RLock()
 		reloadFn := a.reloadFunc
-		a.mu.Unlock()
+		a.mu.RUnlock()
 		if reloadFn != nil {
-			_ = reloadFn()
+			if err := reloadFn(); err != nil {
+				slog.WarnContext(r.Context(), "Failed to reload runtime configuration after agent mutation", slog.String("agent", agentName), slog.String("error", err.Error()))
+			}
 		}
 
 		json.NewEncoder(w).Encode(map[string]string{

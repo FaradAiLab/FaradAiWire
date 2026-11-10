@@ -29,7 +29,7 @@ type Protocol struct {
 	ID            string            `json:"id"`
 	Name          string            `json:"name"`
 	Description   string            `json:"description,omitempty"`
-	Type          string            `json:"type"` // "stdio", "sse", "http"
+	Type          string            `json:"type"`                     // "stdio", "sse", "http"
 	TransportMode string            `json:"transport_mode,omitempty"` // "sse" or "streamable_http" — negotiated at probe time
 	Command       string            `json:"command,omitempty"`
 	Args          []string          `json:"args,omitempty"`
@@ -147,37 +147,52 @@ func (p *Protocol) MaskSecrets() *Protocol {
 	if len(p.Env) > 0 {
 		clone.Env = make([]string, len(p.Env))
 		for i, envStr := range p.Env {
-			clone.Env[i] = maskEnvString(envStr)
+			clone.Env[i] = MaskEnvString(envStr)
 		}
 	}
 
 	if p.AuthToken != "" {
-		clone.AuthToken = maskSecretValue(p.AuthToken)
+		clone.AuthToken = MaskSecretValue(p.AuthToken)
 	}
 
 	if len(p.Headers) > 0 {
 		clone.Headers = make(map[string]string, len(p.Headers))
 		for k, v := range p.Headers {
-			clone.Headers[k] = maskHeaderValue(k, v)
+			clone.Headers[k] = MaskHeaderValue(k, v)
 		}
 	}
 
 	// Redact embedded basic auth credentials if present in URL
-	if strings.Contains(clone.URLOrCommand, "://") {
-		if parsed, err := url.Parse(clone.URLOrCommand); err == nil && parsed.User != nil {
-			clone.URLOrCommand = parsed.Redacted()
-		}
-	}
+	clone.URLOrCommand = RedactURLCredentials(clone.URLOrCommand)
 
 	return &clone
 }
 
-// maskSecretValue redacts secret tokens while preserving prefix and suffix for debuggability.
-func maskSecretValue(val string) string {
+// RedactURLCredentials strips embedded userinfo credentials from URL strings.
+func RedactURLCredentials(raw string) string {
+	if !strings.Contains(raw, "://") {
+		return raw
+	}
+	if parsed, err := url.Parse(raw); err == nil && parsed.User != nil {
+		return parsed.Redacted()
+	}
+	return raw
+}
+
+func isSingleEnvPlaceholder(val string) bool {
+	if !strings.HasPrefix(val, "${") || !strings.HasSuffix(val, "}") || len(val) <= 3 {
+		return false
+	}
+	inner := val[2 : len(val)-1]
+	return !strings.ContainsAny(inner, "{}$ \t\r\n")
+}
+
+// MaskSecretValue redacts secret tokens while preserving prefix and suffix for debuggability.
+func MaskSecretValue(val string) string {
 	if val == "" {
 		return ""
 	}
-	if strings.HasPrefix(val, "${") && strings.HasSuffix(val, "}") {
+	if isSingleEnvPlaceholder(val) {
 		return val
 	}
 	if len(val) <= 6 {
@@ -188,8 +203,8 @@ func maskSecretValue(val string) string {
 	return fmt.Sprintf("%s••••••%s", prefix, suffix)
 }
 
-// maskHeaderValue redacts sensitive HTTP header values.
-func maskHeaderValue(key, val string) string {
+// MaskHeaderValue redacts sensitive HTTP header values.
+func MaskHeaderValue(key, val string) string {
 	keyUpper := strings.ToUpper(key)
 	isSensitive := strings.EqualFold(key, "Authorization") ||
 		strings.Contains(keyUpper, "TOKEN") ||
@@ -202,11 +217,11 @@ func maskHeaderValue(key, val string) string {
 	if !isSensitive {
 		return val
 	}
-	return maskSecretValue(val)
+	return MaskSecretValue(val)
 }
 
-// maskEnvString redacts the secret value portion of a KEY=VALUE environment string.
-func maskEnvString(envStr string) string {
+// MaskEnvString redacts the secret value portion of a KEY=VALUE environment string.
+func MaskEnvString(envStr string) string {
 	parts := strings.SplitN(envStr, "=", 2)
 	if len(parts) != 2 {
 		return envStr
@@ -227,5 +242,5 @@ func maskEnvString(envStr string) string {
 		return envStr
 	}
 
-	return fmt.Sprintf("%s=%s", key, maskSecretValue(val))
+	return fmt.Sprintf("%s=%s", key, MaskSecretValue(val))
 }

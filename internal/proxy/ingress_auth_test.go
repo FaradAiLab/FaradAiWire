@@ -4,15 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"testing"
 	"github.com/FaradAiLab/FaradAiWire/internal/auth"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
 )
 
 type ingressAuthFilter struct{}

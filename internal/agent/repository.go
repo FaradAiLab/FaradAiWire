@@ -554,7 +554,7 @@ func (r *FSRepository) RollbackAgent(agentName, timestamp string) error {
 				}
 				data, readErr := os.ReadFile(src)
 				if readErr == nil {
-					_ = os.WriteFile(dst, data, 0644)
+					_ = os.WriteFile(dst, data, 0600)
 				}
 			}
 		}
@@ -635,7 +635,7 @@ func (r *FSRepository) ArchiveAgentCurrent(agentName string) error {
 		snapshotDir = filepath.Join(archiveBase, fmt.Sprintf("%s_%d", timestamp, i))
 	}
 
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0700); err != nil {
 		return fmt.Errorf("failed to create snapshot directory '%s': %w", snapshotDir, err)
 	}
 
@@ -646,7 +646,7 @@ func (r *FSRepository) ArchiveAgentCurrent(agentName string) error {
 		if readErr != nil {
 			continue
 		}
-		if writeErr := os.WriteFile(dstPath, data, 0644); writeErr != nil {
+		if writeErr := os.WriteFile(dstPath, data, 0600); writeErr != nil {
 			return fmt.Errorf("failed to write archive file '%s': %w", dstPath, writeErr)
 		}
 	}
@@ -795,4 +795,3 @@ func (r *FSRepository) DeleteAgent(agentName string) error {
 
 	return nil
 }
-

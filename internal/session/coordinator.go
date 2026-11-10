@@ -189,6 +189,19 @@ func (c *InboundCoordinator) ExecuteMessage(
 		bridge, hasBridge = sessionMgr.GetBridge(clientSessionID)
 	}
 	if hasBridge && bridge != nil {
+		if agentName != "" && bridge.AgentName != "" && !strings.EqualFold(bridge.AgentName, agentName) {
+			errMsg := fmt.Sprintf("AGENT_ACCESS_DENIED: session bridge '%s' belongs to agent '%s', not '%s'", clientSessionID, bridge.AgentName, agentName)
+			var reqID interface{}
+			if req != nil {
+				reqID = req.ID
+			}
+			resp := mcp.NewErrorResponse(reqID, mcp.ErrPolicyDenied, errMsg, nil)
+			respBytes, _ := json.Marshal(resp)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write(respBytes)
+			return
+		}
 		if agentName == "" && bridge.AgentName != "" {
 			agentName = bridge.AgentName
 			userCtx = context.WithValue(userCtx, filter.AgentNameContextKey, agentName)

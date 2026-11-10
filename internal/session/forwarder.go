@@ -466,16 +466,12 @@ func (f *Forwarder) flushEvent(
 			routePrefix = ""
 		}
 		rewrittenData := fmt.Sprintf("%s/message%s", routePrefix, extractQueryString(data))
-		_, _ = w.Write([]byte(fmt.Sprintf("event: %s\ndata: %s\n\n", eventName, rewrittenData)))
+		_, _ = io.WriteString(w, FormatSSEFrame(eventName, rewrittenData))
 	} else if eventName == "message" {
 		sanitizedData := f.ProcessOutgoingMessage(data, *sessionID, targetURL)
-		_, _ = w.Write([]byte(fmt.Sprintf("event: %s\ndata: %s\n\n", eventName, sanitizedData)))
+		_, _ = io.WriteString(w, FormatSSEFrame(eventName, sanitizedData))
 	} else {
-		if eventName != "" {
-			_, _ = w.Write([]byte(fmt.Sprintf("event: %s\ndata: %s\n\n", eventName, data)))
-		} else {
-			_, _ = w.Write([]byte(fmt.Sprintf("data: %s\n\n", data)))
-		}
+		_, _ = io.WriteString(w, FormatSSEFrame(eventName, data))
 	}
 
 	if flusher != nil {

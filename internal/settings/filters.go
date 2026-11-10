@@ -140,12 +140,17 @@ func ApplyFilterToggleToConfig(cfg *config.Config, filterName string, enabled bo
 		cfg.Filters.PrefillBlock.Enabled = enabled
 	case "schema_validation":
 		cfg.Filters.SchemaValidation.Enabled = enabled
-		if enabled && cfg.Filters.SchemaValidation.SchemasDir == "" &&
-			!cfg.Filters.SchemaValidation.DynamicCapture &&
-			!cfg.Filters.SchemaValidation.BaselinePinning {
-			cfg.Filters.SchemaValidation.SchemasDir = filepath.ToSlash(filepath.Join(config.DefaultFaradAiWireDir(), "schemas"))
-			cfg.Filters.SchemaValidation.DynamicCapture = true
-			cfg.Filters.SchemaValidation.BaselinePinning = true
+		if enabled {
+			uninitialized := cfg.Filters.SchemaValidation.SchemasDir == "" &&
+				!cfg.Filters.SchemaValidation.DynamicCapture &&
+				!cfg.Filters.SchemaValidation.BaselinePinning
+			if cfg.Filters.SchemaValidation.SchemasDir == "" {
+				cfg.Filters.SchemaValidation.SchemasDir = filepath.ToSlash(filepath.Join(config.DefaultFaradAiWireDir(), "schemas"))
+			}
+			if uninitialized {
+				cfg.Filters.SchemaValidation.DynamicCapture = true
+				cfg.Filters.SchemaValidation.BaselinePinning = true
+			}
 		}
 	case "injection_scanner":
 		cfg.Filters.InjectionScanner.Enabled = enabled

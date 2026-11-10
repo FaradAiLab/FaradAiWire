@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -74,5 +75,56 @@ func TestSanitizeTerminalText(t *testing.T) {
 	want := "delete_record\\x1b[2J\\x1b[H  \\x07{\"id\":1}"
 	if got != want {
 		t.Fatalf("SanitizeTerminalText(%q) = %q, want %q", raw, got, want)
+	}
+}
+
+func TestReadLineFromReader_NilAndBounded(t *testing.T) {
+	t.Parallel()
+
+	if _, err := ReadLineFromReader(context.Background(), nil); err == nil {
+		t.Fatal("expected error for nil reader")
+	}
+
+	var nilFile *os.File
+	if _, err := ReadLineFromReader(context.Background(), nilFile); err == nil {
+		t.Fatal("expected error for typed-nil *os.File")
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ReadLineFromReader(canceledCtx, strings.NewReader("y\n")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled on pre-canceled ctx, got %v", err)
+	}
+
+	longInput := strings.Repeat("a", maxLineBytes+50) + "\nyes\n"
+	r := strings.NewReader(longInput)
+	line1, err := ReadLineFromReader(context.Background(), r)
+	if err != nil {
+		t.Fatalf("unexpected error reading first bounded line: %v", err)
+	}
+	if len(line1) != maxLineBytes {
+		t.Fatalf("expected truncated length %d, got %d", maxLineBytes, len(line1))
+	}
+	line2, err := ReadLineFromReader(context.Background(), r)
+	if err != nil {
+		t.Fatalf("expected second line after bounded read (no bufio over-read), got %v", err)
+	}
+	if line2 != "yes" {
+		t.Fatalf("expected second line %q, got %q", "yes", line2)
+	}
+}
+
+func TestNewFileConsole_CloseSameHandleOnce(t *testing.T) {
+	t.Parallel()
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe failed: %v", err)
+	}
+	defer pw.Close()
+
+	c := NewFileConsole(pr, pr)
+	if err := c.Close(); err != nil {
+		t.Fatalf("expected closing shared in/out handle once to succeed, got: %v", err)
 	}
 }

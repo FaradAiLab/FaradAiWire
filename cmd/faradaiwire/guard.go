@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -14,7 +15,19 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
+	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
 )
+
+var (
+	guardStatusHTTPClient  = &http.Client{Timeout: 500 * time.Millisecond}
+	guardDefaultHTTPClient = &http.Client{Timeout: 5 * time.Second}
+)
+
+const maxGuardAdminResponseBytes = 4 << 20
+
+func normalizeGuardHost(host string) string {
+	return normalizeGatewayHost(host)
+}
 
 // ANSI color codes for terminal rendering
 const (
@@ -32,23 +45,20 @@ const (
 
 // fetchModelsFromGateway attempts to retrieve models from a running gateway admin API.
 func fetchModelsFromGateway(ctx context.Context, host string, port int, clients ...*http.Client) ([]*guard.Model, error) {
-	if host == "" || host == "0.0.0.0" {
-		host = "127.0.0.1"
-	}
-	url := fmt.Sprintf("http://%s:%d/admin/guards/models", host, port)
+	endpoint := fmt.Sprintf("http://%s/admin/guards/models", net.JoinHostPort(normalizeGuardHost(host), strconv.Itoa(port)))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create guard models request: %w", err)
 	}
 
-	client := &http.Client{Timeout: 500 * time.Millisecond}
+	client := guardStatusHTTPClient
 	if len(clients) > 0 && clients[0] != nil {
 		client = clients[0]
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch guard models from gateway: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -59,8 +69,8 @@ func fetchModelsFromGateway(ctx context.Context, host string, port int, clients 
 	var data struct {
 		Models []*guard.Model `json:"models"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxGuardAdminResponseBytes)).Decode(&data); err != nil {
+		return nil, fmt.Errorf("decode guard models response: %w", err)
 	}
 	return data.Models, nil
 }
@@ -269,23 +279,20 @@ func executeGuardList(configPath string, out io.Writer) int {
 
 // fetchGuardStatusFromGateway queries the runtime status from the admin REST endpoint.
 func fetchGuardStatusFromGateway(ctx context.Context, host string, port int, clients ...*http.Client) (*guard.ProcessStatus, error) {
-	if host == "" || host == "0.0.0.0" {
-		host = "127.0.0.1"
-	}
-	url := fmt.Sprintf("http://%s:%d/admin/guards/status", host, port)
+	endpoint := fmt.Sprintf("http://%s/admin/guards/status", net.JoinHostPort(normalizeGuardHost(host), strconv.Itoa(port)))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create guard status request: %w", err)
 	}
 
-	client := &http.Client{Timeout: 500 * time.Millisecond}
+	client := guardStatusHTTPClient
 	if len(clients) > 0 && clients[0] != nil {
 		client = clients[0]
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch guard status from gateway: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -294,8 +301,8 @@ func fetchGuardStatusFromGateway(ctx context.Context, host string, port int, cli
 	}
 
 	var status guard.ProcessStatus
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		return nil, err
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxGuardAdminResponseBytes)).Decode(&status); err != nil {
+		return nil, fmt.Errorf("decode guard status response: %w", err)
 	}
 	return &status, nil
 }
@@ -405,20 +412,24 @@ func executeGuardInstall(configPath string, modelID string, out io.Writer, clien
 		return 1
 	}
 
+	if err := pathguard.ValidateSafeIdentifier(modelID); err != nil {
+		fmt.Fprintf(out, "Error: invalid model ID '%s': %v\n", modelID, err)
+		return 1
+	}
+
 	provider := config.NewYAMLConfigProvider(configPath)
 	cfg, err := provider.Load()
 	if err != nil {
 		cfg = &config.Config{}
 	}
 
-	host := cfg.GetListenHost()
-	if host == "" || host == "0.0.0.0" {
-		host = "127.0.0.1"
-	}
+	host := normalizeGuardHost(cfg.GetListenHost())
 	adminPort := cfg.GetAdminPort()
-	installURL := fmt.Sprintf("http://%s:%d/admin/guards/models/%s/install", host, adminPort, modelID)
+	hostPort := net.JoinHostPort(host, strconv.Itoa(adminPort))
+	escapedModelID := url.PathEscape(modelID)
+	installURL := fmt.Sprintf("http://%s/admin/guards/models/%s/install", hostPort, escapedModelID)
 
-	httpClient := &http.Client{Timeout: 5 * time.Second}
+	httpClient := guardDefaultHTTPClient
 	if len(client) > 0 && client[0] != nil {
 		httpClient = client[0]
 	}
@@ -429,11 +440,14 @@ func executeGuardInstall(configPath string, modelID string, out io.Writer, clien
 	if err == nil {
 		resp, err = httpClient.Do(req)
 	}
-	cancel()
 
 	// If gateway responded
-	if err == nil && resp != nil {
-		defer resp.Body.Close()
+	if err != nil || resp == nil {
+		cancel()
+	} else {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		cancel()
 		if resp.StatusCode == http.StatusNotFound {
 			fmt.Fprintf(out, "Error: model '%s' not found in catalog\n", modelID)
 			return 1
@@ -450,7 +464,7 @@ func executeGuardInstall(configPath string, modelID string, out io.Writer, clien
 		fmt.Fprintf(out, "Initiating installation for model '%s' via FaradAiWire...\n", modelID)
 
 		// Poll progress
-		progressURL := fmt.Sprintf("http://%s:%d/admin/guards/models/%s/progress", host, adminPort, modelID)
+		progressURL := fmt.Sprintf("http://%s/admin/guards/models/%s/progress", hostPort, escapedModelID)
 		lastStep := ""
 		deadline := time.Now().Add(5 * time.Minute)
 		for time.Now().Before(deadline) {
@@ -462,14 +476,15 @@ func executeGuardInstall(configPath string, modelID string, out io.Writer, clien
 				continue
 			}
 			pResp, pErr := httpClient.Do(pReq)
-			pCancel()
 			if pErr != nil {
+				pCancel()
 				continue
 			}
 
 			var prog guard.InstallProgress
-			pErr = json.NewDecoder(pResp.Body).Decode(&prog)
+			pErr = json.NewDecoder(io.LimitReader(pResp.Body, maxGuardAdminResponseBytes)).Decode(&prog)
 			pResp.Body.Close()
+			pCancel()
 			if pErr != nil {
 				continue
 			}
@@ -530,6 +545,10 @@ func executeGuardUninstall(configPath string, modelID string, out io.Writer, cli
 		fmt.Fprintln(out, "Error: model ID is required")
 		return 1
 	}
+	if err := pathguard.ValidateSafeIdentifier(modelID); err != nil {
+		fmt.Fprintf(out, "Error: invalid model ID '%s': %v\n", modelID, err)
+		return 1
+	}
 
 	provider := config.NewYAMLConfigProvider(configPath)
 	cfg, err := provider.Load()
@@ -537,29 +556,28 @@ func executeGuardUninstall(configPath string, modelID string, out io.Writer, cli
 		cfg = &config.Config{}
 	}
 
-	host := cfg.GetListenHost()
-	if host == "" || host == "0.0.0.0" {
-		host = "127.0.0.1"
-	}
+	host := normalizeGuardHost(cfg.GetListenHost())
 	adminPort := cfg.GetAdminPort()
-	deleteURL := fmt.Sprintf("http://%s:%d/admin/guards/models/%s", host, adminPort, modelID)
+	deleteURL := fmt.Sprintf("http://%s/admin/guards/models/%s", net.JoinHostPort(host, strconv.Itoa(adminPort)), url.PathEscape(modelID))
 
-	httpClient := &http.Client{Timeout: 5 * time.Second}
+	httpClient := guardDefaultHTTPClient
 	if len(client) > 0 && client[0] != nil {
 		httpClient = client[0]
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, deleteURL, nil)
 	var resp *http.Response
 	if err == nil {
 		resp, err = httpClient.Do(req)
 	}
-	cancel()
 
 	// If gateway responded
 	if err == nil && resp != nil {
-		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		cancel()
 		if resp.StatusCode == http.StatusNotFound {
 			fmt.Fprintf(out, "Error: model '%s' not found in catalog\n", modelID)
 			return 1

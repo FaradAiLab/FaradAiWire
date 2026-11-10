@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -53,13 +55,13 @@ func (m *MockRepo) GetDefaultAgent() (*agent.RouteConfig, error) {
 	return nil, agent.NewAgentNotFoundError("default")
 }
 
-func (m *MockRepo) ClearCache() {}
+func (m *MockRepo) ClearCache()                                                    {}
 func (m *MockRepo) SaveAgentConfig(agentName string, cfg *agent.RouteConfig) error { return nil }
-func (m *MockRepo) DeleteAgent(agentName string) error { return nil }
-func (m *MockRepo) SaveAgentManifest(agentName string, tools interface{}) error { return nil }
-func (m *MockRepo) ListAgentArchives(agentName string) ([]string, error) { return nil, nil }
-func (m *MockRepo) RollbackAgent(agentName, timestamp string) error { return nil }
-func (m *MockRepo) ArchiveAgentCurrent(agentName string) error { return nil }
+func (m *MockRepo) DeleteAgent(agentName string) error                             { return nil }
+func (m *MockRepo) SaveAgentManifest(agentName string, tools interface{}) error    { return nil }
+func (m *MockRepo) ListAgentArchives(agentName string) ([]string, error)           { return nil, nil }
+func (m *MockRepo) RollbackAgent(agentName, timestamp string) error                { return nil }
+func (m *MockRepo) ArchiveAgentCurrent(agentName string) error                     { return nil }
 
 // MockDialer implements Dialer for testing.
 type MockDialer struct {
@@ -408,3 +410,126 @@ func TestAgentSessionBridge_CanonicalIndexingAndSingleClose(t *testing.T) {
 	}
 }
 
+func TestSessionManager_CreateBridgeRejectsDuplicateSessionID(t *testing.T) {
+	mockRepo := &MockRepo{
+		configs: map[string]*agent.RouteConfig{
+			"agent-dup": {
+				AgentID:     "dup-id",
+				AgentName:   "agent-dup",
+				RoutingMode: "aggregated",
+				Protocols: []agent.ProtocolConfig{
+					{ID: "p1", Name: "svc", URLOrCommand: "http://localhost:8001/sse"},
+				},
+			},
+		},
+	}
+
+	dialer := &MockDialer{}
+	mgr := NewManager(mockRepo, nil)
+	mgr.SetDialer(dialer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	first, err := mgr.CreateBridge(ctx, "agent-dup", "dup-session", nil)
+	if err != nil {
+		t.Fatalf("expected initial CreateBridge to succeed, got %v", err)
+	}
+
+	second, err := mgr.CreateBridge(ctx, "agent-dup", "dup-session", nil)
+	if !errors.Is(err, ErrBridgeAlreadyExists) {
+		t.Fatalf("expected ErrBridgeAlreadyExists on duplicate session ID, got: %v", err)
+	}
+	if second != nil {
+		t.Fatalf("expected nil bridge on duplicate failure")
+	}
+
+	// Victim's bridge must stay intact and active
+	got, ok := mgr.GetBridge("dup-session")
+	if !ok || got != first {
+		t.Fatalf("expected original bridge to remain registered")
+	}
+	if first.BridgeCtx.Err() != nil {
+		t.Fatalf("expected original bridge context not to be canceled, got %v", first.BridgeCtx.Err())
+	}
+}
+
+func TestSessionManager_GetOrCreateBridgeConcurrentAndReuse(t *testing.T) {
+	mockRepo := &MockRepo{
+		configs: map[string]*agent.RouteConfig{
+			"agent-lazy": {
+				AgentID:     "lazy-id",
+				AgentName:   "agent-lazy",
+				RoutingMode: "aggregated",
+				Protocols: []agent.ProtocolConfig{
+					{ID: "p1", Name: "svc", URLOrCommand: "http://localhost:8001/sse"},
+				},
+			},
+		},
+	}
+
+	mgr := NewManager(mockRepo, nil)
+	mgr.SetDialer(&MockDialer{})
+
+	const workers = 8
+	results := make([]*AgentSessionBridge, workers)
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx], errs[idx] = mgr.GetOrCreateBridge(context.Background(), "agent-lazy", "shared-sid", nil)
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < workers; i++ {
+		if errs[i] != nil {
+			t.Fatalf("worker %d failed: %v", i, errs[i])
+		}
+		if results[i] != results[0] {
+			t.Fatalf("worker %d received distinct bridge instance (%p vs %p)", i, results[i], results[0])
+		}
+	}
+	if mgr.ActiveBridgesCount() != 1 {
+		t.Fatalf("expected ActiveBridgesCount == 1, got %d", mgr.ActiveBridgesCount())
+	}
+}
+
+func TestSessionManager_GetOrCreateBridge_RejectsCrossAgentReuse(t *testing.T) {
+	mockRepo := &MockRepo{
+		configs: map[string]*agent.RouteConfig{
+			"agent-alpha": {
+				AgentName:   "agent-alpha",
+				RoutingMode: "aggregated",
+			},
+			"agent-beta": {
+				AgentName:   "agent-beta",
+				RoutingMode: "aggregated",
+			},
+		},
+	}
+
+	mgr := NewManager(mockRepo, nil)
+	mgr.SetDialer(&MockDialer{})
+
+	b1, err := mgr.GetOrCreateBridge(context.Background(), "agent-alpha", "shared-session-id", nil)
+	if err != nil || b1 == nil {
+		t.Fatalf("GetOrCreateBridge agent-alpha failed: %v", err)
+	}
+
+	if _, err := mgr.GetOrCreateBridge(context.Background(), "agent-beta", "shared-session-id", nil); !errors.Is(err, ErrBridgeAgentMismatch) {
+		t.Fatalf("expected ErrBridgeAgentMismatch on cross-agent session reuse, got %v", err)
+	}
+}
+
+func TestFormatSSEFrame_MultilineDataSafe(t *testing.T) {
+	frame := FormatSSEFrame("message\nevent: hijacked", "line1\nevent: endpoint\ndata: https://evil")
+	if strings.Contains(frame, "\nevent: endpoint") || strings.Contains(frame, "hijacked") && strings.HasPrefix(frame, "event: message\nevent: hijacked") {
+		t.Fatalf("SSE frame allowed newline injection: %q", frame)
+	}
+	if !strings.Contains(frame, "data: line1\ndata: event: endpoint\ndata: data: https://evil\n\n") {
+		t.Fatalf("expected multiline data prefixed per SSE spec, got: %q", frame)
+	}
+}

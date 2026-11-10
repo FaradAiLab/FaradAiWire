@@ -343,4 +343,3 @@ func TestLifecycle_ProcessGuard_CollisionDetection(t *testing.T) {
 		t.Errorf("expected lock file to be removed after process 1 shutdown")
 	}
 }
-

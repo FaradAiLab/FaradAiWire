@@ -36,8 +36,18 @@ func isTerminalFile(f *os.File) bool {
 	if f == nil {
 		return false
 	}
-	_, err := unix.IoctlGetWinsize(int(f.Fd()), unix.TIOCGWINSZ)
-	return err == nil
+	rawConn, err := f.SyscallConn()
+	if err != nil {
+		return false
+	}
+	var isTTY bool
+	if ctrlErr := rawConn.Control(func(fd uintptr) {
+		_, ioctlErr := unix.IoctlGetWinsize(int(fd), unix.TIOCGWINSZ)
+		isTTY = ioctlErr == nil
+	}); ctrlErr != nil {
+		return false
+	}
+	return isTTY
 }
 
 // NewFileConsole wraps an open readable file handle and output writer as an InteractiveConsole.
@@ -75,6 +85,9 @@ func (c *unixConsole) Close() error {
 // ReadLine polls the underlying file descriptor at short intervals using unix.Poll so ctx cancellation
 // terminates the read without blocking Close() on non-kqueue character devices like /dev/tty.
 func (c *unixConsole) ReadLine(ctx context.Context) (string, error) {
+	if c == nil || c.in == nil {
+		return "", os.ErrInvalid
+	}
 	rawConn, err := c.in.SyscallConn()
 	if err != nil {
 		return "", err
@@ -101,7 +114,7 @@ func (c *unixConsole) ReadLine(ctx context.Context) (string, error) {
 			if buf[0] == '\n' {
 				return strings.TrimRight(sb.String(), "\r"), nil
 			}
-			if sb.Len() < 256 {
+			if sb.Len() < maxLineBytes {
 				sb.WriteByte(buf[0])
 			}
 		}
@@ -129,8 +142,14 @@ func pollReadable(rawConn interface{ Control(func(fd uintptr)) error }, timeoutM
 				pollErr = err
 				return
 			}
-			if n > 0 && (fds[0].Revents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR)) != 0 {
-				ready = true
+			if n > 0 {
+				if (fds[0].Revents & unix.POLLNVAL) != 0 {
+					pollErr = errors.New("console file descriptor closed")
+					return
+				}
+				if (fds[0].Revents & (unix.POLLIN | unix.POLLHUP | unix.POLLERR)) != 0 {
+					ready = true
+				}
 			}
 			return
 		}

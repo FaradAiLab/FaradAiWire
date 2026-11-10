@@ -123,12 +123,14 @@ func (m *mockDispatcherRepo) GetDefaultAgent() (*agent.RouteConfig, error) {
 }
 
 func (m *mockDispatcherRepo) ClearCache() {}
-func (m *mockDispatcherRepo) SaveAgentConfig(agentName string, cfg *agent.RouteConfig) error { return nil }
-func (m *mockDispatcherRepo) DeleteAgent(agentName string) error { return nil }
+func (m *mockDispatcherRepo) SaveAgentConfig(agentName string, cfg *agent.RouteConfig) error {
+	return nil
+}
+func (m *mockDispatcherRepo) DeleteAgent(agentName string) error                          { return nil }
 func (m *mockDispatcherRepo) SaveAgentManifest(agentName string, tools interface{}) error { return nil }
-func (m *mockDispatcherRepo) ListAgentArchives(agentName string) ([]string, error) { return nil, nil }
-func (m *mockDispatcherRepo) RollbackAgent(agentName, timestamp string) error { return nil }
-func (m *mockDispatcherRepo) ArchiveAgentCurrent(agentName string) error { return nil }
+func (m *mockDispatcherRepo) ListAgentArchives(agentName string) ([]string, error)        { return nil, nil }
+func (m *mockDispatcherRepo) RollbackAgent(agentName, timestamp string) error             { return nil }
+func (m *mockDispatcherRepo) ArchiveAgentCurrent(agentName string) error                  { return nil }
 
 func TestSessionToolDispatcher_RemoteToolRouting(t *testing.T) {
 	repo := &mockDispatcherRepo{

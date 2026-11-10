@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -150,7 +149,13 @@ func ProbeWithAutoNegotiation(ctx context.Context, client *http.Client, targetUR
 
 	slog.InfoContext(ctx, "SSRF-Safe probing target MCP server", slog.String("target_url", targetURLStr))
 	if client == nil {
-		client = transport.NewSafeHTTPClient(opts, 10*time.Second)
+		timeout := 10 * time.Second
+		if dl, ok := ctx.Deadline(); ok {
+			if rem := time.Until(dl); rem > 0 {
+				timeout = rem
+			}
+		}
+		client = transport.NewSafeHTTPClient(opts, timeout)
 	}
 
 	applyHeaders := func(r *http.Request) {
@@ -287,7 +292,14 @@ func probeSSE(ctx context.Context, client *http.Client, targetURLStr string, app
 		return nil, fmt.Errorf("did not receive SSE endpoint event from %s", targetURLStr)
 	}
 
-	// Validate dynamic messagesEndpointURL against SSRF policy before sending JSON-RPC payloads
+	// Validate dynamic messagesEndpointURL against SSRF policy AND enforce same-origin before forwarding credentials
+	epURL, epErr := url.Parse(messagesEndpointURL)
+	parsedBase, baseErr := url.Parse(targetURLStr)
+	if epErr != nil || baseErr != nil || epURL.User != nil ||
+		!strings.EqualFold(epURL.Scheme, parsedBase.Scheme) || !strings.EqualFold(epURL.Host, parsedBase.Host) {
+		slog.WarnContext(ctx, "Discovered SSE endpoint rejected due to cross-origin or invalid URL", slog.String("target_url", targetURLStr), slog.String("endpoint_url", messagesEndpointURL))
+		return nil, fmt.Errorf("SSE endpoint event origin mismatch for %s", targetURLStr)
+	}
 	if err := transport.ValidateURL(messagesEndpointURL, opts); err != nil {
 		slog.WarnContext(ctx, "Discovered messages endpoint rejected by SSRF guardrails", slog.String("endpoint_url", messagesEndpointURL), slog.String("error", err.Error()))
 		return nil, fmt.Errorf("SSRF protection blocked discovered endpoint '%s': %w", messagesEndpointURL, err)
@@ -357,7 +369,7 @@ func probeSSE(ctx context.Context, client *http.Client, targetURLStr string, app
 	}
 	defer toolsResp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(toolsResp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(toolsResp.Body, 10<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +452,7 @@ func probeStreamableHTTP(ctx context.Context, client *http.Client, targetURLStr 
 	}
 
 	// Read and validate initialize response
-	initBody, err := io.ReadAll(initResp.Body)
+	initBody, err := io.ReadAll(io.LimitReader(initResp.Body, 10<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read initialize response: %w", err)
 	}
@@ -506,7 +518,7 @@ func probeStreamableHTTP(ctx context.Context, client *http.Client, targetURLStr 
 	}
 	defer toolsResp.Body.Close()
 
-	toolsBody, err := io.ReadAll(toolsResp.Body)
+	toolsBody, err := io.ReadAll(io.LimitReader(toolsResp.Body, 10<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -564,25 +576,10 @@ func ProbeAndDiscoverMCPToolsStdio(ctx context.Context, command string, args []s
 	}
 
 	cmd := exec.CommandContext(ctx, trimmedCmd, args...)
-
-	// Build environment with variable expansion
-	if len(env) > 0 {
-		resolvedEnv := os.Environ()
-		for _, e := range env {
-			parts := strings.SplitN(e, "=", 2)
-			if len(parts) == 2 {
-				val := parts[1]
-				if strings.HasPrefix(val, "${") && strings.HasSuffix(val, "}") {
-					varName := strings.TrimSuffix(strings.TrimPrefix(val, "${"), "}")
-					val = os.Getenv(varName)
-				}
-				resolvedEnv = append(resolvedEnv, parts[0]+"="+val)
-			} else {
-				resolvedEnv = append(resolvedEnv, e)
-			}
-		}
-		cmd.Env = resolvedEnv
-	}
+	// Always construct a minimal sanitized environment even when env is empty so host secrets
+	// (API_KEY, ADMIN_API_KEY, cloud tokens) never leak to probed stdio processes.
+	cmd.Env = session.BuildSafeSubprocessEnv(env, true)
+	procGuard := configureProbeProcess(cmd)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -600,14 +597,17 @@ func ProbeAndDiscoverMCPToolsStdio(ctx context.Context, command string, args []s
 
 	if err := cmd.Start(); err != nil {
 		_ = stdinPipe.Close()
+		_ = stdoutPipe.Close()
 		return nil, fmt.Errorf("failed to start stdio subprocess '%s': %w", trimmedCmd, err)
 	}
+	procGuard.afterStart()
 
+	stopAfter := context.AfterFunc(ctx, procGuard.killTree)
 	defer func() {
+		stopAfter()
 		_ = stdinPipe.Close()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
+		procGuard.killTree()
+		procGuard.markReaped()
 		_ = cmd.Wait()
 	}()
 

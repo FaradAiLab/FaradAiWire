@@ -298,3 +298,173 @@ func TestHITLDispatcher_DualChannel_WebWinsRaceCleanly(t *testing.T) {
 		t.Errorf("expected TTY prompt to have been rendered, got %q", out.String())
 	}
 }
+
+func TestHITLDispatcher_ExternalRejectVsTimeoutNotice(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ExternalWebRejectNotice", func(t *testing.T) {
+		t.Parallel()
+		pr, pw := io.Pipe()
+		defer pr.Close()
+		defer pw.Close()
+
+		var out syncSafeBuffer
+		hub := &mockWSHub{clientCount: 1}
+		dispatcher := NewHITLDispatcher(HITLDispatcherConfig{
+			Timeout: 2 * time.Second,
+			TTYIn:   pr,
+			TTYOut:  &out,
+			WSHub:   hub,
+		})
+
+		go func() {
+			time.Sleep(25 * time.Millisecond)
+			dispatcher.Resolve("ext-reject-1", false)
+		}()
+
+		approved, err := dispatcher.RequestApproval(context.Background(), &HITLRequest{
+			CallID:   "ext-reject-1",
+			ToolName: "delete_table",
+		})
+		if approved || !errors.Is(err, ErrHITLDenied) {
+			t.Fatalf("expected ErrHITLDenied, got approved=%v err=%v", approved, err)
+		}
+		if !strings.Contains(out.String(), "rejected via Web Console") {
+			t.Fatalf("expected Web Console rejection notice, got %q", out.String())
+		}
+	})
+
+	t.Run("TimeoutNoticeDistinctFromWebReject", func(t *testing.T) {
+		t.Parallel()
+		pr, pw := io.Pipe()
+		defer pr.Close()
+		defer pw.Close()
+
+		var out syncSafeBuffer
+		dispatcher := NewHITLDispatcher(HITLDispatcherConfig{
+			Timeout: 50 * time.Millisecond,
+			TTYIn:   pr,
+			TTYOut:  &out,
+		})
+
+		approved, err := dispatcher.RequestApproval(context.Background(), &HITLRequest{
+			CallID:   "timeout-notice-1",
+			ToolName: "drop_schema",
+		})
+		if approved || !errors.Is(err, ErrHITLTimeout) {
+			t.Fatalf("expected ErrHITLTimeout, got approved=%v err=%v", approved, err)
+		}
+		rendered := out.String()
+		if strings.Contains(rendered, "rejected via Web Console") {
+			t.Fatalf("timeout notice must not masquerade as Web Console rejection: %q", rendered)
+		}
+		if !strings.Contains(rendered, "timed out") {
+			t.Fatalf("expected timeout notice in TTY output, got %q", rendered)
+		}
+	})
+}
+
+func TestHITLDispatcher_ConcurrentPrompts_SerializedTTY(t *testing.T) {
+	t.Parallel()
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	var out syncSafeBuffer
+	dispatcher := NewHITLDispatcher(HITLDispatcherConfig{
+		Timeout: 2 * time.Second,
+		TTYIn:   pr,
+		TTYOut:  &out,
+	})
+
+	type outcome struct {
+		approved bool
+		err      error
+	}
+	resCh := make(chan outcome, 2)
+	for _, callID := range []string{"conc-1", "conc-2"} {
+		id := callID
+		go func() {
+			ok, err := dispatcher.RequestApproval(context.Background(), &HITLRequest{
+				CallID:   id,
+				ToolName: "exec_cmd",
+			})
+			resCh <- outcome{approved: ok, err: err}
+		}()
+	}
+
+	// Wait for first serialized prompt, answer it, wait for second prompt, answer it.
+	deadline := time.Now().Add(1 * time.Second)
+	for strings.Count(out.String(), "Approve execution? (y/N): ") < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := pw.Write([]byte("y\n")); err != nil {
+		t.Fatalf("pipe write 1 failed: %v", err)
+	}
+
+	for strings.Count(out.String(), "Approve execution? (y/N): ") < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := pw.Write([]byte("n\n")); err != nil {
+		t.Fatalf("pipe write 2 failed: %v", err)
+	}
+
+	o1 := <-resCh
+	o2 := <-resCh
+	if (o1.approved == o2.approved) || strings.Count(out.String(), "Approve execution? (y/N): ") != 2 {
+		t.Fatalf("expected one approval and one denial cleanly serialized, got o1=%+v o2=%+v out=%q", o1, o2, out.String())
+	}
+}
+
+func TestHITLDispatcher_TTYSemaphore_NoHeadOfLineTimeoutStall(t *testing.T) {
+	t.Parallel()
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	var out syncSafeBuffer
+	dispatcher := NewHITLDispatcher(HITLDispatcherConfig{
+		Timeout: 5 * time.Second,
+		TTYIn:   pr,
+		TTYOut:  &out,
+	})
+
+	// Request A holds the TTY lock indefinitely
+	ctxA, cancelA := context.WithCancel(context.Background())
+	doneA := make(chan struct{})
+	go func() {
+		defer close(doneA)
+		_, _ = dispatcher.RequestApproval(ctxA, &HITLRequest{
+			CallID:   "hol-a",
+			ToolName: "exec_cmd",
+		})
+	}()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for !strings.Contains(out.String(), "Approve execution? (y/N): ") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Request B cancels quickly and MUST NOT block waiting on Request A's TTY lock
+	start := time.Now()
+	ctxB, cancelB := context.WithTimeout(context.Background(), 35*time.Millisecond)
+	defer cancelB()
+	approvedB, errB := dispatcher.RequestApproval(ctxB, &HITLRequest{
+		CallID:   "hol-b",
+		ToolName: "exec_cmd",
+	})
+	elapsed := time.Since(start)
+
+	if approvedB || !errors.Is(errB, context.DeadlineExceeded) {
+		t.Fatalf("expected Request B to fail closed on deadline, got approved=%v err=%v", approvedB, errB)
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("head-of-line TTY stall detected: Request B took %v", elapsed)
+	}
+
+	cancelA()
+	_, _ = pw.Write([]byte("n\n"))
+	<-doneA
+}

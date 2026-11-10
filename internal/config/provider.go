@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,6 +11,9 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrNoConfigProvider is returned when Reload is invoked without a backing config.Provider.
+var ErrNoConfigProvider = errors.New("no configuration provider configured for reload")
 
 const (
 	// RuntimeModeStandalone indicates offline-first zero-egress operation without SaaS dependencies.
@@ -28,12 +32,12 @@ type Provider interface {
 // Config is the top-level configuration structure for FaradAiWire.
 type Config struct {
 	mu                        sync.RWMutex      `yaml:"-" json:"-"`
-	RuntimeMode               string            `yaml:"runtime_mode" json:"runtime_mode"` // "STANDALONE" or "MANAGED"
-	ListenHost                string            `yaml:"listen_host" json:"listen_host"`   // Interface host to bind HTTP listeners (default 127.0.0.1)
-	ListenPort                int               `yaml:"listen_port"`                      // Multi-agent gateway listen port
-	AgentsDir                 string            `yaml:"agents_dir"`                       // Root directory containing agent subdirectories
-	ProtocolsDir              string            `yaml:"protocols_dir" json:"protocols_dir"` // Root directory containing protocol definition files (defaults to ./protocols)
-	Mode                      string            `yaml:"mode"`                             // "stdio" or "sse"
+	RuntimeMode               string            `yaml:"runtime_mode" json:"runtime_mode"`   // "STANDALONE" or "MANAGED"
+	ListenHost                string            `yaml:"listen_host" json:"listen_host"`     // Interface host to bind HTTP listeners (default 127.0.0.1)
+	ListenPort                int               `yaml:"listen_port"`                        // Multi-agent gateway listen port
+	AgentsDir                 string            `yaml:"agents_dir"`                         // Root directory containing agent subdirectories
+	ProtocolsDir              string            `yaml:"protocols_dir" json:"protocols_dir"` // Root directory containing protocol definition files (defaults to ~/.faradaiwire/protocols)
+	Mode                      string            `yaml:"mode"`                               // "stdio" or "sse"
 	Stdio                     StdioConfig       `yaml:"stdio"`
 	SSE                       SSEConfig         `yaml:"sse"`
 	Filters                   FiltersConfig     `yaml:"filters"`
@@ -138,6 +142,8 @@ func (c *Config) Clone() *Config {
 	cp.Security.TrustedProxies = slices.Clone(c.Security.TrustedProxies)
 	cp.Security.CORSAllowedOrigins = slices.Clone(c.Security.CORSAllowedOrigins)
 	cp.Security.SSRFProtection.AllowedDomains = slices.Clone(c.Security.SSRFProtection.AllowedDomains)
+	cp.Security.SSRFProtection.Enabled = cloneBoolPtr(c.Security.SSRFProtection.Enabled)
+	cp.Security.SSRFProtection.BlockPrivateIPs = cloneBoolPtr(c.Security.SSRFProtection.BlockPrivateIPs)
 	cp.Security.RateLimiting.Enabled = cloneBoolPtr(c.Security.RateLimiting.Enabled)
 	cp.Telemetry.Enabled = cloneBoolPtr(c.Telemetry.Enabled)
 
@@ -218,12 +224,12 @@ func (c *Config) GetAgentsDir() string {
 }
 
 // GetProtocolsDir resolves the active protocols root directory.
-// Defaults to ./protocols or configured directory.
+// Defaults to ~/.faradaiwire/protocols (or FARADAI_WIRE_HOME/protocols) unless explicitly configured.
 func (c *Config) GetProtocolsDir() string {
 	if c != nil && c.ProtocolsDir != "" {
 		return c.ProtocolsDir
 	}
-	return "./protocols"
+	return filepath.Join(DefaultFaradAiWireDir(), "protocols")
 }
 
 // GetAPIKeysPath resolves the storage file path for hashed API keys.
@@ -270,6 +276,7 @@ func EnsureDefaultRuntimeConfig() (string, error) {
 	configPath := filepath.Join(wireDir, "config.yaml")
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		agentsDir := strings.ReplaceAll(filepath.ToSlash(filepath.Join(wireDir, "agents")), `"`, `\"`)
+		protocolsDir := strings.ReplaceAll(filepath.ToSlash(filepath.Join(wireDir, "protocols")), `"`, `\"`)
 		schemasDir := strings.ReplaceAll(filepath.ToSlash(filepath.Join(wireDir, "schemas")), `"`, `\"`)
 		defaultYAML := `# Farad Ai Core - Offline-First Standalone Configuration
 runtime_mode: STANDALONE
@@ -277,9 +284,13 @@ listen_host: "127.0.0.1"
 listen_port: 8090
 admin_port: 8095
 agents_dir: "` + agentsDir + `"
+protocols_dir: "` + protocolsDir + `"
 mode: "sse"
 security:
   admin_auth_required: false
+  ssrf_protection:
+    enabled: true
+    block_private_ips: true
   cors_allowed_origins:
     - "http://localhost:8090"
     - "http://127.0.0.1:8090"
@@ -380,9 +391,25 @@ type HTTPRateLimitConfig struct {
 
 // SSRFProtectionConfig defines egress sandbox settings.
 type SSRFProtectionConfig struct {
-	Enabled         bool     `yaml:"enabled"`
+	Enabled         *bool    `yaml:"enabled"`
 	AllowedDomains  []string `yaml:"allowed_domains"`
-	BlockPrivateIPs bool     `yaml:"block_private_ips"`
+	BlockPrivateIPs *bool    `yaml:"block_private_ips"`
+}
+
+// IsEnabled returns true unless SSRF protection is explicitly set to false in config.
+func (s SSRFProtectionConfig) IsEnabled() bool {
+	if s.Enabled != nil {
+		return *s.Enabled
+	}
+	return true
+}
+
+// ShouldBlockPrivateIPs resolves private/loopback blocking with defaultVal when omitted.
+func (s SSRFProtectionConfig) ShouldBlockPrivateIPs(defaultVal bool) bool {
+	if s.BlockPrivateIPs != nil {
+		return *s.BlockPrivateIPs
+	}
+	return defaultVal
 }
 
 // AdminTLSConfig configures TLS/HTTPS for the Admin HTTP server.
@@ -572,7 +599,6 @@ func (c *Config) GetDBPath() string {
 	return c.GetTelemetryDBPath()
 }
 
-
 // IsHTTPRateLimitEnabled checks if HTTP rate limiting is enabled.
 func (c *Config) IsHTTPRateLimitEnabled() bool {
 	if c == nil || c.Security.RateLimiting.Enabled == nil {
@@ -613,4 +639,3 @@ func DefaultHTTPRateLimitConfig() HTTPRateLimitConfig {
 		LoginLockoutSec:  900,
 	}
 }
-

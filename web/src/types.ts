@@ -19,7 +19,8 @@ export interface GatewayStatus {
 export interface SettingMeta {
   key: string
   category: 'limits' | 'timeouts' | 'guard' | 'maintenance' | string
-  data_type: 'int' | 'float' | 'string' | 'bool'
+  type?: 'int' | 'float' | 'string' | 'bool'
+  data_type?: 'int' | 'float' | 'string' | 'bool'
   label: string
   description: string
   unit?: string

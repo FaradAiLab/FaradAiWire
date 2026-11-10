@@ -8,9 +8,9 @@ import (
 // IngressHeadersBlocklist defines header keys that must NEVER be forwarded to upstream MCP servers.
 // Lookup keys must be strictly lowercase.
 var IngressHeadersBlocklist = map[string]bool{
-	"authorization":       true,
-	"x-api-key":           true,
-	"cookie":              true,
+	"authorization":           true,
+	"x-api-key":               true,
+	"cookie":                  true,
 	"x-faradaiwire-signature": true,
 	"x-faradaiwire-timestamp": true,
 }

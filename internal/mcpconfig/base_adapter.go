@@ -48,7 +48,7 @@ func (b *baseClientAdapter) ReadServers() ([]DiscoveredServer, error) {
 		return nil, fmt.Errorf("resolve config path: %w", err)
 	}
 
-	_, servers, _, _, err := readConfigFile(p)
+	_, servers, err := readConfigFile(p)
 	if err != nil {
 		return nil, fmt.Errorf("read %s config '%s': %w", b.displayName, p, err)
 	}

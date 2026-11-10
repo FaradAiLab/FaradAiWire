@@ -371,3 +371,24 @@ func TestCLI_AuditCommand(t *testing.T) {
 		t.Errorf("expected error message for remote failure: %s", bufRemote.String())
 	}
 }
+
+func TestParseAuditArgs_HelpVsLocalDirectoryNamedHelp(t *testing.T) {
+	// Without local ./help directory, `audit help` displays usage
+	tmpEmpty := t.TempDir()
+	origWD, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+	_ = os.Chdir(tmpEmpty)
+
+	_, _, showHelp, err := parseAuditArgs([]string{"help"})
+	if err != nil || !showHelp {
+		t.Fatalf("expected showHelp=true when ./help does not exist, got showHelp=%v err=%v", showHelp, err)
+	}
+
+	// With local ./help directory, `audit help` targets that directory instead of printing help
+	_ = os.Mkdir(filepath.Join(tmpEmpty, "help"), 0755)
+	target, jsonOut, showHelp2, err := parseAuditArgs([]string{"help", "--json"})
+	if err != nil || showHelp2 || target != "help" || !jsonOut {
+		t.Fatalf("expected target='help', json=true, showHelp=false; got target=%q json=%v showHelp=%v err=%v",
+			target, jsonOut, showHelp2, err)
+	}
+}

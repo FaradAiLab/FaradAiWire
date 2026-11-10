@@ -9,13 +9,15 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/console"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
-	"github.com/FaradAiLab/FaradAiWire/internal/guard"
+	"github.com/FaradAiLab/FaradAiWire/internal/guard/hitltypes"
 	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 	"github.com/FaradAiLab/FaradAiWire/pkg/filter"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
@@ -28,9 +30,7 @@ var (
 )
 
 // HITLApprover abstracts dual-channel human-in-the-loop approval escalation.
-type HITLApprover interface {
-	RequestApproval(ctx context.Context, req *guard.HITLRequest) (bool, error)
-}
+type HITLApprover = hitltypes.HITLApprover
 
 // HITLFilter intercepts destructive tool calls and prompts for human confirmation.
 type HITLFilter struct {
@@ -54,9 +54,11 @@ func NewHITLFilter(enabled bool, destructiveTools []string, approvalMode, webhoo
 
 // NewHITLFilterWithSSRF initializes a HITLFilter with explicit SSRF safe options.
 func NewHITLFilterWithSSRF(enabled bool, destructiveTools []string, approvalMode, webhookURL string, timeoutSeconds int, ssrfOpts transport.SafeTransportOptions) *HITLFilter {
-	toolsMap := make(map[string]bool)
+	toolsMap := make(map[string]bool, len(destructiveTools))
 	for _, t := range destructiveTools {
-		toolsMap[t] = true
+		if norm := strings.ToLower(strings.TrimSpace(t)); norm != "" {
+			toolsMap[norm] = true
+		}
 	}
 
 	if timeoutSeconds <= 0 {
@@ -132,7 +134,7 @@ func (h *HITLFilter) ExecuteResponse(ctx context.Context, resp *mcp.Response) (*
 
 // FilterRequest intercepts destructive actions and waits for approval.
 func (h *HITLFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.Request, *mcp.Error) {
-	if !h.enabled || req.Method != "tools/call" {
+	if !h.enabled || req == nil || req.Method != "tools/call" {
 		return req, nil
 	}
 
@@ -144,8 +146,13 @@ func (h *HITLFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.
 		return nil, mcp.NewError(mcp.ErrInvalidParams, "Invalid params in tools/call: "+err.Error(), nil)
 	}
 
-	// Check if the tool is registered as destructive
-	if !h.destructiveTools[callParams.Name] {
+	// Check if the tool is registered as destructive (exact match or aggregated <protoSlug>__<tool> suffix)
+	if !h.isDestructiveTool(callParams.Name) {
+		return req, nil
+	}
+
+	// Respect Human Supremacy when an upstream filter already obtained explicit human approval.
+	if types.IsHumanApproved(ctx) {
 		return req, nil
 	}
 
@@ -167,7 +174,10 @@ func (h *HITLFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.
 	hasCustomCLI := h.cliIn != nil
 	h.mu.RUnlock()
 
-	if h.approvalMode == "webhook" && h.webhookURL != "" {
+	if strings.EqualFold(h.approvalMode, "webhook") {
+		if strings.TrimSpace(h.webhookURL) == "" {
+			return nil, mcp.NewError(mcp.ErrHITLDenied, "Human-in-the-loop approval failed: webhook mode configured without webhook URL", nil)
+		}
 		approved, err = h.promptWebhook(ctx, callParams.Name, callParams.Arguments, userID)
 	} else if dispatcher != nil && !hasCustomCLI {
 		argsMap := make(map[string]interface{})
@@ -176,14 +186,17 @@ func (h *HITLFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.
 				argsMap["raw"] = string(callParams.Arguments)
 			}
 		}
-		approved, err = dispatcher.RequestApproval(ctx, &guard.HITLRequest{
+		waitCtx, cancel := context.WithTimeout(ctx, h.timeout)
+		defer cancel()
+
+		approved, err = dispatcher.RequestApproval(waitCtx, &hitltypes.HITLRequest{
 			ToolName:       callParams.Name,
 			Arguments:      argsMap,
 			RiskScore:      1.0,
 			ThreatDomain:   "DESTRUCTIVE_TOOL_POLICY",
 			DecisionEngine: "hitl_filter",
 		})
-		if errors.Is(err, guard.ErrHITLDenied) {
+		if errors.Is(err, hitltypes.ErrHITLDenied) {
 			err = nil
 			approved = false
 		}
@@ -200,6 +213,7 @@ func (h *HITLFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.
 		return nil, mcp.NewError(mcp.ErrHITLDenied, fmt.Sprintf("Action denied: Destructive tool '%s' was rejected by safety operator", callParams.Name), nil)
 	}
 
+	types.SetHumanApproved(ctx, true)
 	return req, nil
 }
 
@@ -214,37 +228,14 @@ func (h *HITLFilter) promptCLI(ctx context.Context, toolName string, args string
 	customOut := h.cliOut
 	h.mu.RUnlock()
 
-	safeTool := console.SanitizeTerminalText(toolName)
-	safeArgs := console.SanitizeTerminalText(args)
-
 	if customIn != nil {
 		out := customOut
 		if out == nil {
 			out = io.Discard
 		}
-
-		fmt.Fprintf(out, "\n🚨 [Farad Ai HITL] CRITICAL ACTION APPROVAL REQUESTED\n")
-		fmt.Fprintf(out, "Tool Call: %s\n", safeTool)
-		fmt.Fprintf(out, "Arguments: %s\n", safeArgs)
-		fmt.Fprintf(out, "Approve execution? (y/N): ")
-
-		waitCtx, cancel := context.WithTimeout(ctx, h.timeout)
-		defer cancel()
-
-		line, readErr := console.ReadLineFromReader(waitCtx, customIn)
-		if readErr != nil {
-			if errors.Is(readErr, context.DeadlineExceeded) && ctx.Err() == nil {
-				fmt.Fprintf(out, "⏱️ Approval timed out (%v expired).\n\n", h.timeout)
-				return false, fmt.Errorf("approval timeout")
-			}
-			return false, readErr
-		}
-		if console.ParseYesNoAnswer(line) {
-			fmt.Fprintf(out, "✅ Action approved.\n\n")
-			return true, nil
-		}
-		fmt.Fprintf(out, "❌ Action rejected.\n\n")
-		return false, nil
+		return h.awaitCLIApproval(ctx, out, toolName, args, func(waitCtx context.Context) (string, error) {
+			return console.ReadLineFromReader(waitCtx, customIn)
+		})
 	}
 
 	c, err := console.OpenInteractiveConsole()
@@ -253,32 +244,59 @@ func (h *HITLFilter) promptCLI(ctx context.Context, toolName string, args string
 			slog.String("tool", toolName),
 			slog.String("error", err.Error()),
 		)
-		return false, nil
+		return false, hitltypes.ErrHeadlessFailClosed
 	}
 	defer func() { _ = c.Close() }()
 
-	fmt.Fprintf(c, "\n🚨 [Farad Ai HITL] CRITICAL ACTION APPROVAL REQUESTED\n")
-	fmt.Fprintf(c, "Tool Call: %s\n", safeTool)
-	fmt.Fprintf(c, "Arguments: %s\n", safeArgs)
-	fmt.Fprintf(c, "Approve execution? (y/N): ")
+	return h.awaitCLIApproval(ctx, c, toolName, args, c.ReadLine)
+}
+
+func (h *HITLFilter) isDestructiveTool(name string) bool {
+	norm := strings.ToLower(strings.TrimSpace(name))
+	if norm == "" {
+		return false
+	}
+	if h.destructiveTools[norm] {
+		return true
+	}
+	if _, tool, ok := strings.Cut(norm, "__"); ok && tool != "" {
+		return h.destructiveTools[tool]
+	}
+	return false
+}
+
+func (h *HITLFilter) awaitCLIApproval(
+	ctx context.Context,
+	out io.Writer,
+	toolName string,
+	args string,
+	readLine func(context.Context) (string, error),
+) (bool, error) {
+	safeTool := console.SanitizeTerminalText(toolName)
+	safeArgs := console.SanitizeTerminalText(args)
+
+	fmt.Fprintf(out, "\n🚨 [Farad Ai HITL] CRITICAL ACTION APPROVAL REQUESTED\n")
+	fmt.Fprintf(out, "Tool Call: %s\n", safeTool)
+	fmt.Fprintf(out, "Arguments: %s\n", safeArgs)
+	fmt.Fprintf(out, "Approve execution? (y/N): ")
 
 	waitCtx, cancel := context.WithTimeout(ctx, h.timeout)
 	defer cancel()
 
-	line, readErr := c.ReadLine(waitCtx)
+	line, readErr := readLine(waitCtx)
 	if readErr != nil {
 		if errors.Is(readErr, context.DeadlineExceeded) && ctx.Err() == nil {
-			fmt.Fprintf(c, "⏱️ Approval timed out (%v expired).\n\n", h.timeout)
-			return false, fmt.Errorf("approval timeout")
+			fmt.Fprintf(out, "⏱️ Approval timed out (%v expired).\n\n", h.timeout)
+			return false, hitltypes.ErrHITLTimeout
 		}
 		return false, readErr
 	}
 
 	if console.ParseYesNoAnswer(line) {
-		fmt.Fprintf(c, "✅ Action approved.\n\n")
+		fmt.Fprintf(out, "✅ Action approved.\n\n")
 		return true, nil
 	}
-	fmt.Fprintf(c, "❌ Action rejected.\n\n")
+	fmt.Fprintf(out, "❌ Action rejected.\n\n")
 	return false, nil
 }
 
@@ -292,11 +310,23 @@ type webhookResponse struct {
 	Approved bool `json:"approved"`
 }
 
+func redactURLForLog(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<invalid-url>"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
 func (h *HITLFilter) promptWebhook(ctx context.Context, toolName string, args json.RawMessage, userID string) (bool, error) {
 	resolvedURL := os.ExpandEnv(h.webhookURL)
+	safeLogURL := redactURLForLog(resolvedURL)
 	if err := transport.ValidateURL(resolvedURL, h.ssrfOpts); err != nil {
-		slog.WarnContext(ctx, "Webhook URL rejected by SSRF guardrails", slog.String("url", resolvedURL), slog.String("error", err.Error()))
-		return false, fmt.Errorf("SSRF protection blocked webhook dispatch to '%s': %w", resolvedURL, err)
+		slog.WarnContext(ctx, "Webhook URL rejected by SSRF guardrails", slog.String("url", safeLogURL), slog.String("error", err.Error()))
+		return false, fmt.Errorf("SSRF protection blocked webhook dispatch: %w", err)
 	}
 
 	payload := webhookPayload{
@@ -310,9 +340,12 @@ func (h *HITLFilter) promptWebhook(ctx context.Context, toolName string, args js
 		return false, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", resolvedURL, bytes.NewBuffer(bodyBytes))
+	waitCtx, cancel := context.WithTimeout(ctx, h.timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(waitCtx, "POST", resolvedURL, bytes.NewBuffer(bodyBytes))
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("failed to construct webhook request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -322,6 +355,10 @@ func (h *HITLFilter) promptWebhook(ctx context.Context, toolName string, args js
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		var uErr *url.Error
+		if errors.As(err, &uErr) {
+			return false, fmt.Errorf("webhook request failed: %w", uErr.Err)
+		}
 		return false, fmt.Errorf("webhook request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -331,7 +368,7 @@ func (h *HITLFilter) promptWebhook(ctx context.Context, toolName string, args js
 	}
 
 	var webResp webhookResponse
-	if err := json.NewDecoder(resp.Body).Decode(&webResp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&webResp); err != nil {
 		return false, fmt.Errorf("failed to decode webhook response: %w", err)
 	}
 

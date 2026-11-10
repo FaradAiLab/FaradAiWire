@@ -893,4 +893,3 @@ func TestStreamableHTTP_IngressRouting(t *testing.T) {
 		t.Errorf("Expected X-Custom-Api-Key 'custom-val-123', got '%s'", customVal)
 	}
 }
-

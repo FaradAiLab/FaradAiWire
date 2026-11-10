@@ -116,3 +116,21 @@ func TestRouteConfig_Clone_NilSafe(t *testing.T) {
 	}
 }
 
+func TestRouteConfig_GetToolGovernanceMode_CaseInsensitive(t *testing.T) {
+	cfg := &RouteConfig{
+		ToolGovernance: map[string]ToolGovernanceMode{
+			"fs__delete_file": ModeStrictAlwaysHITL,
+		},
+	}
+
+	for _, name := range []string{"fs__delete_file", "fs__DELETE_FILE", "FS__Delete_File"} {
+		mode, ok := cfg.GetToolGovernanceMode(name)
+		if !ok || mode != ModeStrictAlwaysHITL {
+			t.Errorf("GetToolGovernanceMode(%q) = (%q, %v), want (%q, true)", name, mode, ok, ModeStrictAlwaysHITL)
+		}
+	}
+
+	if mode, ok := cfg.GetToolGovernanceMode("fs__read_file"); ok || mode != "" {
+		t.Errorf("GetToolGovernanceMode(unknown) = (%q, %v), want (\"\", false)", mode, ok)
+	}
+}

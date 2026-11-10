@@ -2,8 +2,11 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -12,9 +15,9 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/auth"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
-	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 	"github.com/FaradAiLab/FaradAiWire/internal/middleware"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
+	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
 type sessionBinding struct {
@@ -38,6 +41,9 @@ type SSEProxy struct {
 	keyValidator       auth.KeyValidator
 	drainingMiddleware func(http.Handler) http.Handler
 	shutdownOnce       sync.Once
+	closed             bool
+	baseCtx            context.Context
+	baseCancel         context.CancelFunc
 
 	coordinator *session.InboundCoordinator
 }
@@ -66,13 +72,12 @@ func NewSSEProxyWithCoordinator(
 	if len(secCfg) > 0 {
 		sc = secCfg[0]
 	}
-	httpClient := &http.Client{Timeout: 0}
+	var httpClient *http.Client
 	if coordinator == nil {
+		httpClient = &http.Client{Timeout: 0}
 		cStore := NewMemoryCorrelationStore()
 		fwd := session.NewForwarder(httpClient, nil, cStore)
 		coordinator = session.NewInboundCoordinator(nil, nil, nil, nil, nil, cStore, fwd, targetURL)
-	} else if fwd := coordinator.Forwarder(); fwd != nil {
-		fwd.SetHTTPClient(httpClient)
 	}
 
 	return &SSEProxy{
@@ -164,6 +169,7 @@ var healthResponseBytes = []byte(fmt.Sprintf(`{"status":"ok","version":"%s"}`, c
 
 func (s *SSEProxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
@@ -175,10 +181,17 @@ func (s *SSEProxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *SSEProxy) handleSSE(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
+	switch r.Method {
+	case http.MethodPost:
 		s.handleMessage(w, r)
 		return
+	case http.MethodGet, http.MethodHead:
+	default:
+		w.Header().Set("Allow", "GET, HEAD, POST")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
+
 	uCtx, err := s.authenticate(r)
 	if err != nil {
 		s.writeUnauthorized(w)
@@ -202,6 +215,13 @@ func (s *SSEProxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	fwd := s.getCoordinator().Forwarder()
 	if fwd != nil {
 		fwd.ForwardDirectSSE(w, r, targetURLStr, s.onDirectEndpoint(targetURLStr))
@@ -209,6 +229,21 @@ func (s *SSEProxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *SSEProxy) handleAggregatedSSE(w http.ResponseWriter, r *http.Request, agentName string) {
+	clientSessionID := extractSessionID(r)
+	if !isSafeControlFree(agentName) || !isSafeControlFree(clientSessionID) {
+		http.Error(w, "Invalid agent or session identifier", http.StatusBadRequest)
+		return
+	}
+
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
@@ -220,9 +255,12 @@ func (s *SSEProxy) handleAggregatedSSE(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
-	clientSessionID := extractSessionID(r)
 	bridge, err := mgr.CreateBridge(r.Context(), agentName, clientSessionID, r.Header)
 	if err != nil {
+		if errors.Is(err, session.ErrBridgeAlreadyExists) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -233,7 +271,7 @@ func (s *SSEProxy) handleAggregatedSSE(w http.ResponseWriter, r *http.Request, a
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	endpointData := fmt.Sprintf("/sse/%s/message?sessionId=%s", agentName, clientSessionID)
+	endpointData := fmt.Sprintf("/sse/%s/message?sessionId=%s", url.PathEscape(agentName), url.QueryEscape(clientSessionID))
 	_, _ = w.Write([]byte(fmt.Sprintf("event: endpoint\ndata: %s\n\n", endpointData)))
 	flusher.Flush()
 
@@ -242,6 +280,7 @@ func (s *SSEProxy) handleAggregatedSSE(w http.ResponseWriter, r *http.Request, a
 
 func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -278,13 +317,27 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 		keyAgent = strings.TrimSpace(uCtx.AgentName)
 	}
 
-	agentName := extractAgentName(r)
+	explicitAgent := extractExplicitAgent(r)
+	pathAgent := extractAgentNameFromPath(r.URL.Path)
+	if pathAgent != "" && explicitAgent != "" && !strings.EqualFold(pathAgent, explicitAgent) {
+		s.writeRoutingError(w, fmt.Errorf("AGENT_ACCESS_DENIED: explicit agent '%s' conflicts with URL path agent '%s'", explicitAgent, pathAgent))
+		return
+	}
+	agentName := explicitAgent
+	if agentName == "" {
+		agentName = pathAgent
+	}
 	if agentName != "" && keyAgent != "" && !strings.EqualFold(keyAgent, agentName) {
 		s.writeRoutingError(w, fmt.Errorf("AGENT_ACCESS_DENIED: API key is scoped to agent '%s', access to '%s' is forbidden", keyAgent, agentName))
 		return
 	}
 	if agentName == "" && keyAgent != "" {
 		agentName = keyAgent
+	}
+
+	if !isSafeControlFree(clientSessionID) || !isSafeControlFree(agentName) {
+		http.Error(w, "Invalid agent or session identifier", http.StatusBadRequest)
+		return
 	}
 
 	coord := s.getCoordinator()
@@ -297,9 +350,11 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var agentCfg *agent.RouteConfig
 	repo := coord.AgentRepository()
 	if repo != nil && agentName != "" {
-		if _, err := repo.GetAgentConfig(agentName); err != nil {
+		agentCfg, err = repo.GetAgentConfig(agentName)
+		if err != nil {
 			s.writeRoutingError(w, err)
 			return
 		}
@@ -311,15 +366,18 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 	mgr := coord.SessionManager()
 	if mgr != nil && agentName != "" {
-		isDirect := false
-		if repo != nil {
-			if cfg, err := repo.GetAgentConfig(agentName); err == nil && cfg != nil && cfg.IsDirect() {
-				isDirect = true
-			}
-		}
+		isDirect := agentCfg != nil && agentCfg.IsDirect()
 		if !isDirect {
-			if _, ok := mgr.GetBridge(clientSessionID); !ok {
-				_, _ = mgr.CreateBridge(r.Context(), agentName, clientSessionID, r.Header)
+			if _, bErr := mgr.GetOrCreateBridge(s.lifecycleCtx(), agentName, clientSessionID, r.Header); bErr != nil {
+				if errors.Is(bErr, session.ErrBridgeAgentMismatch) {
+					s.writeRoutingError(w, fmt.Errorf("AGENT_ACCESS_DENIED: %w", bErr))
+					return
+				}
+				slog.WarnContext(r.Context(), "Failed to prepare session bridge for incoming message",
+					slog.String("agent", agentName),
+					slog.String("session_id", clientSessionID),
+					slog.String("error", bErr.Error()),
+				)
 			}
 		}
 	}

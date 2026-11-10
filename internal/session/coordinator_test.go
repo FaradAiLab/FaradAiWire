@@ -51,13 +51,13 @@ func (m *mockForwarder) ProcessOutgoingMessage(data, clientSessionID, targetURL 
 	return data
 }
 
-func (m *mockForwarder) SetBackendPath(path string)                 {}
-func (m *mockForwarder) BackendPath() string                        { return "/message" }
+func (m *mockForwarder) SetBackendPath(path string)                   {}
+func (m *mockForwarder) BackendPath() string                          { return "/message" }
 func (m *mockForwarder) SetSessionBackendPath(sessionID, path string) {}
-func (m *mockForwarder) SessionBackendPath(sessionID string) string { return "/message" }
-func (m *mockForwarder) SetPipeline(p *filter.Pipeline)             {}
-func (m *mockForwarder) SetCorrelationStore(store CorrelationStore) {}
-func (m *mockForwarder) SetHTTPClient(client *http.Client)          {}
+func (m *mockForwarder) SessionBackendPath(sessionID string) string   { return "/message" }
+func (m *mockForwarder) SetPipeline(p *filter.Pipeline)               {}
+func (m *mockForwarder) SetCorrelationStore(store CorrelationStore)   {}
+func (m *mockForwarder) SetHTTPClient(client *http.Client)            {}
 
 func TestInboundCoordinator_LocalToolExecution(t *testing.T) {
 	cStore := NewMemoryCorrelationStore()
@@ -374,4 +374,30 @@ func TestInboundCoordinator_MaskedPayloadReSerialization(t *testing.T) {
 	}
 }
 
+func TestInboundCoordinator_ExecuteMessage_RejectsCrossAgentBridge(t *testing.T) {
+	forwarder := &mockForwarder{}
+	mgr := NewManager(nil, nil)
+	mgr.bridgesMu.Lock()
+	mgr.bridges["cl-cross"] = &AgentSessionBridge{
+		ClientSessionID: "cl-cross",
+		AgentName:       "agent-a",
+		Upstreams:       make(map[string]*UpstreamSession),
+	}
+	mgr.bridgesMu.Unlock()
 
+	coord := NewInboundCoordinator(nil, nil, nil, nil, nil, nil, forwarder, "http://default-target")
+	coord.SetSessionManager(mgr)
+
+	reqBody := []byte(`{"jsonrpc":"2.0","method":"tools/list","id":"list-1"}`)
+	r := httptest.NewRequest(http.MethodPost, "/message?sessionId=cl-cross", bytes.NewBuffer(reqBody))
+	parsedReq, _, _, err := mcp.ParseMessage(reqBody)
+	if err != nil {
+		t.Fatalf("ParseMessage: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	coord.ExecuteMessage(rec, r, context.Background(), "cl-cross", "agent-b", reqBody, parsedReq, nil)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "AGENT_ACCESS_DENIED") {
+		t.Fatalf("expected 403 AGENT_ACCESS_DENIED for cross-agent bridge access, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

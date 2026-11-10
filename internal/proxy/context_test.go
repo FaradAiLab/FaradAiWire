@@ -14,8 +14,8 @@ import (
 
 func TestContextExtractor_UntrustedClientDowngrade(t *testing.T) {
 	cfg := config.UserContextConfig{
-		FallbackRole: "Customer",
-		FallbackUser: "guest-customer",
+		FallbackRole:   "Customer",
+		FallbackUser:   "guest-customer",
 		TrustedProxies: []string{"10.0.0.0/8"},
 	}
 	extractor := NewContextExtractor(cfg)
@@ -36,8 +36,8 @@ func TestContextExtractor_UntrustedClientDowngrade(t *testing.T) {
 
 func TestContextExtractor_QueryParamFallbackEliminated(t *testing.T) {
 	cfg := config.UserContextConfig{
-		FallbackRole: "Customer",
-		FallbackUser: "guest-customer",
+		FallbackRole:   "Customer",
+		FallbackUser:   "guest-customer",
 		TrustedProxies: []string{"127.0.0.1/32"},
 	}
 	extractor := NewContextExtractor(cfg)
@@ -57,8 +57,8 @@ func TestContextExtractor_QueryParamFallbackEliminated(t *testing.T) {
 
 func TestContextExtractor_TrustedProxiesCIDR(t *testing.T) {
 	cfg := config.UserContextConfig{
-		FallbackRole: "Guest",
-		FallbackUser: "anonymous",
+		FallbackRole:   "Guest",
+		FallbackUser:   "anonymous",
 		TrustedProxies: []string{"10.244.0.0/16", "172.16.0.0/12"},
 	}
 	extractor := NewContextExtractor(cfg)
@@ -80,8 +80,8 @@ func TestContextExtractor_TrustedProxiesCIDR(t *testing.T) {
 
 func TestContextExtractor_TrustedProxiesSingleIP(t *testing.T) {
 	cfg := config.UserContextConfig{
-		FallbackRole: "Guest",
-		FallbackUser: "anonymous",
+		FallbackRole:   "Guest",
+		FallbackUser:   "anonymous",
 		TrustedProxies: []string{"192.168.1.50", "::1"},
 	}
 	extractor := NewContextExtractor(cfg)

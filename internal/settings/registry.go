@@ -112,6 +112,17 @@ var Registry = map[string]SettingMeta{
 		Max:         60,
 		Unit:        "seconds",
 	},
+	"timeouts.probe_timeout_sec": {
+		Key:         "timeouts.probe_timeout_sec",
+		Label:       "MCP Probe Timeout",
+		Description: "Maximum duration in seconds allowed when probing an MCP server endpoint",
+		Category:    "timeouts",
+		Type:        TypeInt,
+		DefaultVal:  5,
+		Min:         1,
+		Max:         60,
+		Unit:        "seconds",
+	},
 
 	// Guard Category
 	"guard.threshold_score": {
@@ -376,6 +387,17 @@ func ApplySetting(s *OperationalSettings, key string, val any) error {
 		default:
 			return fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
 		}
+	case "timeouts.probe_timeout_sec":
+		switch v := val.(type) {
+		case int:
+			s.Timeouts.ProbeTimeoutSec = v
+		case int64:
+			s.Timeouts.ProbeTimeoutSec = int(v)
+		case float64:
+			s.Timeouts.ProbeTimeoutSec = int(v)
+		default:
+			return fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
+		}
 
 	case "guard.threshold_score":
 		switch v := val.(type) {
@@ -470,6 +492,8 @@ func ExtractSetting(s *OperationalSettings, key string) (any, error) {
 		return s.Timeouts.IdleTimeoutSec, nil
 	case "timeouts.read_header_timeout_sec":
 		return s.Timeouts.ReadHeaderTimeoutSec, nil
+	case "timeouts.probe_timeout_sec":
+		return s.Timeouts.ProbeTimeoutSec, nil
 
 	case "guard.threshold_score":
 		return s.Guard.ThresholdScore, nil

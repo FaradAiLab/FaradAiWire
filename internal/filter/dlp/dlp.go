@@ -10,9 +10,9 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
-	"github.com/FaradAiLab/FaradAiWire/internal/guard"
-	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
+	"github.com/FaradAiLab/FaradAiWire/internal/guard/hitltypes"
 	"github.com/FaradAiLab/FaradAiWire/pkg/filter"
+	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
 // Ensure DLPFilter implements filter.SecurityFilter, filter.RequestFilter, and filter.ResponseFilter.
@@ -23,9 +23,7 @@ var (
 )
 
 // HITLApprover abstracts human-in-the-loop approval escalation.
-type HITLApprover interface {
-	RequestApproval(ctx context.Context, req *guard.HITLRequest) (bool, error)
-}
+type HITLApprover = hitltypes.HITLApprover
 
 // DLPFilter coordinates DLP rule enforcement for incoming requests and outgoing responses.
 // It delegates rule resolution to a RuleProvider (DIP) and sanitization to Sanitize (SRP).
@@ -162,7 +160,7 @@ func (d *DLPFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.R
 			cwe = result.HITLRule
 		}
 
-		approved, err := dispatcher.RequestApproval(hitlCtx, &guard.HITLRequest{
+		approved, err := dispatcher.RequestApproval(hitlCtx, &hitltypes.HITLRequest{
 			ToolName:       callParams.Name,
 			Arguments:      callParams.Arguments,
 			RiskScore:      1.0,

@@ -322,7 +322,7 @@ func (d *StdioDialer) Dial(parentCtx context.Context, proto agent.ProtocolConfig
 	cmd := exec.CommandContext(procCtx, command, args...)
 	setProcessGroup(cmd)
 	setCommandCancel(cmd)
-	cmd.Env = buildSafeSubprocessEnv(proto.Env)
+	cmd.Env = BuildSafeSubprocessEnv(proto.Env, false)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -576,11 +576,12 @@ func (d *CompositeDialer) Dial(ctx context.Context, proto agent.ProtocolConfig, 
 	return upSess
 }
 
-// buildSafeSubprocessEnv constructs a minimal, sanitized execution environment
+// BuildSafeSubprocessEnv constructs a minimal, sanitized execution environment
 // for child stdio MCP processes. It eliminates host secret leakage (such as API_KEY,
 // ADMIN_API_KEY, FARADAI_WIRE_HMAC_SECRET, and host cloud credentials) by strictly whitelisting
 // standard runtime fundamentals and appending caller-specified protocol overrides.
-func buildSafeSubprocessEnv(protoEnv []string) []string {
+// When expandHostRefs is true, explicit ${VAR} references inside protoEnv values are resolved from the host environment.
+func BuildSafeSubprocessEnv(protoEnv []string, expandHostRefs bool) []string {
 	var baseKeys []string
 	if runtime.GOOS == "windows" {
 		baseKeys = []string{
@@ -620,10 +621,67 @@ func buildSafeSubprocessEnv(protoEnv []string) []string {
 
 	// Append caller-specified protocol environment overrides
 	for _, env := range protoEnv {
-		if trimmed := strings.TrimSpace(env); trimmed != "" {
-			safeEnv = append(safeEnv, trimmed)
+		trimmed := strings.TrimSpace(env)
+		if trimmed == "" {
+			continue
 		}
+		if expandHostRefs {
+			if k, v, ok := strings.Cut(trimmed, "="); ok {
+				trimmed = k + "=" + expandBracedHostRefs(v)
+			}
+		}
+		safeEnv = append(safeEnv, trimmed)
 	}
 
 	return safeEnv
+}
+
+var blockedHostRefEnvVars = map[string]struct{}{
+	"API_KEY":                  {},
+	"ADMIN_API_KEY":            {},
+	"FARADAI_WIRE_HMAC_SECRET": {},
+	"AWS_ACCESS_KEY_ID":        {},
+	"AWS_SECRET_ACCESS_KEY":    {},
+	"AWS_SESSION_TOKEN":        {},
+}
+
+func isBlockedHostRefVar(name string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	if _, blocked := blockedHostRefEnvVars[upper]; blocked {
+		return true
+	}
+	return strings.HasPrefix(upper, "FARADAI_WIRE_")
+}
+
+func expandBracedHostRefs(val string) string {
+	idx := strings.Index(val, "${")
+	if idx < 0 {
+		return val
+	}
+	var b strings.Builder
+	b.Grow(len(val))
+	rest := val
+	for {
+		start := strings.Index(rest, "${")
+		if start < 0 {
+			b.WriteString(rest)
+			break
+		}
+		b.WriteString(rest[:start])
+		after := rest[start+2:]
+		end := strings.IndexByte(after, '}')
+		if end <= 0 {
+			b.WriteString("${")
+			rest = after
+			continue
+		}
+		varName := after[:end]
+		if strings.ContainsAny(varName, " \t\r\n$") || isBlockedHostRefVar(varName) {
+			b.WriteString(rest[start : start+2+end+1])
+		} else {
+			b.WriteString(os.Getenv(varName))
+		}
+		rest = after[end+1:]
+	}
+	return b.String()
 }

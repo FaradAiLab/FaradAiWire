@@ -2,9 +2,11 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,15 +15,22 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 )
 
+// ErrBridgeAlreadyExists is returned by CreateBridge when an active bridge already exists for the given clientSessionID.
+var ErrBridgeAlreadyExists = errors.New("session bridge already exists")
+
+// ErrBridgeAgentMismatch is returned when an existing clientSessionID is reused for a different target agent.
+var ErrBridgeAgentMismatch = errors.New("session bridge belongs to a different agent")
+
 // Manager orchestrates multi-agent client session bridges and upstream connections.
 type Manager struct {
-	repo        agent.Resolver
-	dialer      Dialer
-	bridges     map[string]*AgentSessionBridge
-	bridgesMu   sync.RWMutex
+	repo          agent.Resolver
+	dialer        Dialer
+	bridges       map[string]*AgentSessionBridge
+	bridgesMu     sync.RWMutex
 	dialTimeout   time.Duration
 	cleanupWg     sync.WaitGroup
 	isDraining    atomic.Bool
+	bridgeSeq     atomic.Uint64
 	settingsCache *settings.Cache
 	mu            sync.RWMutex
 }
@@ -89,9 +98,75 @@ func (m *Manager) HasActiveSessions(agentName string) bool {
 }
 
 // CreateBridge initializes a multi-protocol bridge for the given agent and dials attached upstreams in parallel.
+// It fails closed with ErrBridgeAlreadyExists if clientSessionID already maps to an active bridge.
 func (m *Manager) CreateBridge(parentCtx context.Context, agentName, clientSessionID string, headers http.Header) (*AgentSessionBridge, error) {
 	if clientSessionID == "" {
-		clientSessionID = fmt.Sprintf("cl-%d-%x", time.Now().UnixNano(), time.Now().Nanosecond()%0xFFFF)
+		seq := m.bridgeSeq.Add(1)
+		clientSessionID = fmt.Sprintf("cl-%d-%x", time.Now().UnixNano(), seq&0xFFFF)
+	} else {
+		m.bridgesMu.RLock()
+		_, exists := m.bridges[clientSessionID]
+		m.bridgesMu.RUnlock()
+		if exists {
+			return nil, fmt.Errorf("%w: %s", ErrBridgeAlreadyExists, clientSessionID)
+		}
+	}
+
+	bridge, err := m.dialBridge(parentCtx, agentName, clientSessionID, headers)
+	if err != nil {
+		return nil, err
+	}
+
+	m.bridgesMu.Lock()
+	if _, exists := m.bridges[clientSessionID]; exists {
+		m.bridgesMu.Unlock()
+		bridge.Close()
+		return nil, fmt.Errorf("%w: %s", ErrBridgeAlreadyExists, clientSessionID)
+	}
+	m.bridges[clientSessionID] = bridge
+	m.bridgesMu.Unlock()
+
+	return bridge, nil
+}
+
+// GetOrCreateBridge atomically retrieves an active bridge for clientSessionID or creates and stores a new one.
+func (m *Manager) GetOrCreateBridge(parentCtx context.Context, agentName, clientSessionID string, headers http.Header) (*AgentSessionBridge, error) {
+	if clientSessionID != "" {
+		if existing, ok := m.GetBridge(clientSessionID); ok {
+			if !strings.EqualFold(existing.AgentName, agentName) {
+				return nil, fmt.Errorf("%w: session %q bound to %q cannot access %q", ErrBridgeAgentMismatch, clientSessionID, existing.AgentName, agentName)
+			}
+			return existing, nil
+		}
+	} else {
+		seq := m.bridgeSeq.Add(1)
+		clientSessionID = fmt.Sprintf("cl-%d-%x", time.Now().UnixNano(), seq&0xFFFF)
+	}
+
+	bridge, err := m.dialBridge(parentCtx, agentName, clientSessionID, headers)
+	if err != nil {
+		return nil, err
+	}
+
+	m.bridgesMu.Lock()
+	if existing, exists := m.bridges[clientSessionID]; exists && existing != nil {
+		m.bridgesMu.Unlock()
+		bridge.Close()
+		if !strings.EqualFold(existing.AgentName, agentName) {
+			return nil, fmt.Errorf("%w: session %q bound to %q cannot access %q", ErrBridgeAgentMismatch, clientSessionID, existing.AgentName, agentName)
+		}
+		existing.Touch()
+		return existing, nil
+	}
+	m.bridges[clientSessionID] = bridge
+	m.bridgesMu.Unlock()
+
+	return bridge, nil
+}
+
+func (m *Manager) dialBridge(parentCtx context.Context, agentName, clientSessionID string, headers http.Header) (*AgentSessionBridge, error) {
+	if parentCtx == nil {
+		parentCtx = context.Background()
 	}
 
 	agentCfg, err := m.repo.GetAgentConfig(agentName)
@@ -141,10 +216,6 @@ func (m *Manager) CreateBridge(parentCtx context.Context, agentName, clientSessi
 		}(protoCopy)
 	}
 	dialWg.Wait()
-
-	m.bridgesMu.Lock()
-	m.bridges[clientSessionID] = bridge
-	m.bridgesMu.Unlock()
 
 	return bridge, nil
 }
@@ -295,4 +366,3 @@ func (m *Manager) StartCleanupLoop(ctx context.Context, interval, maxIdle time.D
 		}
 	}()
 }
-

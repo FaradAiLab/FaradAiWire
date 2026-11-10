@@ -314,6 +314,7 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 				nil,
 			)
 		}
+		types.SetHumanApproved(ctx, true)
 		return req, nil
 	}
 
@@ -431,6 +432,7 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 						nil,
 					)
 				}
+				types.SetHumanApproved(ctx, true)
 				return req, nil
 			}
 
@@ -445,4 +447,3 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 
 	return req, nil
 }
-

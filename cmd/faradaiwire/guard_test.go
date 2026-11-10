@@ -453,3 +453,14 @@ func TestExecuteGuardInstall_Offline_And_Uninstall(t *testing.T) {
 		t.Fatalf("expected status NOT_INSTALLED, got %s", m2.InstallStatus)
 	}
 }
+
+func TestExecuteGuard_RejectsUnsafeModelIDs(t *testing.T) {
+	var buf strings.Builder
+	if code := executeGuardInstall("", "../evil", &buf); code != 1 {
+		t.Fatalf("expected exit code 1 for traversal model ID on install, got %d", code)
+	}
+	buf.Reset()
+	if code := executeGuardUninstall("", "foo/bar", &buf); code != 1 {
+		t.Fatalf("expected exit code 1 for path separator model ID on uninstall, got %d", code)
+	}
+}

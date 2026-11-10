@@ -92,10 +92,10 @@ func TestValidateURL(t *testing.T) {
 	opts := DefaultSafeOptions()
 
 	tests := []struct {
-		name        string
-		rawURL      string
-		expectErr   error
-		optsMod     func(opts *SafeTransportOptions)
+		name      string
+		rawURL    string
+		expectErr error
+		optsMod   func(opts *SafeTransportOptions)
 	}{
 		{"Valid Public HTTP", "http://example.com/api", nil, nil},
 		{"Valid Public HTTPS", "https://api.github.com/v1", nil, nil},
@@ -173,10 +173,12 @@ func TestSafeHTTPClient_BlocksProhibitedDestinations(t *testing.T) {
 	}
 }
 
+func boolPtr(v bool) *bool { return &v }
+
 func TestSafeHTTPClient_OptionsFromConfig(t *testing.T) {
 	cfg := config.SSRFProtectionConfig{
-		Enabled:         true,
-		BlockPrivateIPs: true,
+		Enabled:         boolPtr(true),
+		BlockPrivateIPs: boolPtr(true),
 		AllowedDomains:  []string{"trusted.com"},
 	}
 
@@ -229,3 +231,48 @@ func TestSafeTransport_AllowLocalTargetsInDevelopment(t *testing.T) {
 	}
 }
 
+func TestOptionsFromConfig_DefaultsSafeWhenOmitted(t *testing.T) {
+	opts := OptionsFromConfig(config.SSRFProtectionConfig{})
+	if !opts.Enabled {
+		t.Fatal("expected SSRF Protection Enabled to default true when omitted")
+	}
+	if !opts.BlockPrivateIPs {
+		t.Fatal("expected BlockPrivateIPs to default true when omitted (without dev env)")
+	}
+	for _, rawIP := range []string{"127.0.0.1", "169.254.169.254", "fd00:ec2::254"} {
+		if err := IsSafeIP(net.ParseIP(rawIP), opts); err == nil {
+			t.Fatalf("expected %s to be blocked with omitted SSRF config", rawIP)
+		}
+	}
+
+	// Even when BlockPrivateIPs is explicitly false, cloud metadata remains blocked when Enabled is omitted/true.
+	relaxedPrivate := OptionsFromConfig(config.SSRFProtectionConfig{
+		BlockPrivateIPs: boolPtr(false),
+	})
+	if !relaxedPrivate.Enabled {
+		t.Fatal("expected Enabled to remain true when only BlockPrivateIPs=false is set")
+	}
+	for _, meta := range []string{"169.254.169.254", "fd00:ec2::254"} {
+		if err := IsSafeIP(net.ParseIP(meta), relaxedPrivate); err == nil {
+			t.Fatalf("expected metadata IP %s to remain blocked", meta)
+		}
+	}
+
+	// Cloud metadata remains unconditionally blocked even when Enabled=false.
+	disabledSSRF := SafeTransportOptions{Enabled: false, BlockPrivateIPs: false}
+	for _, meta := range []string{"169.254.169.254", "::ffff:169.254.169.254", "fd00:ec2::254"} {
+		if err := IsSafeIP(net.ParseIP(meta), disabledSSRF); !errors.Is(err, ErrMetadataIPBlocked) {
+			t.Fatalf("expected metadata IP %s blocked even with Enabled=false, got %v", meta, err)
+		}
+	}
+
+	// AllowedDomains must not silently bypass BlockPrivateIPs for IP literals.
+	allowlistStrict := SafeTransportOptions{
+		Enabled:         true,
+		BlockPrivateIPs: true,
+		AllowedDomains:  []string{"127.0.0.1"},
+	}
+	if err := ValidateURL("http://127.0.0.1:8080/mcp", allowlistStrict); err == nil {
+		t.Fatal("expected AllowedDomains not to disable BlockPrivateIPs for 127.0.0.1")
+	}
+}

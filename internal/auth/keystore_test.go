@@ -427,3 +427,86 @@ func TestFileKeyStore_AgentScopingAndRawKey(t *testing.T) {
 	}
 }
 
+func TestFileKeyStore_ReloadsExternalKeyCreationAndRevocation(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "api_keys.json")
+
+	daemonStore, err := NewFileKeyStore(filePath)
+	if err != nil {
+		t.Fatalf("NewFileKeyStore daemon: %v", err)
+	}
+	cliStore, err := NewFileKeyStore(filePath)
+	if err != nil {
+		t.Fatalf("NewFileKeyStore cli: %v", err)
+	}
+
+	// Ensure mtime/size shift across same-second filesystems
+	rawToken, rec, err := cliStore.GenerateKey("Live Adopt", "Developer", "cursor")
+	if err != nil {
+		t.Fatalf("cli GenerateKey: %v", err)
+	}
+
+	// Immediate validation on miss must pick up the externally written key without restart
+	got, ok := daemonStore.ValidateKey(rawToken)
+	if !ok || got == nil || got.ID != rec.ID {
+		t.Fatalf("expected live ValidateKey to reload external key, got ok=%v rec=%+v", ok, got)
+	}
+
+	// External revocation must be observed once stat throttle elapses
+	if err := cliStore.RevokeKey(rec.ID); err != nil {
+		t.Fatalf("cli RevokeKey: %v", err)
+	}
+	daemonStore.lastStatCheckUnix.Store(0)
+	if _, ok := daemonStore.ValidateKey(rawToken); ok {
+		t.Fatal("expected live ValidateKey to observe external key revocation")
+	}
+}
+
+func TestFileKeyStore_ListKeysAndFlushDirty_PreservesExternalKeys(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "api_keys.json")
+
+	daemonStore, err := NewFileKeyStore(filePath)
+	if err != nil {
+		t.Fatalf("NewFileKeyStore daemon: %v", err)
+	}
+	raw1, _, err := daemonStore.GenerateKey("Primary", "Developer", "claude")
+	if err != nil {
+		t.Fatalf("daemon GenerateKey: %v", err)
+	}
+
+	cliStore, err := NewFileKeyStore(filePath)
+	if err != nil {
+		t.Fatalf("NewFileKeyStore cli: %v", err)
+	}
+	_, _, err = cliStore.GenerateKey("CLI Key 1", "Developer", "cursor")
+	if err != nil {
+		t.Fatalf("cli GenerateKey 1: %v", err)
+	}
+
+	// ListKeys must sync external additions
+	if got := daemonStore.ListKeys(); len(got) != 2 {
+		t.Fatalf("expected ListKeys to observe external key (len 2), got %d", len(got))
+	}
+
+	// Add another external key via CLI store, mark daemonStore dirty via cache-hit ValidateKey, then FlushDirty
+	raw3, _, err := cliStore.GenerateKey("CLI Key 2", "Developer", "windsurf")
+	if err != nil {
+		t.Fatalf("cli GenerateKey 2: %v", err)
+	}
+	if _, ok := daemonStore.ValidateKey(raw1); !ok {
+		t.Fatal("expected ValidateKey(raw1) hit")
+	}
+	if err := daemonStore.FlushDirty(); err != nil {
+		t.Fatalf("FlushDirty: %v", err)
+	}
+
+	reloaded, err := NewFileKeyStore(filePath)
+	if err != nil {
+		t.Fatalf("reload keystore: %v", err)
+	}
+	if got := reloaded.ListKeys(); len(got) != 3 {
+		t.Fatalf("expected FlushDirty to preserve external keys (len 3), got %d", len(got))
+	}
+	if _, ok := reloaded.ValidateKey(raw3); !ok {
+		t.Fatal("expected external key 3 to survive daemon FlushDirty")
+	}
+}

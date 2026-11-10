@@ -1,13 +1,15 @@
 package console
 
 import (
-	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 )
+
+const maxLineBytes = 256
 
 // InteractiveConsole provides cross-platform terminal I/O supporting context-aware cancellation
 // so blocking interactive reads terminate cleanly when resolved externally or timed out.
@@ -23,7 +25,16 @@ type InteractiveConsole interface {
 // When r is an *os.File (such as an os.Pipe or terminal descriptor), it uses the non-leaking
 // OS-native poll/CancelIoEx console reader without closing the caller's file descriptor.
 func ReadLineFromReader(ctx context.Context, r io.Reader) (string, error) {
+	if r == nil {
+		return "", errors.New("nil console reader")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if f, ok := r.(*os.File); ok {
+		if f == nil {
+			return "", os.ErrInvalid
+		}
 		c := newNonClosingFileConsole(f)
 		return c.ReadLine(ctx)
 	}
@@ -34,13 +45,8 @@ func ReadLineFromReader(ctx context.Context, r io.Reader) (string, error) {
 	}
 	resCh := make(chan readResult, 1)
 	go func() {
-		reader := bufio.NewReader(r)
-		text, err := reader.ReadString('\n')
-		if err != nil && len(text) == 0 {
-			resCh <- readResult{err: err}
-			return
-		}
-		resCh <- readResult{line: strings.TrimRight(text, "\r\n")}
+		line, err := readBoundedLine(r)
+		resCh <- readResult{line: line, err: err}
 	}()
 
 	select {
@@ -48,6 +54,28 @@ func ReadLineFromReader(ctx context.Context, r io.Reader) (string, error) {
 		return "", ctx.Err()
 	case res := <-resCh:
 		return res.line, res.err
+	}
+}
+
+func readBoundedLine(r io.Reader) (string, error) {
+	var sb strings.Builder
+	var buf [1]byte
+	for {
+		n, err := r.Read(buf[:])
+		if n > 0 {
+			if buf[0] == '\n' {
+				return strings.TrimRight(sb.String(), "\r"), nil
+			}
+			if sb.Len() < maxLineBytes {
+				sb.WriteByte(buf[0])
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) && sb.Len() > 0 {
+				return strings.TrimRight(sb.String(), "\r"), nil
+			}
+			return "", err
+		}
 	}
 }
 

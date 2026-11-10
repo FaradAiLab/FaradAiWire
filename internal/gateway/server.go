@@ -615,7 +615,7 @@ func (s *Server) Reload() error {
 	defer s.reloadMu.Unlock()
 
 	if s.provider == nil {
-		return fmt.Errorf("no configuration provider configured for reload")
+		return config.ErrNoConfigProvider
 	}
 	newCfg, err := s.provider.Load()
 	if err != nil {
@@ -632,12 +632,12 @@ func (s *Server) Reload() error {
 		overrides, oErr := sStore.GetAll(ctx)
 		cancel()
 		if oErr != nil {
-			slog.Warn("Failed to load DuckDB settings overrides during reload", slog.String("error", oErr.Error()))
-		} else {
-			settings.ApplyFilterOverrides(newCfg, overrides)
-			if sCache != nil {
-				sCache.Update(settings.ResolveEffectiveSettings(newCfg, overrides))
-			}
+			slog.Error("Aborting reload: failed to load DuckDB settings overrides (retaining LKG configuration)", slog.String("error", oErr.Error()))
+			return fmt.Errorf("failed to load settings overrides: %w", oErr)
+		}
+		settings.ApplyFilterOverrides(newCfg, overrides)
+		if sCache != nil {
+			sCache.Update(settings.ResolveEffectiveSettings(newCfg, overrides))
 		}
 	}
 

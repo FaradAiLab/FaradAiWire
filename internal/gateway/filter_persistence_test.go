@@ -3,6 +3,7 @@ package gateway_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,8 +14,11 @@ import (
 	"testing"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
+	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/hitl"
 	"github.com/FaradAiLab/FaradAiWire/internal/gateway"
+	"github.com/FaradAiLab/FaradAiWire/internal/gateway/bootstrap"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 )
 
 func TestFilterPersistence_FreshInstall7LayersAndToggleLifecycle(t *testing.T) {
@@ -278,4 +282,50 @@ func fetchActiveFilters(t *testing.T, handler http.Handler) []string {
 		t.Fatalf("decode /admin/status: %v", err)
 	}
 	return st.ActiveFilters
+}
+
+type errGetAllSettingsStore struct {
+	settings.Store
+}
+
+func (e *errGetAllSettingsStore) GetAll(context.Context) (map[string]string, error) {
+	return nil, errors.New("duckdb read error")
+}
+
+func TestServer_Reload_AbortsOnSettingsStoreError_PreservesLKG(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tmpHome)
+
+	configPath, err := config.EnsureDefaultRuntimeConfig()
+	if err != nil {
+		t.Fatalf("EnsureDefaultRuntimeConfig failed: %v", err)
+	}
+	provider := config.NewYAMLConfigProvider(configPath)
+	lkgCfg, err := provider.Load()
+	if err != nil {
+		t.Fatalf("provider.Load failed: %v", err)
+	}
+	lkgCfg.Filters.DLP.Enabled = false
+
+	pipe := filter.NewPipeline(nil)
+	initialFilters := pipe.GetFilters()
+
+	srv, err := gateway.NewServerWithDependencies(&bootstrap.Dependencies{
+		Config:        lkgCfg,
+		Provider:      provider,
+		Pipeline:      pipe,
+		SettingsStore: &errGetAllSettingsStore{},
+		SettingsCache: settings.NewCache(settings.DefaultOperationalSettings()),
+	})
+	if err != nil {
+		t.Fatalf("NewServerWithDependencies failed: %v", err)
+	}
+
+	if err := srv.Reload(); err == nil {
+		t.Fatal("expected Reload() to fail when SettingsStore.GetAll errors")
+	}
+
+	if len(srv.Pipeline().GetFilters()) != len(initialFilters) {
+		t.Fatalf("expected LKG pipeline filters preserved on failed reload")
+	}
 }

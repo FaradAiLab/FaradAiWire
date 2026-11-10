@@ -7,19 +7,27 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
+	"slices"
 	"strings"
-	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
 	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 )
 
 func (a *AdminServer) getProtocolsDir() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.getProtocolsDirLocked()
+}
+
+func (a *AdminServer) getProtocolsDirLocked() string {
 	if a.cfg != nil && a.cfg.ProtocolsDir != "" {
 		return a.cfg.ProtocolsDir
 	}
-	return "./protocols"
+	return (&config.Config{}).GetProtocolsDir()
 }
 
 func (a *AdminServer) getProtocolStore() protocol.Store {
@@ -36,9 +44,10 @@ func (a *AdminServer) getProtocolStore() protocol.Store {
 		return a.protocolStore
 	}
 
-	newStore, err := protocol.NewFSStore(a.getProtocolsDir())
+	protocolsDir := a.getProtocolsDirLocked()
+	newStore, err := protocol.NewFSStore(protocolsDir)
 	if err != nil {
-		slog.Error("failed to initialize protocol store", "dir", a.getProtocolsDir(), "error", err)
+		slog.Error("failed to initialize protocol store", "dir", protocolsDir, "error", err)
 		return nil
 	}
 	a.protocolStore = newStore
@@ -72,7 +81,11 @@ func (a *AdminServer) getProtocolStore() protocol.Store {
 		return inUse, nil
 	})
 
-	_ = newStore.EnsureGitIgnore(".")
+	if protocolsDir == "./protocols" || protocolsDir == "protocols" {
+		_ = newStore.EnsureGitIgnore(".")
+	} else if cleanWireDir := filepath.Clean(config.DefaultFaradAiWireDir()); filepath.Clean(protocolsDir) == filepath.Join(cleanWireDir, "protocols") {
+		_ = newStore.EnsureGitIgnore(cleanWireDir)
+	}
 	a.protocolStore = newStore
 	return a.protocolStore
 }
@@ -113,7 +126,7 @@ func hydrateProbeSecrets(req *ProbeProtocolRequest, store protocol.Store) {
 	if store == nil {
 		return
 	}
-	existing := matchStoredProtocol(store, req.ID, req.URL, req.Command)
+	existing := matchStoredProtocol(store, req)
 	if existing == nil {
 		return
 	}
@@ -133,18 +146,43 @@ func hydrateProbeSecrets(req *ProbeProtocolRequest, store protocol.Store) {
 	}
 }
 
-func matchStoredProtocol(store protocol.Store, id, targetURL, cmd string) *protocol.Protocol {
-	if id != "" {
-		if p, err := store.Get(id); err == nil && p != nil {
-			return p
+func probeMatchesStoredDestination(req *ProbeProtocolRequest, p *protocol.Protocol) bool {
+	if req == nil || p == nil {
+		return false
+	}
+	reqType := strings.ToLower(strings.TrimSpace(req.Type))
+	if reqType == "stdio" || (reqType == "" && strings.TrimSpace(req.Command) != "") {
+		if !strings.EqualFold(p.Type, "stdio") && p.Command == "" {
+			return false
+		}
+		return strings.TrimSpace(req.Command) == strings.TrimSpace(p.Command) && slices.Equal(req.Args, p.Args)
+	}
+	reqURL := strings.TrimSpace(req.URL)
+	storedURL := strings.TrimSpace(p.URLOrCommand)
+	return reqURL != "" && storedURL != "" && reqURL == storedURL
+}
+
+func matchStoredProtocol(store protocol.Store, req *ProbeProtocolRequest) *protocol.Protocol {
+	if req == nil {
+		return nil
+	}
+	if req.ID != "" {
+		if p, err := store.Get(req.ID); err == nil && p != nil {
+			// Prevent secret exfiltration by requiring the probe destination to match the stored protocol target.
+			if probeMatchesStoredDestination(req, p) {
+				return p
+			}
+			return nil
 		}
 	}
+	targetURL := strings.TrimSpace(req.URL)
+	cmd := strings.TrimSpace(req.Command)
 	all, _ := store.List()
 	for _, p := range all {
 		if targetURL != "" && (p.URLOrCommand == targetURL || p.Command == targetURL) {
 			return p
 		}
-		if cmd != "" && p.Command == cmd {
+		if cmd != "" && p.Command == cmd && slices.Equal(req.Args, p.Args) {
 			return p
 		}
 	}
@@ -178,7 +216,7 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 
 	hydrateProbeSecrets(&req, a.getProtocolStore())
 
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), a.probeTimeout())
 	defer cancel()
 
 	var tools []map[string]interface{}
@@ -219,8 +257,11 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 			return
 		}
 		ssrfOpts := transport.DefaultSafeOptions()
-		if a.cfg != nil {
-			ssrfOpts = transport.OptionsFromConfig(a.cfg.Security.SSRFProtection)
+		a.mu.RLock()
+		cfg := a.cfg
+		a.mu.RUnlock()
+		if cfg != nil {
+			ssrfOpts = transport.OptionsFromConfig(cfg.Security.SSRFProtection)
 		}
 		result, err := ProbeWithAutoNegotiation(ctx, a.SafeHTTPClient(), req.URL, req.AuthToken, req.Headers, ssrfOpts)
 		if err != nil {
@@ -281,11 +322,12 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 
 // handleProtocols manages CRUD operations for MCP protocol definitions.
 // Endpoints:
-//   GET    /admin/protocols         -> List all protocols (masked)
-//   GET    /admin/protocols/{id}    -> Get single protocol (masked)
-//   POST   /admin/protocols         -> Create new protocol definition
-//   PUT    /admin/protocols/{id}    -> Update protocol definition
-//   DELETE /admin/protocols/{id}    -> Delete protocol definition (blocked if in use)
+//
+//	GET    /admin/protocols         -> List all protocols (masked)
+//	GET    /admin/protocols/{id}    -> Get single protocol (masked)
+//	POST   /admin/protocols         -> Create new protocol definition
+//	PUT    /admin/protocols/{id}    -> Update protocol definition
+//	DELETE /admin/protocols/{id}    -> Delete protocol definition (blocked if in use)
 func (a *AdminServer) handleProtocols(w http.ResponseWriter, r *http.Request) {
 	relPath := strings.TrimPrefix(r.URL.Path, "/admin/protocols")
 	relPath = strings.Trim(relPath, "/")
@@ -312,7 +354,10 @@ func (a *AdminServer) handleProtocols(w http.ResponseWriter, r *http.Request) {
 
 	// Enforce mutation guard in managed mode for non-GET methods
 	if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
-		if a.cfg != nil && a.cfg.IsManaged() {
+		a.mu.RLock()
+		isManaged := a.cfg != nil && a.cfg.IsManaged()
+		a.mu.RUnlock()
+		if isManaged {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]string{
