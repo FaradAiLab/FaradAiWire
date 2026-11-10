@@ -12,9 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/auth"
@@ -102,11 +100,7 @@ func spawnDetachedDaemon(ctx context.Context, host string, port int) error {
 	cmd.Stderr = logFile
 
 	// Detach process group so closing IDE doesn't kill shared daemon
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setsid: true,
-		}
-	}
+	configureDetachedDaemon(cmd)
 
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()

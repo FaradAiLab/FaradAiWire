@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -139,5 +140,18 @@ func TestRunBridge_SSRF_Rejected(t *testing.T) {
 	err := runBridge(ctx, "test-profile", h, port, "token", strings.NewReader(""), &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "SSRF attempt detected") {
 		t.Fatalf("expected SSRF error, got: %v", err)
+	}
+}
+
+func TestConfigureDetachedDaemon(t *testing.T) {
+	t.Parallel()
+
+	// Nil safety check
+	configureDetachedDaemon(nil)
+
+	cmd := exec.Command("faradaiwire", "run")
+	configureDetachedDaemon(cmd)
+	if cmd.SysProcAttr == nil {
+		t.Fatal("expected configureDetachedDaemon to initialize SysProcAttr")
 	}
 }
