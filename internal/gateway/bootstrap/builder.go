@@ -17,6 +17,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/adaptive"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/dlp"
+	"github.com/FaradAiLab/FaradAiWire/internal/filter/hitl"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/limit"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/schema"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
@@ -80,10 +81,13 @@ func WireFilterDependencies(pipe *filter.Pipeline, cfg *config.Config, deps Filt
 		}
 	}
 
-	// 2. DLP HITL Safety Dispatcher
+	// 2. DLP & HITL Safety Dispatcher
 	if deps.GuardHITL != nil {
 		if dlpFilter, ok := pipe.GetFilter("dlp").(*dlp.DLPFilter); ok && dlpFilter != nil {
 			dlpFilter.SetHITLDispatcher(deps.GuardHITL)
+		}
+		if hitlFilter, ok := pipe.GetFilter("hitl").(*hitl.HITLFilter); ok && hitlFilter != nil {
+			hitlFilter.SetHITLDispatcher(deps.GuardHITL)
 		}
 	}
 
@@ -99,7 +103,7 @@ func WireFilterDependencies(pipe *filter.Pipeline, cfg *config.Config, deps Filt
 
 	// 4. Semantic Guard Filter registration & wiring
 	gf, ok := pipe.GetFilter("guard").(*guard.GuardFilter)
-	if (!ok || gf == nil) && cfg != nil && (cfg.Filters.Guard.Enabled || (deps.GuardManager != nil && deps.GuardManager.IsRunning())) {
+	if (!ok || gf == nil) && cfg != nil && cfg.Filters.Guard.Enabled {
 		gf = guard.NewFilter(guard.FilterConfig{
 			Enabled:          true,
 			L1Patterns:       cfg.Filters.Guard.L1Patterns,
@@ -129,9 +133,10 @@ func WireFilterDependencies(pipe *filter.Pipeline, cfg *config.Config, deps Filt
 	}
 }
 
-// Callbacks holds runtime hooks for administrative triggers (reload, baseline clearing).
+// Callbacks holds runtime hooks for administrative triggers (reload, in-memory config swap, baseline clearing).
 type Callbacks struct {
 	OnReload         func() error
+	OnReloadConfig   func(*config.Config) error
 	OnClearBaselines func()
 }
 
@@ -253,6 +258,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		cancel()
 
 		effective := settings.ResolveEffectiveSettings(cfg, overrides)
+		settings.ApplyFilterOverrides(cfg, overrides)
 		settingsCache = settings.NewCache(effective)
 		settingsStore = sStore
 	} else {
@@ -390,9 +396,11 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 
 	// 15. Admin HTTP Server
 	var reloadHook func() error
+	var reloadConfigHook func(*config.Config) error
 	var clearBaselinesHook func()
 	if len(cb) > 0 {
 		reloadHook = cb[0].OnReload
+		reloadConfigHook = cb[0].OnReloadConfig
 		clearBaselinesHook = cb[0].OnClearBaselines
 	}
 	if reloadHook == nil {
@@ -445,6 +453,9 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		}
 		adminSrv.SetGuardManager(guardManager)
 		adminSrv.SetGuardHITL(hitlDispatcher)
+		if reloadConfigHook != nil {
+			adminSrv.SetReloadConfigFunc(reloadConfigHook)
+		}
 		adminSrv.SetPipeline(pipe)
 		adminSrv.SetGuardInstaller(guardInstaller)
 

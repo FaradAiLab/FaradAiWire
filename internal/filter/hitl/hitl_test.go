@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
@@ -173,4 +175,92 @@ func TestHITLFilter_Webhook_ContextCancellation(t *testing.T) {
 	if elapsed > 1*time.Second {
 		t.Fatalf("Expected promptWebhook to abort immediately on context cancellation, took %v", elapsed)
 	}
+}
+
+type mockHITLApprover struct {
+	called   bool
+	lastReq  *guard.HITLRequest
+	approved bool
+	err      error
+}
+
+func (m *mockHITLApprover) RequestApproval(ctx context.Context, req *guard.HITLRequest) (bool, error) {
+	m.called = true
+	m.lastReq = req
+	return m.approved, m.err
+}
+
+func TestHITLFilter_DelegatesToHITLDispatcher(t *testing.T) {
+	t.Run("ApprovedViaDispatcher", func(t *testing.T) {
+		f := NewHITLFilter(true, []string{"delete_database"}, "cli", "", 60)
+		approver := &mockHITLApprover{approved: true}
+		f.SetHITLDispatcher(approver)
+
+		req := &mcp.Request{
+			Method: "tools/call",
+			Params: json.RawMessage(`{"name":"delete_database","arguments":{"target":"prod"}}`),
+		}
+
+		res, mErr := f.FilterRequest(context.Background(), req)
+		if mErr != nil {
+			t.Fatalf("expected nil error on dispatcher approval, got %v", mErr)
+		}
+		if res == nil {
+			t.Fatal("expected non-nil request")
+		}
+		if !approver.called || approver.lastReq == nil || approver.lastReq.ToolName != "delete_database" {
+			t.Fatalf("expected HITLApprover to be called with delete_database, got called=%v req=%+v", approver.called, approver.lastReq)
+		}
+	})
+
+	t.Run("DeniedViaDispatcher", func(t *testing.T) {
+		f := NewHITLFilter(true, []string{"delete_database"}, "cli", "", 60)
+		approver := &mockHITLApprover{approved: false, err: guard.ErrHITLDenied}
+		f.SetHITLDispatcher(approver)
+
+		req := &mcp.Request{
+			Method: "tools/call",
+			Params: json.RawMessage(`{"name":"delete_database","arguments":{"target":"prod"}}`),
+		}
+
+		_, mErr := f.FilterRequest(context.Background(), req)
+		if mErr == nil || mErr.Code != mcp.ErrHITLDenied {
+			t.Fatalf("expected ErrHITLDenied, got %+v", mErr)
+		}
+	})
+
+	t.Run("HeadlessFailClosed", func(t *testing.T) {
+		f := NewHITLFilter(true, []string{"delete_database"}, "cli", "", 60)
+		approver := &mockHITLApprover{approved: false, err: guard.ErrHeadlessFailClosed}
+		f.SetHITLDispatcher(approver)
+
+		req := &mcp.Request{
+			Method: "tools/call",
+			Params: json.RawMessage(`{"name":"delete_database","arguments":{"target":"prod"}}`),
+		}
+
+		_, mErr := f.FilterRequest(context.Background(), req)
+		if mErr == nil || mErr.Code != mcp.ErrHITLDenied {
+			t.Fatalf("expected ErrHITLDenied on headless fail-closed, got %+v", mErr)
+		}
+		if !errors.Is(guard.ErrHeadlessFailClosed, approver.err) || !strings.Contains(mErr.Message, "headless") {
+			t.Fatalf("expected headless error detail, got %s", mErr.Message)
+		}
+	})
+
+	t.Run("WebhookModeBypassesDispatcher", func(t *testing.T) {
+		f := NewHITLFilter(true, []string{"delete_database"}, "webhook", "http://127.0.0.1:8080/hook", 5)
+		approver := &mockHITLApprover{approved: true}
+		f.SetHITLDispatcher(approver)
+
+		req := &mcp.Request{
+			Method: "tools/call",
+			Params: json.RawMessage(`{"name":"delete_database","arguments":{"target":"prod"}}`),
+		}
+
+		_, _ = f.FilterRequest(context.Background(), req)
+		if approver.called {
+			t.Error("expected webhook mode not to delegate to interactive HITLDispatcher")
+		}
+	})
 }

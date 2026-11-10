@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -231,4 +232,69 @@ func TestHITLDispatcher_ConcurrentResolution_RaceFree(t *testing.T) {
 	}
 	_ = approved
 	wg.Wait()
+}
+
+type syncSafeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncSafeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncSafeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestHITLDispatcher_DualChannel_WebWinsRaceCleanly(t *testing.T) {
+	t.Parallel()
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	var out syncSafeBuffer
+	hub := &mockWSHub{clientCount: 1}
+	dispatcher := NewHITLDispatcher(HITLDispatcherConfig{
+		Timeout: 2 * time.Second,
+		TTYIn:   pr,
+		TTYOut:  &out,
+		WSHub:   hub,
+	})
+
+	req := &HITLRequest{
+		CallID:    "dual-race-1",
+		ToolName:  "delete_record",
+		Arguments: map[string]interface{}{"id": 42},
+		RiskScore: 0.91,
+	}
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		if !dispatcher.Resolve("dual-race-1", true) {
+			t.Errorf("expected Web Console Resolve to succeed")
+		}
+	}()
+
+	start := time.Now()
+	approved, err := dispatcher.RequestApproval(context.Background(), req)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("expected nil error when resolved via Web Console, got %v", err)
+	}
+	if !approved {
+		t.Fatal("expected request to be approved")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("expected immediate return after Web Console resolve, took %v", elapsed)
+	}
+	if !strings.Contains(out.String(), "Approve execution? (y/N)") {
+		t.Errorf("expected TTY prompt to have been rendered, got %q", out.String())
+	}
 }

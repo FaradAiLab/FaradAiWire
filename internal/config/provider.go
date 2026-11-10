@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -87,6 +88,73 @@ func (c *Config) ResetToStandalone() {
 	defer c.mu.Unlock()
 	c.RuntimeMode = RuntimeModeStandalone
 	c.PrivateKeyPath = ""
+}
+
+func cloneBoolPtr(p *bool) *bool {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
+// Clone returns a deep copy of Config with a fresh zero-value mutex so callers
+// can safely update configuration snapshots and swap them atomically without races.
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	cp := &Config{
+		RuntimeMode:               c.RuntimeMode,
+		ListenHost:                c.ListenHost,
+		ListenPort:                c.ListenPort,
+		AgentsDir:                 c.AgentsDir,
+		ProtocolsDir:              c.ProtocolsDir,
+		Mode:                      c.Mode,
+		Stdio:                     c.Stdio,
+		SSE:                       c.SSE,
+		Filters:                   c.Filters,
+		AuditLog:                  c.AuditLog,
+		Telemetry:                 c.Telemetry,
+		HotReload:                 c.HotReload,
+		PrivateKeyPath:            c.PrivateKeyPath,
+		AdminPort:                 c.AdminPort,
+		AdminTLS:                  c.AdminTLS,
+		UserContext:               c.UserContext,
+		Security:                  c.Security,
+		AutoSyncMCP:               c.AutoSyncMCP,
+		AutoUpdatePolicies:        c.AutoUpdatePolicies,
+		PollIntervalSeconds:       c.PollIntervalSeconds,
+		PolicyPollIntervalSeconds: c.PolicyPollIntervalSeconds,
+		ToolSyncIntervalSeconds:   c.ToolSyncIntervalSeconds,
+		ConfigPath:                c.ConfigPath,
+	}
+
+	cp.Stdio.Args = slices.Clone(c.Stdio.Args)
+	cp.UserContext.TrustedProxies = slices.Clone(c.UserContext.TrustedProxies)
+	cp.Security.TrustedProxies = slices.Clone(c.Security.TrustedProxies)
+	cp.Security.CORSAllowedOrigins = slices.Clone(c.Security.CORSAllowedOrigins)
+	cp.Security.SSRFProtection.AllowedDomains = slices.Clone(c.Security.SSRFProtection.AllowedDomains)
+	cp.Security.RateLimiting.Enabled = cloneBoolPtr(c.Security.RateLimiting.Enabled)
+	cp.Telemetry.Enabled = cloneBoolPtr(c.Telemetry.Enabled)
+
+	cp.Filters.Adaptive.FastPathTools = slices.Clone(c.Filters.Adaptive.FastPathTools)
+	cp.Filters.Adaptive.DeepPathTools = slices.Clone(c.Filters.Adaptive.DeepPathTools)
+	cp.Filters.InjectionScanner.ExcludeTools = slices.Clone(c.Filters.InjectionScanner.ExcludeTools)
+	cp.Filters.InjectionScanner.Patterns = slices.Clone(c.Filters.InjectionScanner.Patterns)
+	cp.Filters.DLP.ExcludeTools = slices.Clone(c.Filters.DLP.ExcludeTools)
+	cp.Filters.DLP.Patterns = slices.Clone(c.Filters.DLP.Patterns)
+	cp.Filters.Guard.L1Patterns = slices.Clone(c.Filters.Guard.L1Patterns)
+	cp.Filters.Guard.FastPathTools = slices.Clone(c.Filters.Guard.FastPathTools)
+	cp.Filters.Guard.CriticalBlocks = slices.Clone(c.Filters.Guard.CriticalBlocks)
+	cp.Filters.HITL.DestructiveTools = slices.Clone(c.Filters.HITL.DestructiveTools)
+	cp.Filters.LoopProtection.ExcludeTools = slices.Clone(c.Filters.LoopProtection.ExcludeTools)
+	cp.Filters.LoopProtection.Overrides = slices.Clone(c.Filters.LoopProtection.Overrides)
+
+	return cp
 }
 
 // IsStandalone returns true if the gateway is running in offline-first standalone mode.
@@ -191,6 +259,7 @@ func EnsureDefaultRuntimeConfig() (string, error) {
 		filepath.Join(wireDir, "policies"),
 		filepath.Join(wireDir, "keys"),
 		filepath.Join(wireDir, "protocols"),
+		filepath.Join(wireDir, "schemas"),
 	}
 	for _, dir := range subdirs {
 		if err := os.MkdirAll(dir, 0750); err != nil {
@@ -200,7 +269,8 @@ func EnsureDefaultRuntimeConfig() (string, error) {
 
 	configPath := filepath.Join(wireDir, "config.yaml")
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		agentsDir := filepath.ToSlash(filepath.Join(wireDir, "agents"))
+		agentsDir := strings.ReplaceAll(filepath.ToSlash(filepath.Join(wireDir, "agents")), `"`, `\"`)
+		schemasDir := strings.ReplaceAll(filepath.ToSlash(filepath.Join(wireDir, "schemas")), `"`, `\"`)
 		defaultYAML := `# Farad Ai Core - Offline-First Standalone Configuration
 runtime_mode: STANDALONE
 listen_host: "127.0.0.1"
@@ -224,6 +294,11 @@ security:
 filters:
   prefill_block:
     enabled: true
+  schema_validation:
+    enabled: true
+    schemas_dir: "` + schemasDir + `"
+    dynamic_capture: true
+    baseline_pinning: true
   guard:
     enabled: true
     discovery:
@@ -231,6 +306,22 @@ filters:
       ollama_url: "http://127.0.0.1:11434"
       docker_url: "http://127.0.0.1:8088"
       custom_url: ""
+  hitl:
+    enabled: true
+    destructive_tools:
+      - "write_to_db"
+      - "delete_record"
+      - "send_email"
+    approval_mode: "cli"
+    timeout_seconds: 60
+  loop_protection:
+    enabled: true
+    max_repeat: 5
+    window_seconds: 15
+  rate_limiting:
+    enabled: true
+    max_burst: 50
+    refill_rate: 10.0
   dlp:
     enabled: true
     patterns:

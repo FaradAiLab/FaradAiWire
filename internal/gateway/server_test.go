@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1925,6 +1926,132 @@ func TestServer_Shutdown_KeystoreDirtyFlush(t *testing.T) {
 	if reloadedKey.LastUsedAt.Before(validateTime) {
 		t.Errorf("Keystore flush on shutdown failed: persisted LastUsedAt (%v) is older than validation time (%v)", reloadedKey.LastUsedAt, validateTime)
 	}
+}
+
+func TestServer_FilterToggle_PersistsAcrossReloadAndRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tmpDir)
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	dbPath := filepath.Join(tmpDir, "telemetry.duckdb")
+
+	originalYAML := fmt.Sprintf(`# Preserved user comment
+runtime_mode: STANDALONE
+listen_host: "127.0.0.1"
+listen_port: 8090
+admin_port: 8095
+agents_dir: %q
+telemetry:
+  db_path: %q
+filters:
+  prefill_block:
+    enabled: true
+  dlp:
+    enabled: true
+  rate_limiting:
+    enabled: false
+`, filepath.ToSlash(filepath.Join(tmpDir, "agents")), filepath.ToSlash(dbPath))
+
+	if err := os.WriteFile(configPath, []byte(originalYAML), 0644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	provider := config.NewYAMLConfigProvider(configPath)
+	cfg, err := provider.Load()
+	if err != nil {
+		t.Fatalf("failed to load initial config: %v", err)
+	}
+
+	srv, err := gateway.NewServer(cfg, provider)
+	if err != nil {
+		t.Fatalf("failed to create gateway server: %v", err)
+	}
+	adminH := srv.AdminHandler()
+
+	// 1. Toggle DLP off and Rate Limiting on
+	for _, body := range []string{
+		`{"filter":"dlp","enabled":false}`,
+		`{"filter":"rate_limiting","enabled":true}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/admin/config/toggle", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		adminH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("toggle %s failed with %d: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	assertFilters := func(label string, h http.Handler, srvInstance *gateway.Server, wantDLP, wantRL bool) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: /admin/status returned %d", label, rec.Code)
+		}
+		var st struct {
+			ActiveFilters []string `json:"active_filters"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+			t.Fatalf("%s: decode status: %v", label, err)
+		}
+		if got := slices.Contains(st.ActiveFilters, "dlp"); got != wantDLP {
+			t.Errorf("%s: status dlp=%v, want %v (active_filters=%v)", label, got, wantDLP, st.ActiveFilters)
+		}
+		if got := slices.Contains(st.ActiveFilters, "rate_limiting"); got != wantRL {
+			t.Errorf("%s: status rate_limiting=%v, want %v (active_filters=%v)", label, got, wantRL, st.ActiveFilters)
+		}
+		if got := srvInstance.Pipeline().GetFilter("dlp") != nil; got != wantDLP {
+			t.Errorf("%s: pipeline dlp=%v, want %v", label, got, wantDLP)
+		}
+		if got := srvInstance.Pipeline().GetFilter("rate_limiting") != nil; got != wantRL {
+			t.Errorf("%s: pipeline rate_limiting=%v, want %v", label, got, wantRL)
+		}
+	}
+
+	assertFilters("after toggle", adminH, srv, false, true)
+
+	// 2. Manual disk reload must NOT revert DuckDB filter overrides
+	if err := srv.Reload(); err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+	assertFilters("after Reload()", adminH, srv, false, true)
+
+	// 3. Verify config.yaml on disk is untouched
+	afterBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after toggle: %v", err)
+	}
+	if string(afterBytes) != originalYAML {
+		t.Fatalf("config.yaml on disk was mutated")
+	}
+
+	// 4. Simulate full gateway restart against same config.yaml and DuckDB
+	_ = srv.Shutdown(context.Background())
+
+	cfg2, err := provider.Load()
+	if err != nil {
+		t.Fatalf("reload config for restart: %v", err)
+	}
+	srv2, err := gateway.NewServer(cfg2, provider)
+	if err != nil {
+		t.Fatalf("failed to boot restarted gateway server: %v", err)
+	}
+	defer srv2.Shutdown(context.Background())
+	adminH2 := srv2.AdminHandler()
+
+	assertFilters("after restart", adminH2, srv2, false, true)
+
+	// 5. Reset filters.dlp restores YAML baseline (true) while preserving rate_limiting=true
+	resetReq := httptest.NewRequest(http.MethodPost, "/admin/settings/reset", strings.NewReader(`{"key":"filters.dlp"}`))
+	resetReq.Header.Set("Content-Type", "application/json")
+	resetRec := httptest.NewRecorder()
+	adminH2.ServeHTTP(resetRec, resetReq)
+	if resetRec.Code != http.StatusOK {
+		t.Fatalf("reset failed with %d: %s", resetRec.Code, resetRec.Body.String())
+	}
+
+	assertFilters("after reset filters.dlp", adminH2, srv2, true, true)
 }
 
 

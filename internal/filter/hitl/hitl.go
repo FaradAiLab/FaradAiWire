@@ -1,22 +1,24 @@
 package hitl
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
+	"sync"
 	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/console"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
-	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
+	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 	"github.com/FaradAiLab/FaradAiWire/pkg/filter"
+	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
 // Ensure HITLFilter implements filter.SecurityFilter and filter.RequestFilter.
@@ -24,6 +26,11 @@ var (
 	_ filter.SecurityFilter = (*HITLFilter)(nil)
 	_ filter.RequestFilter  = (*HITLFilter)(nil)
 )
+
+// HITLApprover abstracts dual-channel human-in-the-loop approval escalation.
+type HITLApprover interface {
+	RequestApproval(ctx context.Context, req *guard.HITLRequest) (bool, error)
+}
 
 // HITLFilter intercepts destructive tool calls and prompts for human confirmation.
 type HITLFilter struct {
@@ -36,6 +43,8 @@ type HITLFilter struct {
 	ssrfOpts         transport.SafeTransportOptions
 	cliIn            io.Reader
 	cliOut           io.Writer
+	hitlDispatcher   HITLApprover
+	mu               sync.RWMutex
 }
 
 // NewHITLFilter initializes a HITLFilter using default SSRF safe egress guardrails.
@@ -70,12 +79,30 @@ func NewHITLFilterWithSSRF(enabled bool, destructiveTools []string, approvalMode
 
 // SetCLIReaderWriter allows overriding CLI input/output (e.g. for unit testing).
 func (h *HITLFilter) SetCLIReaderWriter(in io.Reader, out io.Writer) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.cliIn = in
 	h.cliOut = out
 }
 
+// SetHITLDispatcher thread-safely binds the dual-channel HITL dispatcher to the filter.
+func (h *HITLFilter) SetHITLDispatcher(dispatcher HITLApprover) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.hitlDispatcher = dispatcher
+}
+
+// HITLDispatcher returns the currently configured dual-channel HITL dispatcher.
+func (h *HITLFilter) HITLDispatcher() HITLApprover {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.hitlDispatcher
+}
+
 // SetHTTPClient allows overriding the HTTP client (e.g. for unit testing).
 func (h *HITLFilter) SetHTTPClient(client *http.Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.httpClient = client
 }
 
@@ -135,10 +162,33 @@ func (h *HITLFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.
 	approved := false
 	var err error
 
+	h.mu.RLock()
+	dispatcher := h.hitlDispatcher
+	hasCustomCLI := h.cliIn != nil
+	h.mu.RUnlock()
+
 	if h.approvalMode == "webhook" && h.webhookURL != "" {
 		approved, err = h.promptWebhook(ctx, callParams.Name, callParams.Arguments, userID)
+	} else if dispatcher != nil && !hasCustomCLI {
+		argsMap := make(map[string]interface{})
+		if len(callParams.Arguments) > 0 {
+			if uErr := json.Unmarshal(callParams.Arguments, &argsMap); uErr != nil {
+				argsMap["raw"] = string(callParams.Arguments)
+			}
+		}
+		approved, err = dispatcher.RequestApproval(ctx, &guard.HITLRequest{
+			ToolName:       callParams.Name,
+			Arguments:      argsMap,
+			RiskScore:      1.0,
+			ThreatDomain:   "DESTRUCTIVE_TOOL_POLICY",
+			DecisionEngine: "hitl_filter",
+		})
+		if errors.Is(err, guard.ErrHITLDenied) {
+			err = nil
+			approved = false
+		}
 	} else {
-		// Default to CLI prompt
+		// Standalone CLI console fallback
 		approved, err = h.promptCLI(ctx, callParams.Name, string(callParams.Arguments))
 	}
 
@@ -159,66 +209,77 @@ func (h *HITLFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (*m
 }
 
 func (h *HITLFilter) promptCLI(ctx context.Context, toolName string, args string) (bool, error) {
-	var in io.Reader
-	var out io.Writer
-	var closer io.Closer
+	h.mu.RLock()
+	customIn := h.cliIn
+	customOut := h.cliOut
+	h.mu.RUnlock()
 
-	if h.cliIn != nil {
-		in = h.cliIn
-		out = h.cliOut
+	safeTool := console.SanitizeTerminalText(toolName)
+	safeArgs := console.SanitizeTerminalText(args)
+
+	if customIn != nil {
+		out := customOut
 		if out == nil {
 			out = io.Discard
 		}
-	} else {
-		// In UNIX/macOS, we can open /dev/tty to write to/read from the physical terminal
-		// even if the standard input/output are redirected (piped JSON-RPC).
-		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-		if err != nil {
-			slog.WarnContext(ctx, "Cannot open /dev/tty, direct CLI confirmation is unavailable", slog.String("tool", toolName))
-			return false, nil
+
+		fmt.Fprintf(out, "\n🚨 [Farad Ai HITL] CRITICAL ACTION APPROVAL REQUESTED\n")
+		fmt.Fprintf(out, "Tool Call: %s\n", safeTool)
+		fmt.Fprintf(out, "Arguments: %s\n", safeArgs)
+		fmt.Fprintf(out, "Approve execution? (y/N): ")
+
+		waitCtx, cancel := context.WithTimeout(ctx, h.timeout)
+		defer cancel()
+
+		line, readErr := console.ReadLineFromReader(waitCtx, customIn)
+		if readErr != nil {
+			if errors.Is(readErr, context.DeadlineExceeded) && ctx.Err() == nil {
+				fmt.Fprintf(out, "⏱️ Approval timed out (%v expired).\n\n", h.timeout)
+				return false, fmt.Errorf("approval timeout")
+			}
+			return false, readErr
 		}
-		closer = tty
-		in = tty
-		out = tty
-	}
-	if closer != nil {
-		defer closer.Close()
-	}
-
-	fmt.Fprintf(out, "\n🚨 [Farad Ai HITL] CRITICAL ACTION APPROVAL REQUESTED\n")
-	fmt.Fprintf(out, "Tool Call: %s\n", toolName)
-	fmt.Fprintf(out, "Arguments: %s\n", args)
-	fmt.Fprintf(out, "Approve execution? (y/N): ")
-
-	reader := bufio.NewReader(in)
-	inputCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-
-	go func() {
-		text, err := reader.ReadString('\n')
-		if err != nil {
-			errCh <- err
-			return
-		}
-		inputCh <- strings.TrimSpace(strings.ToLower(text))
-	}()
-
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case text := <-inputCh:
-		if text == "y" || text == "yes" {
+		if console.ParseYesNoAnswer(line) {
 			fmt.Fprintf(out, "✅ Action approved.\n\n")
 			return true, nil
 		}
 		fmt.Fprintf(out, "❌ Action rejected.\n\n")
 		return false, nil
-	case err := <-errCh:
-		return false, err
-	case <-time.After(h.timeout):
-		fmt.Fprintf(out, "⏱️ Approval timed out (%v expired).\n\n", h.timeout)
-		return false, fmt.Errorf("approval timeout")
 	}
+
+	c, err := console.OpenInteractiveConsole()
+	if err != nil {
+		slog.WarnContext(ctx, "Cannot open interactive console, direct CLI confirmation is unavailable",
+			slog.String("tool", toolName),
+			slog.String("error", err.Error()),
+		)
+		return false, nil
+	}
+	defer func() { _ = c.Close() }()
+
+	fmt.Fprintf(c, "\n🚨 [Farad Ai HITL] CRITICAL ACTION APPROVAL REQUESTED\n")
+	fmt.Fprintf(c, "Tool Call: %s\n", safeTool)
+	fmt.Fprintf(c, "Arguments: %s\n", safeArgs)
+	fmt.Fprintf(c, "Approve execution? (y/N): ")
+
+	waitCtx, cancel := context.WithTimeout(ctx, h.timeout)
+	defer cancel()
+
+	line, readErr := c.ReadLine(waitCtx)
+	if readErr != nil {
+		if errors.Is(readErr, context.DeadlineExceeded) && ctx.Err() == nil {
+			fmt.Fprintf(c, "⏱️ Approval timed out (%v expired).\n\n", h.timeout)
+			return false, fmt.Errorf("approval timeout")
+		}
+		return false, readErr
+	}
+
+	if console.ParseYesNoAnswer(line) {
+		fmt.Fprintf(c, "✅ Action approved.\n\n")
+		return true, nil
+	}
+	fmt.Fprintf(c, "❌ Action rejected.\n\n")
+	return false, nil
 }
 
 type webhookPayload struct {
@@ -255,7 +316,11 @@ func (h *HITLFilter) promptWebhook(ctx context.Context, toolName string, args js
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := h.httpClient.Do(req)
+	h.mu.RLock()
+	httpClient := h.httpClient
+	h.mu.RUnlock()
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("webhook request failed: %w", err)
 	}

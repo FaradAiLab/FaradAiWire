@@ -47,7 +47,7 @@ paths:
   /admin/settings:
     get:
       summary: Retrieve Active Gateway Settings
-      description: Returns sanitized runtime configuration properties for the admin dashboard.
+      description: Returns self-describing operational settings metadata, active values, categories, and override flags.
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
@@ -59,15 +59,18 @@ paths:
               schema:
                 type: object
                 properties:
-                  runtime_mode: { type: string, enum: [standalone, managed] }
-                  listen_port: { type: integer, example: 8090 }
-                  admin_port: { type: integer, example: 8095 }
-                  filters: { type: object }
-
-  /admin/config/toggle:
+                  status: { type: string, example: "success" }
+                  categories:
+                    type: array
+                    items: { type: string }
+                    example: ["guard", "limits", "maintenance", "timeouts"]
+                  settings: { type: array, items: { type: object } }
+                  poll_interval_seconds: { type: integer, example: 30 }
+                  auto_sync_mcp: { type: boolean }
+                  auto_update_policies: { type: boolean }
     post:
-      summary: Runtime Toggle for Security Filters
-      description: Temporarily toggles a security filter (DLP, Prefill, Loop Protection, etc.) and hot-reloads configuration.
+      summary: Update Operational Gateway Settings
+      description: Validates and persists operational setting overrides to the DuckDB system_settings sparse overlay without modifying config.yaml.
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
@@ -77,15 +80,83 @@ paths:
           application/json:
             schema:
               type: object
-              required: [filter, enabled]
               properties:
-                filter: { type: string, example: "dlp" }
+                key: { type: string, example: "guard.threshold_score" }
+                value: {}
+                settings: { type: object }
+      responses:
+        '200':
+          description: Settings updated successfully
+        '400':
+          description: Validation failed or invalid payload
+        '403':
+          description: Forbidden in MANAGED runtime mode
+        '500':
+          description: Failed to persist setting to DuckDB
+
+  /admin/settings/reset:
+    post:
+      summary: Reset Setting or Filter Override to Baseline Default
+      description: Deletes a DuckDB system_settings override (including "filters.<name>" keys) and restores the baseline config.yaml value in memory.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key]
+              properties:
+                key:
+                  type: string
+                  example: "filters.dlp"
+      responses:
+        '200':
+          description: Setting reset to baseline default successfully
+        '400':
+          description: Unknown or missing setting key
+        '403':
+          description: Forbidden in MANAGED runtime mode
+        '500':
+          description: Failed to delete override from DuckDB
+
+  /admin/config/toggle:
+    post:
+      summary: Runtime Toggle for Security Filters
+      description: >
+        Persists a security filter toggle ("filters.<name>") to the DuckDB system_settings sparse overlay
+        and atomically swaps the in-memory filter pipeline without modifying config.yaml on disk (ADR-0053 / ADR-0054).
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                filter:
+                  type: string
+                  enum: [prefill_block, dlp, rate_limiting, loop_protection, guard, hitl, schema_validation, injection_scanner, auto_sync_mcp, auto_update_policies]
+                  example: "dlp"
+                filter_name:
+                  type: string
+                  enum: [prefill_block, dlp, rate_limiting, loop_protection, guard, hitl, schema_validation, injection_scanner, auto_sync_mcp, auto_update_policies]
+                  example: "dlp"
                 enabled: { type: boolean }
       responses:
         '200':
-          description: Filter setting toggled successfully
+          description: Filter setting persisted and reloaded in memory successfully
+        '400':
+          description: Invalid request body or unknown filter name
         '403':
           description: Forbidden in MANAGED runtime mode
+        '500':
+          description: Failed to persist filter toggle to DuckDB (fail-closed)
 
   /admin/schemas/clear:
     post:

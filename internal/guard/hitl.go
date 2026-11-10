@@ -1,7 +1,6 @@
 package guard
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,11 +9,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/FaradAiLab/FaradAiWire/internal/console"
 )
 
 var (
@@ -51,6 +50,7 @@ type pendingApproval struct {
 	req      *HITLRequest
 	respCh   chan bool
 	resolved atomic.Bool
+	approved atomic.Bool
 }
 
 // HITLDispatcherConfig provides tuning and channel bindings for the HITL safety engine.
@@ -98,30 +98,33 @@ func (d *HITLDispatcher) SetWSHub(hub WebSocketHub) {
 // HasAttachedChannel checks whether at least one interactive operator channel is attached.
 func (d *HITLDispatcher) HasAttachedChannel() bool {
 	d.mu.RLock()
-	defer d.mu.RUnlock()
+	disableTTY := d.cfg.DisableTTY
+	hasCustomTTY := d.cfg.TTYIn != nil && d.cfg.TTYOut != nil
+	wsHub := d.cfg.WSHub
+	d.mu.RUnlock()
 
-	if d.isTTYAvailableLocked() {
+	if isTTYAvailable(disableTTY, hasCustomTTY) {
 		return true
 	}
-	if d.cfg.WSHub != nil && d.cfg.WSHub.ClientCount() > 0 {
+	if wsHub != nil && wsHub.ClientCount() > 0 {
 		return true
 	}
 	return false
 }
 
-func (d *HITLDispatcher) isTTYAvailableLocked() bool {
-	if d.cfg.DisableTTY {
+func isTTYAvailable(disableTTY, hasCustomTTY bool) bool {
+	if disableTTY {
 		return false
 	}
-	if d.cfg.TTYIn != nil && d.cfg.TTYOut != nil {
+	if hasCustomTTY {
 		return true
 	}
-	// Probe whether /dev/tty can be opened in the current runtime environment
-	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	// Probe whether an interactive console device is attached in the current OS environment.
+	c, err := console.OpenInteractiveConsole()
 	if err != nil {
 		return false
 	}
-	_ = f.Close()
+	_ = c.Close()
 	return true
 }
 
@@ -151,13 +154,14 @@ func (d *HITLDispatcher) RequestApproval(ctx context.Context, req *HITLRequest) 
 	ttyIn := d.cfg.TTYIn
 	ttyOut := d.cfg.TTYOut
 	disableTTY := d.cfg.DisableTTY
-	isTTYAvail := d.isTTYAvailableLocked()
-	hasChannel := isTTYAvail || (wsHub != nil && wsHub.ClientCount() > 0)
 	d.mu.RUnlock()
+
+	isTTYAvail := isTTYAvailable(disableTTY, ttyIn != nil && ttyOut != nil)
+	hasChannel := isTTYAvail || (wsHub != nil && wsHub.ClientCount() > 0)
 
 	// Enforce fail-closed safety in unattended headless environments (DEC-10)
 	if !allowRESTOnly && !hasChannel {
-		slog.Warn("HITL escalation in headless environment: no operator attached, failing-closed",
+		slog.WarnContext(ctx, "HITL escalation in headless environment: no operator attached, failing-closed",
 			slog.String("call_id", req.CallID),
 			slog.String("tool", req.ToolName),
 		)
@@ -194,30 +198,44 @@ func (d *HITLDispatcher) RequestApproval(ctx context.Context, req *HITLRequest) 
 		})
 	}
 
-	// 2. Broadcast to local terminal TTY channel if attached
+	reqCtx, cancelPrompt := context.WithCancel(ctx)
+	var promptDone chan struct{}
+
+	// 2. Broadcast to local terminal console channel if attached
 	if !disableTTY && isTTYAvail {
-		go d.promptTTY(req, pa, ttyIn, ttyOut)
+		promptDone = make(chan struct{})
+		go d.promptTTY(reqCtx, req, pa, ttyIn, ttyOut, promptDone)
 	}
+
+	defer func() {
+		cancelPrompt()
+		if promptDone != nil {
+			<-promptDone
+		}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
 	// 3. Await first response from either channel, or enforce 60s fail-closed expiration
 	select {
 	case approved := <-pa.respCh:
 		if approved {
-			slog.Info("HITL tool call approved by operator",
+			slog.InfoContext(ctx, "HITL tool call approved by operator",
 				slog.String("call_id", req.CallID),
 				slog.String("tool", req.ToolName),
 			)
 			return true, nil
 		}
-		slog.Warn("HITL tool call rejected by operator",
+		slog.WarnContext(ctx, "HITL tool call rejected by operator",
 			slog.String("call_id", req.CallID),
 			slog.String("tool", req.ToolName),
 		)
 		return false, ErrHITLDenied
 
-	case <-time.After(timeout):
+	case <-timer.C:
 		if pa.resolved.CompareAndSwap(false, true) {
-			slog.Warn("HITL tool call timed out after 60s: failing-closed",
+			slog.WarnContext(ctx, "HITL tool call timed out after 60s: failing-closed",
 				slog.String("call_id", req.CallID),
 				slog.String("tool", req.ToolName),
 			)
@@ -234,25 +252,10 @@ func (d *HITLDispatcher) RequestApproval(ctx context.Context, req *HITLRequest) 
 }
 
 // promptTTY renders the terminal prompt to the operator and captures y/N response.
-func (d *HITLDispatcher) promptTTY(req *HITLRequest, pa *pendingApproval, customIn io.Reader, customOut io.Writer) {
-	var in io.Reader
-	var out io.Writer
-	var closeFn func()
-
-	if customIn != nil && customOut != nil {
-		in = customIn
-		out = customOut
-		closeFn = func() {}
-	} else {
-		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-		if err != nil {
-			return
-		}
-		in = tty
-		out = tty
-		closeFn = func() { _ = tty.Close() }
+func (d *HITLDispatcher) promptTTY(ctx context.Context, req *HITLRequest, pa *pendingApproval, customIn io.Reader, customOut io.Writer, promptDone chan struct{}) {
+	if promptDone != nil {
+		defer close(promptDone)
 	}
-	defer closeFn()
 
 	argsJSON, _ := json.Marshal(req.Arguments)
 	riskPct := req.RiskScore * 100
@@ -263,20 +266,47 @@ func (d *HITLDispatcher) promptTTY(req *HITLRequest, pa *pendingApproval, custom
 	prompt := fmt.Sprintf(
 		"\n🚨 [Farad Ai Guard] SUSPICIOUS TOOL CALL DETECTED (Risk: %.0f%% - %s)\nTool: %s\nArgs: %s\nApprove execution? (y/N): ",
 		riskPct,
-		req.ThreatDomain,
-		req.ToolName,
-		string(argsJSON),
+		console.SanitizeTerminalText(req.ThreatDomain),
+		console.SanitizeTerminalText(req.ToolName),
+		console.SanitizeTerminalText(string(argsJSON)),
 	)
 
-	_, _ = fmt.Fprint(out, prompt)
-
-	scanner := bufio.NewScanner(in)
-	if scanner.Scan() {
-		answer := strings.TrimSpace(scanner.Text())
-		lower := strings.ToLower(answer)
-		approved := lower == "y" || lower == "yes"
-		d.Resolve(req.CallID, approved)
+	if customIn != nil && customOut != nil {
+		_, _ = fmt.Fprint(customOut, prompt)
+		answer, err := console.ReadLineFromReader(ctx, customIn)
+		if err == nil {
+			d.Resolve(req.CallID, console.ParseYesNoAnswer(answer))
+		} else if errors.Is(err, context.Canceled) && pa.resolved.Load() {
+			writeExternalResolutionNotice(customOut, pa.approved.Load())
+		}
+		return
 	}
+
+	c, err := console.OpenInteractiveConsole()
+	if err != nil {
+		return
+	}
+	defer func() { _ = c.Close() }()
+
+	_, _ = fmt.Fprint(c, prompt)
+
+	line, err := c.ReadLine(ctx)
+	if err != nil {
+		if errors.Is(err, context.Canceled) && pa.resolved.Load() {
+			writeExternalResolutionNotice(c, pa.approved.Load())
+		}
+		return
+	}
+
+	d.Resolve(req.CallID, console.ParseYesNoAnswer(line))
+}
+
+func writeExternalResolutionNotice(w io.Writer, approved bool) {
+	if approved {
+		_, _ = fmt.Fprint(w, "\n✅ Action approved via Web Console\n\n")
+		return
+	}
+	_, _ = fmt.Fprint(w, "\n❌ Action rejected via Web Console\n\n")
 }
 
 // Resolve resolves a pending approval request by CallID.
@@ -290,6 +320,7 @@ func (d *HITLDispatcher) Resolve(callID string, approved bool) bool {
 		return false
 	}
 
+	pa.approved.Store(approved)
 	if !pa.resolved.CompareAndSwap(false, true) {
 		return false
 	}

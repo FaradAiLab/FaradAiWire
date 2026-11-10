@@ -42,9 +42,10 @@ type EventBroadcaster interface {
 type AdminServer struct {
 	cfg             *config.Config
 	cfgProvider     *config.YAMLConfigProvider
-	agentRepo       agent.Repository
-	reloadFunc      func() error
-	schemaClear     func()
+	agentRepo        agent.Repository
+	reloadFunc       func() error
+	reloadConfigFunc func(*config.Config) error
+	schemaClear      func()
 	telemetryEngine TelemetryReader
 	eventBroker     EventBroadcaster
 	server          *http.Server
@@ -183,6 +184,14 @@ func (a *AdminServer) SetSettingsCache(cache *settings.Cache) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.settingsCache = cache
+}
+
+// SetReloadConfigFunc registers an in-memory pipeline reload hook that accepts
+// an updated Config snapshot without re-reading config.yaml from disk.
+func (a *AdminServer) SetReloadConfigFunc(fn func(*config.Config) error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.reloadConfigFunc = fn
 }
 
 // SetGuardManager sets the active SLM Stdio guard process manager.

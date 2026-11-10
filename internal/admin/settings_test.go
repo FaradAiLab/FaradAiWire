@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
+	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 )
 
@@ -312,5 +314,227 @@ filters:
 	statAfter, _ := os.Stat(configPath)
 	if statAfter.ModTime() != statBefore.ModTime() {
 		t.Errorf("config.yaml file modification time changed: was %v, now %v", statBefore.ModTime(), statAfter.ModTime())
+	}
+}
+
+type failingFilterStore struct {
+	settings.Store
+}
+
+func (f *failingFilterStore) Set(ctx context.Context, key string, value string) error {
+	return errors.New("simulated duckdb write error")
+}
+
+func TestConfigToggle_PersistsToDuckDBAndUsesReloadConfig(t *testing.T) {
+	t.Parallel()
+
+	db, err := sql.Open("duckdb", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open duckdb: %v", err)
+	}
+	store := settings.NewDuckDBStore(db)
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate store: %v", err)
+	}
+
+	cfg := &config.Config{
+		RuntimeMode: config.RuntimeModeStandalone,
+	}
+	cfg.Filters.PrefillBlock.Enabled = true
+	cfg.Filters.DLP.Enabled = true
+
+	var diskReloadCalled int
+	var inMemoryReloadCalled int
+
+	var server *AdminServer
+	server = NewAdminServer(cfg, func() error {
+		diskReloadCalled++
+		// Simulate disk load that would revert if invoked by toggle
+		reloaded := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+		reloaded.Filters.PrefillBlock.Enabled = true
+		reloaded.Filters.DLP.Enabled = true
+		server.SetConfig(reloaded)
+		return nil
+	}, func() {})
+	server.SetSettingsStore(store)
+	server.SetReloadConfigFunc(func(nextCfg *config.Config) error {
+		inMemoryReloadCalled++
+		server.SetConfig(nextCfg)
+		return nil
+	})
+
+	handler := server.Handler()
+
+	// Toggle DLP off
+	req := httptest.NewRequest(http.MethodPost, "/admin/config/toggle", bytes.NewReader([]byte(`{"filter":"dlp","enabled":false}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if diskReloadCalled != 0 {
+		t.Errorf("expected disk reloadFunc not to be called on toggle, got %d", diskReloadCalled)
+	}
+	if inMemoryReloadCalled != 1 {
+		t.Errorf("expected in-memory reloadConfigFunc to be called once, got %d", inMemoryReloadCalled)
+	}
+
+	// Verify DuckDB persisted filters.dlp = "false"
+	val, exists, err := store.Get(context.Background(), "filters.dlp")
+	if err != nil || !exists || val != "false" {
+		t.Fatalf("expected DuckDB filters.dlp='false', got exists=%v val=%q err=%v", exists, val, err)
+	}
+
+	// Verify /admin/status reflects disabled DLP (no snap-back)
+	stReq := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+	stRec := httptest.NewRecorder()
+	handler.ServeHTTP(stRec, stReq)
+	var stResp struct {
+		ActiveFilters []string `json:"active_filters"`
+	}
+	if err := json.Unmarshal(stRec.Body.Bytes(), &stResp); err != nil {
+		t.Fatalf("decode status failed: %v", err)
+	}
+	for _, f := range stResp.ActiveFilters {
+		if f == "dlp" {
+			t.Errorf("expected 'dlp' to be removed from active_filters, got %v", stResp.ActiveFilters)
+		}
+	}
+}
+
+func TestConfigToggle_StoreErrorFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	cfg.Filters.DLP.Enabled = true
+
+	server := NewAdminServer(cfg, nil, nil)
+	server.SetSettingsStore(&failingFilterStore{})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/config/toggle", bytes.NewReader([]byte(`{"filter":"dlp","enabled":false}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 Internal Server Error on store failure, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !cfg.Filters.DLP.Enabled {
+		t.Error("expected DLP config not to be mutated when persistence fails")
+	}
+}
+
+func TestConfigToggle_ResetFilterToBaseline(t *testing.T) {
+	t.Parallel()
+
+	db, err := sql.Open("duckdb", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open duckdb: %v", err)
+	}
+	store := settings.NewDuckDBStore(db)
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate store: %v", err)
+	}
+
+	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	cfg.Filters.DLP.Enabled = true
+
+	var server *AdminServer
+	var reloadCalled int
+	server = NewAdminServer(cfg, func() error {
+		reloadCalled++
+		// Simulate disk load with dlp=true
+		base := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+		base.Filters.DLP.Enabled = true
+		server.SetConfig(base)
+		return nil
+	}, func() {})
+	server.SetSettingsStore(store)
+	server.SetReloadConfigFunc(func(nextCfg *config.Config) error {
+		server.SetConfig(nextCfg)
+		return nil
+	})
+	handler := server.Handler()
+
+	// 1. Toggle DLP off
+	tReq := httptest.NewRequest(http.MethodPost, "/admin/config/toggle", bytes.NewReader([]byte(`{"filter":"dlp","enabled":false}`)))
+	tReq.Header.Set("Content-Type", "application/json")
+	tRec := httptest.NewRecorder()
+	handler.ServeHTTP(tRec, tReq)
+	if tRec.Code != http.StatusOK {
+		t.Fatalf("toggle failed: %d", tRec.Code)
+	}
+
+	// 2. Reset filters.dlp via /admin/settings/reset
+	rReq := httptest.NewRequest(http.MethodPost, "/admin/settings/reset", bytes.NewReader([]byte(`{"key":"filters.dlp"}`)))
+	rReq.Header.Set("Content-Type", "application/json")
+	rRec := httptest.NewRecorder()
+	handler.ServeHTTP(rRec, rReq)
+	if rRec.Code != http.StatusOK {
+		t.Fatalf("reset failed: %d: %s", rRec.Code, rRec.Body.String())
+	}
+
+	_, exists, _ := store.Get(context.Background(), "filters.dlp")
+	if exists {
+		t.Error("expected filters.dlp row to be deleted from DuckDB on reset")
+	}
+	if reloadCalled != 1 {
+		t.Errorf("expected reloadFunc to be called once on filter reset, got %d", reloadCalled)
+	}
+}
+
+func TestStatus_GuardRespectsConfigFlagEvenWhenRunnerWarm(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	cfg.Filters.Guard.Enabled = false
+
+	server := NewAdminServer(cfg, nil, nil)
+	server.SetGuardManager(&mockGuardManager{
+		status: guard.ProcessStatus{
+			Running: true,
+			ModelID: "qwen3guard",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+
+	var resp struct {
+		ActiveFilters []string        `json:"active_filters"`
+		Config        map[string]any  `json:"config"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode status: %v", err)
+	}
+	for _, f := range resp.ActiveFilters {
+		if f == "guard" {
+			t.Errorf("expected guard NOT in active_filters when Filters.Guard.Enabled=false, got %v", resp.ActiveFilters)
+		}
+	}
+	if guardCfg, ok := resp.Config["guard"].(bool); ok && guardCfg {
+		t.Error("expected config.guard to reflect false when Filters.Guard.Enabled=false")
+	}
+}
+
+func TestSettingsAPI_UpdateRejectsFilterKeys(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	server := NewAdminServer(cfg, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/settings", bytes.NewReader([]byte(`{"key":"filters.dlp","value":false}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request when passing filters.* key to /admin/settings, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

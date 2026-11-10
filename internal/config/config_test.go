@@ -112,7 +112,7 @@ func TestEnsureDefaultRuntimeConfig(t *testing.T) {
 	}
 
 	// Verify required subdirectories were created
-	for _, sub := range []string{"agents", "backups", "policies"} {
+	for _, sub := range []string{"agents", "backups", "policies", "schemas"} {
 		dir := filepath.Join(tempHome, sub)
 		if info, err := os.Stat(dir); os.IsNotExist(err) || !info.IsDir() {
 			t.Errorf("expected directory %s to exist", dir)
@@ -136,6 +136,41 @@ func TestEnsureDefaultRuntimeConfig(t *testing.T) {
 	}
 	if cfg.GetAdminPort() != 8095 {
 		t.Errorf("expected generated config admin port 8095, got %d", cfg.GetAdminPort())
+	}
+
+	// Verify all 7 layers of Runtime Security Envelope are active with generic defaults
+	if !cfg.Filters.PrefillBlock.Enabled {
+		t.Error("expected prefill_block enabled by default")
+	}
+	if !cfg.Filters.SchemaValidation.Enabled || !cfg.Filters.SchemaValidation.DynamicCapture || !cfg.Filters.SchemaValidation.BaselinePinning {
+		t.Errorf("expected schema_validation fully enabled by default, got %+v", cfg.Filters.SchemaValidation)
+	}
+	expectedSchemasDir := filepath.ToSlash(filepath.Join(tempHome, "schemas"))
+	if cfg.Filters.SchemaValidation.SchemasDir != expectedSchemasDir {
+		t.Errorf("expected anchored schemas_dir %q, got %q", expectedSchemasDir, cfg.Filters.SchemaValidation.SchemasDir)
+	}
+	if !cfg.Filters.DLP.Enabled || len(cfg.Filters.DLP.Patterns) == 0 {
+		t.Error("expected dlp enabled with baseline patterns by default")
+	}
+	if !cfg.Filters.Guard.Enabled {
+		t.Error("expected guard enabled by default")
+	}
+	if !cfg.Filters.HITL.Enabled || cfg.Filters.HITL.ApprovalMode != "cli" || cfg.Filters.HITL.TimeoutSeconds != 60 {
+		t.Errorf("expected hitl enabled with cli/60s defaults, got %+v", cfg.Filters.HITL)
+	}
+	for _, tool := range cfg.Filters.HITL.DestructiveTools {
+		if tool == "para_transferi" {
+			t.Errorf("unexpected localized demo tool 'para_transferi' in generic defaults")
+		}
+	}
+	if len(cfg.Filters.HITL.DestructiveTools) != 3 {
+		t.Errorf("expected 3 generic destructive tools, got %v", cfg.Filters.HITL.DestructiveTools)
+	}
+	if !cfg.Filters.LoopProtection.Enabled || cfg.Filters.LoopProtection.MaxRepeat != 5 || cfg.Filters.LoopProtection.WindowSeconds != 15 {
+		t.Errorf("expected loop_protection 5/15 defaults, got %+v", cfg.Filters.LoopProtection)
+	}
+	if !cfg.Filters.RateLimiting.Enabled || cfg.Filters.RateLimiting.MaxBurst != 50 || cfg.Filters.RateLimiting.RefillRate != 10.0 {
+		t.Errorf("expected rate_limiting 50/10.0 defaults, got %+v", cfg.Filters.RateLimiting)
 	}
 }
 
@@ -267,5 +302,85 @@ mode: "sse"
 	expectedAgentsDir := "C:/Users/User/.faradaiwire/agents"
 	if cfg.AgentsDir != expectedAgentsDir {
 		t.Errorf("expected agents_dir %s, got %s", expectedAgentsDir, cfg.AgentsDir)
+	}
+}
+
+func TestConfig_Clone(t *testing.T) {
+	t.Parallel()
+
+	var nilCfg *config.Config
+	if nilCfg.Clone() != nil {
+		t.Fatal("expected cloning nil Config to return nil")
+	}
+
+	httpEnabled := true
+	telemetryEnabled := true
+	orig := &config.Config{
+		RuntimeMode: config.RuntimeModeStandalone,
+		ListenHost:  "127.0.0.1",
+		ListenPort:  8090,
+		AdminPort:   8095,
+		Security: config.SecurityConfig{
+			CORSAllowedOrigins: []string{"http://localhost:8095"},
+			RateLimiting: config.HTTPRateLimitConfig{
+				Enabled: &httpEnabled,
+				Rate:    50,
+				Burst:   100,
+			},
+		},
+		Telemetry: config.TelemetryConfig{
+			Enabled: &telemetryEnabled,
+			DBPath:  "/tmp/test.duckdb",
+		},
+		Filters: config.FiltersConfig{
+			PrefillBlock: config.PrefillBlockConfig{Enabled: true},
+			DLP: config.DLPConfig{
+				Enabled:      true,
+				ExcludeTools: []string{"safe_tool"},
+				Patterns:     []config.DLPPattern{{Name: "p1", Regex: "x", Action: "mask"}},
+			},
+			HITL: config.HITLConfig{
+				Enabled:          true,
+				DestructiveTools: []string{"delete_record"},
+			},
+			LoopProtection: config.LoopProtectionConfig{
+				Enabled:   true,
+				Overrides: []config.LoopToolOverride{{Tool: "search", MaxRepeat: 5}},
+			},
+		},
+	}
+
+	cloned := orig.Clone()
+	if cloned == orig {
+		t.Fatal("expected cloned pointer to differ from original")
+	}
+
+	// Mutate clone slices, pointers, and booleans; verify original is isolated.
+	cloned.Filters.PrefillBlock.Enabled = false
+	cloned.Filters.DLP.ExcludeTools[0] = "mutated"
+	cloned.Filters.DLP.Patterns[0].Action = "block"
+	cloned.Filters.HITL.DestructiveTools[0] = "mutated"
+	cloned.Filters.LoopProtection.Overrides[0].MaxRepeat = 99
+	cloned.Security.CORSAllowedOrigins[0] = "http://mutated"
+	*cloned.Security.RateLimiting.Enabled = false
+	*cloned.Telemetry.Enabled = false
+
+	if !orig.Filters.PrefillBlock.Enabled {
+		t.Error("expected original PrefillBlock.Enabled to remain true")
+	}
+	if orig.Filters.DLP.ExcludeTools[0] != "safe_tool" || orig.Filters.DLP.Patterns[0].Action != "mask" {
+		t.Error("expected original DLP slices to remain isolated")
+	}
+	if orig.Filters.HITL.DestructiveTools[0] != "delete_record" {
+		t.Error("expected original HITL DestructiveTools to remain isolated")
+	}
+	if orig.Filters.LoopProtection.Overrides[0].MaxRepeat != 5 {
+		t.Error("expected original LoopProtection Overrides to remain isolated")
+	}
+	if orig.Security.CORSAllowedOrigins[0] != "http://localhost:8095" {
+		t.Error("expected original CORSAllowedOrigins to remain isolated")
+	}
+	if !*orig.Security.RateLimiting.Enabled || !*orig.Telemetry.Enabled {
+		t.Error("expected original pointer booleans to remain true")
 	}
 }

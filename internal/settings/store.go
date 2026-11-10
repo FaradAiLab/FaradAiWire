@@ -123,7 +123,7 @@ func (s *DuckDBStore) Set(ctx context.Context, key string, value string) error {
 		return errors.New("duckdb connection is nil")
 	}
 
-	meta, ok := Registry[key]
+	meta, ok := LookupMeta(key)
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrUnknownSetting, key)
 	}

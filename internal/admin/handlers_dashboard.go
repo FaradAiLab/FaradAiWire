@@ -43,7 +43,7 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if a.cfg.Filters.HITL.Enabled {
 		activeFilters = append(activeFilters, "hitl")
 	}
-	if a.cfg.Filters.Guard.Enabled || (a.guardManager != nil && a.guardManager.IsRunning()) {
+	if a.cfg.Filters.Guard.Enabled {
 		activeFilters = append(activeFilters, "guard")
 	}
 
@@ -130,7 +130,7 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"prefill_block":         a.cfg.Filters.PrefillBlock.Enabled,
 			"schema_validation":     a.cfg.Filters.SchemaValidation.Enabled,
 			"injection_scanner":     a.cfg.Filters.InjectionScanner.Enabled,
-			"guard":                 (mgr != nil && mgr.IsRunning()) || a.cfg.Filters.Guard.Enabled,
+			"guard":                 a.cfg.Filters.Guard.Enabled,
 			"dlp":                   a.cfg.Filters.DLP.Enabled,
 			"hitl":                  a.cfg.Filters.HITL.Enabled,
 			"loop_protection":       a.cfg.Filters.LoopProtection.Enabled,

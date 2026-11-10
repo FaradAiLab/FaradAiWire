@@ -95,6 +95,10 @@ func NewServer(cfg *config.Config, provider config.Provider) (*Server, error) {
 			slog.Info("Admin manual reload triggered")
 			return s.Reload()
 		},
+		OnReloadConfig: func(nextCfg *config.Config) error {
+			slog.Info("Admin in-memory config swap triggered")
+			return s.ReloadWithConfig(nextCfg)
+		},
 		OnClearBaselines: func() {
 			slog.Info("Admin manual schema baselines clear triggered")
 			if s.pipeline != nil {
@@ -138,6 +142,9 @@ func NewServerWithDependencies(deps *bootstrap.Dependencies) (*Server, error) {
 		inFlightGracePeriod: 10 * time.Second,
 	}
 	s.applyDependencies(deps)
+	if s.adminServer != nil {
+		s.adminServer.SetReloadConfigFunc(s.ReloadWithConfig)
+	}
 	if s.sseProxy != nil {
 		s.sseProxy.SetDrainingMiddleware(s.drainingMiddleware)
 	}
@@ -614,6 +621,26 @@ func (s *Server) Reload() error {
 	if err != nil {
 		return fmt.Errorf("failed to reload configuration: %w", err)
 	}
+
+	s.mu.RLock()
+	sStore := s.settingsStore
+	sCache := s.settingsCache
+	s.mu.RUnlock()
+
+	if sStore != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		overrides, oErr := sStore.GetAll(ctx)
+		cancel()
+		if oErr != nil {
+			slog.Warn("Failed to load DuckDB settings overrides during reload", slog.String("error", oErr.Error()))
+		} else {
+			settings.ApplyFilterOverrides(newCfg, overrides)
+			if sCache != nil {
+				sCache.Update(settings.ResolveEffectiveSettings(newCfg, overrides))
+			}
+		}
+	}
+
 	return s.reloadWithConfigLocked(newCfg)
 }
 

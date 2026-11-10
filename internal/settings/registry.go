@@ -191,14 +191,17 @@ var ErrUnknownSetting = errors.New("unknown setting key")
 // ErrInvalidValue indicates a parameter value that fails boundary or data type validation.
 var ErrInvalidValue = errors.New("invalid setting value")
 
-// Validate checks whether a given key exists in the registry and whether the provided value
-// satisfies the type constraints and min/max boundaries.
+// Validate checks whether a given key exists in the operational settings registry and whether
+// the provided value satisfies the type constraints and min/max boundaries.
 func Validate(key string, val any) error {
 	meta, exists := Registry[key]
 	if !exists {
 		return fmt.Errorf("%w: %q is not a recognized operational setting", ErrUnknownSetting, key)
 	}
+	return validateMeta(key, meta, val)
+}
 
+func validateMeta(key string, meta SettingMeta, val any) error {
 	switch meta.Type {
 	case TypeInt:
 		var intVal int64
@@ -260,7 +263,7 @@ func Validate(key string, val any) error {
 // ParseAndValidate parses a raw string value according to the registered metadata schema
 // and validates it against boundaries.
 func ParseAndValidate(key string, strVal string) (any, error) {
-	meta, exists := Registry[key]
+	meta, exists := LookupMeta(key)
 	if !exists {
 		return nil, fmt.Errorf("%w: %q is not recognized", ErrUnknownSetting, key)
 	}
@@ -291,7 +294,7 @@ func ParseAndValidate(key string, strVal string) (any, error) {
 		return nil, fmt.Errorf("%w: unsupported type %q for key %q", ErrInvalidValue, meta.Type, key)
 	}
 
-	if err := Validate(key, parsed); err != nil {
+	if err := validateMeta(key, meta, parsed); err != nil {
 		return nil, err
 	}
 
