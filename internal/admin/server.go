@@ -510,18 +510,14 @@ func (a *AdminServer) StartTasks(ctx context.Context) {
 }
 
 // ListenAddr resolves the bind address for the admin server.
-// In standalone mode, loopback ("127.0.0.1") is strictly enforced per ADR-0028.
+// Explicit admin_host / FARADAI_WIRE_ADMIN_HOST opts into custom interfaces;
+// otherwise standalone mode enforces loopback ("127.0.0.1") per ADR-0028.
 func (a *AdminServer) ListenAddr() string {
 	adminPort := 8095
-	adminHost := "127.0.0.1"
 	if a.cfg != nil {
 		adminPort = a.cfg.GetAdminPort()
-		if !a.cfg.IsStandalone() {
-			if h := a.cfg.GetListenHost(); h != "" {
-				adminHost = h
-			}
-		}
 	}
+	adminHost := a.cfg.GetAdminHost()
 	return net.JoinHostPort(adminHost, strconv.Itoa(adminPort))
 }
 

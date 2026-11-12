@@ -392,3 +392,31 @@ func TestParseAuditArgs_HelpVsLocalDirectoryNamedHelp(t *testing.T) {
 			target, jsonOut, showHelp2, err)
 	}
 }
+
+func TestParseRunFlags_AdminHost(t *testing.T) {
+	var stderr strings.Builder
+	opts, showHelp, code := parseRunFlags([]string{"--admin-host", "0.0.0.0", "--admin-port", "19415"}, &stderr)
+	if showHelp || code != 0 {
+		t.Fatalf("unexpected parseRunFlags state showHelp=%v code=%d stderr=%s", showHelp, code, stderr.String())
+	}
+	if opts.adminHost != "0.0.0.0" || opts.adminPort != 19415 {
+		t.Fatalf("expected adminHost=0.0.0.0 and adminPort=19415, got %+v", opts)
+	}
+
+	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	applyRunOverrides(cfg, opts)
+	if cfg.GetAdminHost() != "0.0.0.0" {
+		t.Fatalf("expected cfg.GetAdminHost() == 0.0.0.0, got %s", cfg.GetAdminHost())
+	}
+}
+
+func TestRunUsage_DocumentsAdminHost(t *testing.T) {
+	var stdout, stderr strings.Builder
+	code := runCLI([]string{"run", "--help"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "-admin-host") {
+		t.Fatalf("expected run usage to document -admin-host flag, got:\n%s", stdout.String())
+	}
+}

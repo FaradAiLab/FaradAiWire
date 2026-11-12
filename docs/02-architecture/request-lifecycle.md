@@ -23,7 +23,7 @@ sequenceDiagram
     Note over Pipeline: Phase 2: Fast-Path (<1ms)<br/>- Prefill Check<br/>- Rate Limit & Loop Guard<br/>- Schema Drift Check<br/>- DLP Param Scan (Mask/Block)
 
     alt Security Violation Triggered
-        Pipeline-->>Ingress: Return BlockVerdict (-32004)
+        Pipeline-->>Ingress: Return JSON-RPC error (e.g. -32004)
         Ingress-->>Agent: JSON-RPC Error Response
         Pipeline-)Telemetry: Enqueue BLOCKED Audit Event
     else Payload Cleared
@@ -69,11 +69,12 @@ FaradAiWire extracts identity metadata from incoming HTTP headers:
 
 The message travels through the ordered in-memory filter chain:
 
-1. **Assistant Prefill Guard (`Order: 10`):** Checks for conversational sockpuppeting and LLM prefill exploitation payloads.
-2. **Rate Limiting (`Order: 30`):** Checks the client's token-bucket. If burst capacity is exhausted, returns JSON-RPC error `-32000` (Rate limit exceeded).
-3. **Loop Protection (`Order: 35`):** Tracks the sliding-window fingerprint (`tool_name + args_hash`). If the exact same call repeats consecutively $\ge \text{max\_repeat}$ times, execution aborts with error `-32002` (Infinite loop detected).
-4. **JSON Schema Validation (`Order: 50`):** Validates argument types against cached tool schemas. If dynamic capture is active, detects baseline drift (tool poisoning).
-5. **DLP Pattern Matching (`Order: 60`):** Executes high-performance compiled regexes across all parameter string fields:
+1. **[Assistant Prefill Guard](/docs/wire/03-security-filters/prefill/) (`Order: 5`):** Blocks requests whose message history ends with an `assistant` message (sockpuppeting) with `-32001`.
+2. **[Rate Limiting](/docs/wire/03-security-filters/rate-limiting/) (`Order: 10`):** Takes a token from the bucket of the calling agent and user. If the bucket is empty, returns `-32009` (rate limit exceeded). HTTP ingress has a separate per-IP limit that returns HTTP `429`.
+3. **[Loop Protection](/docs/wire/03-security-filters/loop-protection/) (`Order: 15`):** Tracks the fingerprint (`tool_name + SHA-256(arguments)`) inside a sliding window. If the same call occurs more than `max_repeat` times within `window_seconds`, returns `-32008` (infinite loop detected).
+4. **Policy hook (`Order: 20`):** Optional authorization policy (`-32003` when denied).
+5. **[JSON Schema Validation](/docs/wire/03-security-filters/schema-validation/) (`Order: 30`):** Validates arguments against cached tool schemas and rejects violations with `-32002`. Schema changes seen in `tools/list` are logged and the stored baseline is updated.
+6. **[DLP Pattern Matching](/docs/wire/03-security-filters/dlp/) (`Order: 50`):** Executes compiled regexes across the call parameters:
    - If a pattern is configured with `action: block`, execution terminates with `-32004`.
    - If configured with `action: mask`, the sensitive substring is replaced with a semantic placeholder (e.g. `[REDACTED:API_KEY]`).
 
@@ -82,8 +83,8 @@ The message travels through the ordered in-memory filter chain:
 ## Phase 4: Deep-Path Adaptive Branching (15–40 ms)
 
 If the tool is categorized as high-risk or external input inspection is required:
-- **Neural SLM Prompt Guard (`Order: 70`):** Sends the tool name and argument text to a local inference engine (Ollama `llama-guard3:1b` or Docker sidecar `prompt-guard`). If the classifier marks the content as unsafe with confidence exceeding threshold (default 0.85), the request is blocked.
-- **Human-In-The-Loop (HITL) Interceptor (`Order: 80`):** If the tool is listed under `destructive_tools` (e.g. `write_to_db`, `send_email`), FaradAiWire pauses the HTTP connection and triggers an operator approval prompt (via CLI interactive terminal or webhook). If rejected or timed out, returns `-32005` (Action rejected by human operator).
+- **[Neural SLM Prompt Guard](/docs/wire/03-security-filters/prompt-guard/) (`Order: 55`):** Runs regex rules, then sends the tool name and arguments to a local inference engine (for example Ollama or a Docker sidecar) depending on the tool's governance mode. A threat verdict (or a malicious probability at or above the configurable threshold score, default 0.50) blocks the call with `-32004` or escalates it to human approval. If the engine is unavailable, only the regex rules apply.
+- **[Human-In-The-Loop (HITL)](/docs/wire/03-security-filters/hitl/) Interceptor (`Order: 70`):** If the tool is listed under `destructive_tools` (e.g. `write_to_db`, `send_email`), FaradAiWire pauses the request and asks an operator for approval (CLI prompt or webhook). If denied or timed out, returns `-32000`.
 
 ---
 
@@ -99,7 +100,7 @@ Once cleared, the request is dispatched to the upstream tool provider based on c
 
 The upstream tool's output is inspected before reaching the AI agent:
 1. **DLP Response Scanning:** Scans tool output (e.g. file contents, database rows) for sensitive credentials and PII. Masks data in-place to prevent leaking secrets into the agent's context window.
-2. **Indirect Injection Scan:** Neutralizes hidden prompt injections embedded within scraped web pages or PDF documents.
+2. **Indirect Injection Scan:** The Guard inspects tool responses and blocks hidden prompt injections embedded in scraped web pages or documents with `-32006`.
 
 ---
 

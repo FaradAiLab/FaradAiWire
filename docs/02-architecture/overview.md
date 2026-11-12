@@ -83,34 +83,34 @@ Filters execute in strict order defined by `OrderPolicy` precedence constants:
 [Ingress Frame]
       │
       ▼
-1. Assistant Prefill Guard  (Order: 10)  ── Blocks conversational hijacking
+1. Assistant Prefill Guard  (Order: 5)   ── Blocks conversational hijacking
       │
       ▼
-2. Extension / Policy Hook  (Order: 20)  ── Enterprise or custom rules
+2. Token-Bucket Rate Limit  (Order: 10)  ── Protects downstream API quotas
       │
       ▼
-3. Token-Bucket Rate Limit  (Order: 30)  ── Protects downstream API quotas
+3. Loop Protection          (Order: 15)  ── Halts repeated identical tool calls
       │
       ▼
-4. Loop Protection          (Order: 35)  ── Halts repeated identical tool calls
+4. Extension / Policy Hook  (Order: 20)  ── Enterprise or custom rules
       │
       ▼
-5. JSON Schema Validation   (Order: 50)  ── Pins definitions; blocks tool poisoning
+5. JSON Schema Validation   (Order: 30)  ── Validates arguments; tracks schema changes
       │
       ▼
-6. DLP Pattern Matcher      (Order: 60)  ── Masks or blocks credentials/PII
+6. DLP Pattern Matcher      (Order: 50)  ── Masks or blocks credentials/PII
       │
       ▼
-7. Semantic SLM Guard       (Order: 70)  ── Neural classifier (injection/jailbreak)
+7. Semantic SLM Guard       (Order: 55)  ── Neural classifier (injection/jailbreak)
       │
       ▼
-8. Human-in-the-Loop        (Order: 80)  ── Suspends destructive tool executions
+8. Human-in-the-Loop        (Order: 70)  ── Suspends destructive tool executions
       │
       ▼
 [Upstream MCP Tool Dispatch]
 ```
 
-Any filter returning a terminal error (`BlockVerdict`) immediately aborts pipeline traversal, writes a structured audit event to DuckDB/JSONL, and returns a JSON-RPC error frame to the client.
+Any filter returning a terminal error (`*mcp.Error`) immediately aborts pipeline traversal, writes a structured audit event to DuckDB/JSONL, and returns a JSON-RPC error frame to the client.
 
 ---
 

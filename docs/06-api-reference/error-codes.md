@@ -1,6 +1,6 @@
 ---
 title: "JSON-RPC Security Error Codes"
-description: "Standardized error code catalog (-32000 to -32005) returned by FaradAiWire's Policy Enforcement Point."
+description: "Standardized error code catalog (-32000 to -32009) returned by FaradAiWire's Policy Enforcement Point."
 ---
 
 # JSON-RPC Security Error Codes 🛑
@@ -27,14 +27,21 @@ When FaradAiWire's Policy Enforcement Point (PEP) intercepts an adversarial payl
 
 ## Gateway Security Error Catalog
 
-| Code | Constant | Meaning | Typical Trigger |
+The codes below are the constants defined in `pkg/mcp/protocol.go`. The detail page of each control describes the exact messages.
+
+| Code | Constant | Meaning | Raised by |
 | :--- | :--- | :--- | :--- |
-| **`-32000`** | `ErrGateway` | Gateway internal error or rate limit burst exceeded | Token-bucket rate limit exhausted. |
-| **`-32001`** | `ErrPrefillBlocked` | Assistant prefill injection detected | Agent input contains conversational prefill hijack tokens. |
-| **`-32002`** | `ErrLoopDetected` | Infinite reasoning loop detected | The exact same tool was called $\ge \text{max\_repeat}$ times with identical arguments. |
-| **`-32003`** | `mcp.ErrPolicyDenied` | Policy authorization denied | Tool is blacklisted in `agents/<agent>.yaml` (Standardized in [ADR-0050](../adr/0050-absolute-opa-purge-and-open-core-policy-decoupling.md)). |
-| **`-32004`** | `ErrDLPBlocked` | Sensitive data pattern detected | Argument contains private keys, `.env` references, or credentials. |
-| **`-32005`** | `ErrHITLRejected` | Operator rejected or approval timed out | Human operator declined execution of a destructive tool or failed to confirm within SLA. |
+| **`-32000`** | `ErrHITLDenied` | Human approval was denied, timed out, or no approval channel was available | [HITL](/docs/wire/03-security-filters/hitl/), [DLP](/docs/wire/03-security-filters/dlp/) (`hitl` action), [Guard](/docs/wire/03-security-filters/prompt-guard/) |
+| **`-32001`** | `ErrPrefillInjection` | Assistant prefill injection (sockpuppeting) detected | [Prefill Guard](/docs/wire/03-security-filters/prefill/) |
+| **`-32002`** | `ErrSchemaValidation` | Tool arguments violate the tool's JSON Schema | [Schema Validation](/docs/wire/03-security-filters/schema-validation/) |
+| **`-32003`** | `ErrPolicyDenied` | Policy authorization denied ([ADR-0050](../adr/0050-absolute-opa-purge-and-open-core-policy-decoupling.md)) | Policy hook |
+| **`-32004`** | `ErrDLPViolation` | Sensitive data pattern or guard rule blocked the call | [DLP](/docs/wire/03-security-filters/dlp/), [Guard](/docs/wire/03-security-filters/prompt-guard/) |
+| **`-32006`** | `ErrIndirectInjection` | Indirect prompt injection detected in a tool response | [Guard](/docs/wire/03-security-filters/prompt-guard/) (response path) |
+| **`-32007`** | `ErrToolSchemaDrift` | Defined for tool schema poisoning. The Schema Validation filter currently logs drift and does not return this code. | Reserved |
+| **`-32008`** | `ErrLoopDetected` | Same tool called with identical arguments more than `max_repeat` times inside the window | [Loop Protection](/docs/wire/03-security-filters/loop-protection/) |
+| **`-32009`** | `ErrRateLimitExceeded` | Tool-call token bucket is empty | [Rate Limiting](/docs/wire/03-security-filters/rate-limiting/) |
+
+HTTP ingress rate limiting is separate: it returns HTTP `429` with a JSON body (`RATE_LIMIT_EXCEEDED` or `TOO_MANY_FAILED_ATTEMPTS`), not a JSON-RPC error.
 
 ---
 
@@ -47,7 +54,7 @@ FaradAiWire also enforces standard JSON-RPC 2.0 specification errors:
 | **`-32700`** | `Parse error` | Inbound payload was not valid JSON. |
 | **`-32600`** | `Invalid Request` | JSON-RPC frame missing `"jsonrpc": "2.0"` or `"id"`. |
 | **`-32601`** | `Method not found` | Requested MCP method (e.g. `unknown/method`) is not implemented. |
-| **`-32602`** | `Invalid params` | Arguments fail JSON Schema validation or mandatory fields are missing. |
+| **`-32602`** | `Invalid params` | Method parameters could not be parsed or mandatory fields are missing. Schema violations of tool arguments use `-32002`. |
 | **`-32603`** | `Internal error` | Upstream MCP tool crashed or returned malformed output. |
 
 ---
@@ -57,6 +64,6 @@ FaradAiWire also enforces standard JSON-RPC 2.0 specification errors:
 When developing autonomous LLM agents or prompt scaffolding, guide the model's behavior based on error codes:
 
 - **Upon `-32004` (DLP Blocked):** Prompt the LLM: *"Your previous tool call was blocked because it contained credentials. Strip the secret and retry without exposing sensitive data."*
-- **Upon `-32002` (Loop Detected):** Prompt the LLM: *"You are repeating the same tool call without progress. Change your approach or ask the user for clarification."*
-- **Upon `-32005` (HITL Rejected):** Prompt the LLM: *"The human operator refused authorization for this destructive action. Do not attempt to retry this tool."*
+- **Upon `-32008` (Loop Detected):** Prompt the LLM: *"You are repeating the same tool call without progress. Change your approach or ask the user for clarification."*
+- **Upon `-32000` (HITL denied or timed out):** Prompt the LLM: *"The human operator refused authorization for this destructive action. Do not attempt to retry this tool."*
 

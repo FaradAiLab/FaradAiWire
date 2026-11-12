@@ -57,6 +57,7 @@ func printRunUsage(out io.Writer) {
 	fmt.Fprintln(w, "  -standalone\tForce offline-first standalone mode (zero-egress, no cloud auth)")
 	fmt.Fprintln(w, "  -host <host>\tHost address to bind HTTP listeners to (default: 127.0.0.1)")
 	fmt.Fprintln(w, "  -port <port>\tIngress port to listen on (default: 8090)")
+	fmt.Fprintln(w, "  -admin-host <host>\tHost address to bind Admin console listener to (default: 127.0.0.1)")
 	fmt.Fprintln(w, "  -admin-port <port>\tAdmin console port to listen on (default: 8095)")
 	fmt.Fprintln(w, "  -h, --help\tShow help for run command")
 	w.Flush()

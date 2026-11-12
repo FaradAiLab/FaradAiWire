@@ -53,7 +53,7 @@ filters:
     enabled: true
     schemas_dir: "./schemas/"      # Directory for pinned baseline schemas
     dynamic_capture: true          # Intercept tools/list responses to cache schemas
-    baseline_pinning: true         # Alert or block when tools alter schema definitions
+    baseline_pinning: true         # Track a baseline per tool and log schema changes (changes are not blocked)
 
   # Sensitive data loss prevention (PII, credentials, and files)
   dlp:
@@ -75,7 +75,7 @@ filters:
       - name: "email"
         regex: '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z]{2,}\b'
         action: "mask"
-      - name: "tc_kimlik"
+      - name: "tc_kimlik"            # example custom pattern, not a built-in default
         regex: '\b\d{11}\b'
         action: "mask"
 
@@ -98,18 +98,18 @@ filters:
       - "para_transferi"
     approval_mode: "cli"           # "cli" or "webhook"
     webhook_url: ""                # Webhook URL for remote notifications
-    timeout_seconds: 300           # Seconds before approval request times out
+    timeout_seconds: 60            # Seconds before approval request times out
 
   # Infinite loop prevention
   loop_protection:
     enabled: true
-    max_repeat: 3                  # Max consecutive identical calls before blocking
-    window_seconds: 10             # Sliding time window in seconds
+    max_repeat: 3                  # Identical calls allowed per window; the next call is blocked
+    window_seconds: 10             # Sliding time window in seconds (see loop-protection page)
 
   # Token-Bucket Rate Limiter
   rate_limiting:
     enabled: true
-    max_burst: 5                   # Max burst capacity
+    max_burst: 5                   # Bucket capacity per agent and user (see rate-limiting page)
     refill_rate: 1.0               # Replenish rate (tokens/sec)
 
 # Audit Telemetry Log File

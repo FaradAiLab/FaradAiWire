@@ -45,6 +45,7 @@ type Config struct {
 	Telemetry                 TelemetryConfig   `yaml:"telemetry" json:"telemetry"`
 	HotReload                 bool              `yaml:"hot_reload"`
 	PrivateKeyPath            string            `yaml:"private_key_path"`
+	AdminHost                 string            `yaml:"admin_host" json:"admin_host"` // Interface host to bind Admin HTTP server (defaults to 127.0.0.1 per ADR-0028)
 	AdminPort                 int               `yaml:"admin_port"`
 	AdminTLS                  AdminTLSConfig    `yaml:"admin_tls"`
 	UserContext               UserContextConfig `yaml:"user_context"`
@@ -125,6 +126,7 @@ func (c *Config) Clone() *Config {
 		Telemetry:                 c.Telemetry,
 		HotReload:                 c.HotReload,
 		PrivateKeyPath:            c.PrivateKeyPath,
+		AdminHost:                 c.AdminHost,
 		AdminPort:                 c.AdminPort,
 		AdminTLS:                  c.AdminTLS,
 		UserContext:               c.UserContext,
@@ -190,6 +192,29 @@ func (c *Config) GetListenHost() string {
 	}
 	if env := strings.TrimSpace(os.Getenv("LISTEN_HOST")); env != "" {
 		return env
+	}
+	return "127.0.0.1"
+}
+
+// GetAdminHost resolves the host interface address to bind the Admin HTTP server to.
+// Precedence: explicit config.AdminHost (or CLI --admin-host) > FARADAI_WIRE_ADMIN_HOST >
+// (!IsStandalone() -> GetListenHost()) > "127.0.0.1" (preserving ADR-0028 loopback default).
+func (c *Config) GetAdminHost() string {
+	if c != nil {
+		c.mu.RLock()
+		host := strings.TrimSpace(c.AdminHost)
+		c.mu.RUnlock()
+		if host != "" {
+			return host
+		}
+	}
+	if env := strings.TrimSpace(os.Getenv("FARADAI_WIRE_ADMIN_HOST")); env != "" {
+		return env
+	}
+	if c != nil && !c.IsStandalone() {
+		if h := strings.TrimSpace(c.GetListenHost()); h != "" {
+			return h
+		}
 	}
 	return "127.0.0.1"
 }

@@ -107,6 +107,33 @@ func TestAdminServer_StrictLoopbackBinding(t *testing.T) {
 			t.Fatalf("expected managed mode to allow configured host 192.168.1.100:8095, got %s", addr)
 		}
 	})
+
+	t.Run("Explicit AdminHost overrides standalone loopback enforcement", func(t *testing.T) {
+		cfg := &config.Config{
+			AdminPort:   19415,
+			ListenHost:  "127.0.0.1",
+			AdminHost:   "0.0.0.0",
+			RuntimeMode: config.RuntimeModeStandalone,
+		}
+		server := NewAdminServer(cfg, nil, nil)
+		addr := server.ListenAddr()
+		if addr != "0.0.0.0:19415" {
+			t.Fatalf("expected explicit AdminHost 0.0.0.0:19415 in standalone mode, got %s", addr)
+		}
+	})
+
+	t.Run("FARADAI_WIRE_ADMIN_HOST env enables explicit binding in standalone mode", func(t *testing.T) {
+		t.Setenv("FARADAI_WIRE_ADMIN_HOST", "0.0.0.0")
+		cfg := &config.Config{
+			AdminPort:   19415,
+			RuntimeMode: config.RuntimeModeStandalone,
+		}
+		server := NewAdminServer(cfg, nil, nil)
+		addr := server.ListenAddr()
+		if addr != "0.0.0.0:19415" {
+			t.Fatalf("expected FARADAI_WIRE_ADMIN_HOST to bind 0.0.0.0:19415, got %s", addr)
+		}
+	})
 }
 
 func TestAdminServer_MutationGuard_ManagedMode(t *testing.T) {

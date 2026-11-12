@@ -104,21 +104,15 @@ func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			printRunUsage(stdout)
 			return 0
 		}
-		fs := flag.NewFlagSet("run", flag.ContinueOnError)
-		fs.SetOutput(stderr)
-		fs.Usage = func() { printRunUsage(stderr) }
-		cfgPath := fs.String("config", "", "Path to YAML configuration file")
-		standalone := fs.Bool("standalone", false, "Force offline-first standalone mode")
-		host := fs.String("host", "", "Host address to bind HTTP listeners to")
-		port := fs.Int("port", 0, "Ingress port to listen on")
-		adminPort := fs.Int("admin-port", 0, "Admin console port to listen on")
-		if err := fs.Parse(args[1:]); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return 0
-			}
-			return 1
+		opts, showHelp, parseCode := parseRunFlags(args[1:], stderr)
+		if showHelp {
+			printRunUsage(stdout)
+			return 0
 		}
-		executeRun(*cfgPath, *standalone, *host, *port, *adminPort)
+		if parseCode != 0 {
+			return parseCode
+		}
+		executeRun(opts)
 		return 0
 
 	case "adopt":
@@ -318,34 +312,75 @@ func printUsage() {
 	printRootUsage(os.Stdout)
 }
 
-func executeRun(configPath string, standalone bool, host string, port int, adminPort int) {
-	if code := runGatewayDaemon(configPath, standalone, host, port, adminPort); code != 0 {
+type runOptions struct {
+	configPath string
+	standalone bool
+	host       string
+	port       int
+	adminHost  string
+	adminPort  int
+}
+
+func parseRunFlags(args []string, stderr io.Writer) (runOptions, bool, int) {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() { printRunUsage(stderr) }
+	cfgPath := fs.String("config", "", "Path to YAML configuration file")
+	standalone := fs.Bool("standalone", false, "Force offline-first standalone mode")
+	host := fs.String("host", "", "Host address to bind HTTP listeners to")
+	port := fs.Int("port", 0, "Ingress port to listen on")
+	adminHost := fs.String("admin-host", "", "Host address to bind Admin HTTP console listener to")
+	adminPort := fs.Int("admin-port", 0, "Admin console port to listen on")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return runOptions{}, true, 0
+		}
+		return runOptions{}, false, 1
+	}
+	return runOptions{
+		configPath: *cfgPath,
+		standalone: *standalone,
+		host:       *host,
+		port:       *port,
+		adminHost:  *adminHost,
+		adminPort:  *adminPort,
+	}, false, 0
+}
+
+func applyRunOverrides(cfg *config.Config, opts runOptions) {
+	if opts.standalone {
+		cfg.RuntimeMode = config.RuntimeModeStandalone
+	}
+	if strings.TrimSpace(opts.host) != "" {
+		cfg.ListenHost = strings.TrimSpace(opts.host)
+	}
+	if opts.port > 0 {
+		cfg.ListenPort = opts.port
+	}
+	if strings.TrimSpace(opts.adminHost) != "" {
+		cfg.AdminHost = strings.TrimSpace(opts.adminHost)
+	}
+	if opts.adminPort > 0 {
+		cfg.AdminPort = opts.adminPort
+	}
+}
+
+func executeRun(opts runOptions) {
+	if code := runGatewayDaemon(opts); code != 0 {
 		os.Exit(code)
 	}
 }
 
-func runGatewayDaemon(configPath string, standalone bool, host string, port int, adminPort int) int {
+func runGatewayDaemon(opts runOptions) int {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	provider := config.NewYAMLConfigProvider(configPath)
+	provider := config.NewYAMLConfigProvider(opts.configPath)
 	cfg, err := provider.Load()
 	if err != nil {
 		slog.Error("Configuration load failed", slog.String("error", err.Error()))
 		return 1
 	}
 
-	// Apply CLI overrides
-	if standalone {
-		cfg.RuntimeMode = config.RuntimeModeStandalone
-	}
-	if strings.TrimSpace(host) != "" {
-		cfg.ListenHost = strings.TrimSpace(host)
-	}
-	if port > 0 {
-		cfg.ListenPort = port
-	}
-	if adminPort > 0 {
-		cfg.AdminPort = adminPort
-	}
+	applyRunOverrides(cfg, opts)
 
 	if isInteractiveTerminal() {
 		printStartupBanner(cfg, os.Stdout)
@@ -355,6 +390,7 @@ func runGatewayDaemon(configPath string, standalone bool, host string, port int,
 		slog.String("mode", cfg.GetRuntimeMode()),
 		slog.String("host", cfg.GetListenHost()),
 		slog.Int("port", cfg.GetListenPort()),
+		slog.String("admin_host", cfg.GetAdminHost()),
 		slog.Int("admin_port", cfg.GetAdminPort()),
 		slog.String("config_path", cfg.ConfigPath),
 		slog.Bool("zero_egress", cfg.IsStandalone()),
