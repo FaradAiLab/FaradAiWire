@@ -92,6 +92,7 @@ if (Test-Path $InstallDir) {
 
 # 4. Remove FaradAiWire from User PATH while preserving REG_EXPAND_SZ registry value kind
 $NormalizedInstallDir = [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+$RegistryUpdated = $false
 $EnvKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
 if ($EnvKey) {
     try {
@@ -101,23 +102,57 @@ if ($EnvKey) {
             $FilteredEntries = $UserPath -split ';' | Where-Object {
                 $entry = $_.Trim()
                 if (-not $entry) { return $false }
-                $expanded = [System.Environment]::ExpandEnvironmentVariables($entry).TrimEnd('\')
-                ($entry.TrimEnd('\') -ine $NormalizedInstallDir) -and ($expanded -ine $NormalizedInstallDir)
+                $unquoted = $entry.Trim('"').TrimEnd('\')
+                $expanded = [System.Environment]::ExpandEnvironmentVariables($unquoted).TrimEnd('\')
+                ($unquoted -ine $NormalizedInstallDir) -and ($expanded -ine $NormalizedInstallDir)
             }
             $NewUserPath = $FilteredEntries -join ';'
             if ($NewUserPath -ne $UserPath) {
                 Write-Host "🔧 Removing FaradAiWire from User PATH..." -ForegroundColor Yellow
                 $EnvKey.SetValue("Path", $NewUserPath, $ValueKind)
+                $RegistryUpdated = $true
             }
         }
     } finally {
         $EnvKey.Dispose()
     }
 }
+if ($RegistryUpdated) {
+    try {
+        $FullTypeName = "Win32.FaradAiWireNativeEnv"
+        if (-not ($FullTypeName -as [type])) {
+            Add-Type -Namespace Win32 -Name FaradAiWireNativeEnv -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+public static extern System.IntPtr SendMessageTimeout(
+    System.IntPtr hWnd,
+    uint Msg,
+    System.UIntPtr wParam,
+    string lParam,
+    uint fuFlags,
+    uint uTimeout,
+    out System.UIntPtr lpdwResult
+);
+'@
+        }
+        $result = [System.UIntPtr]::Zero
+        $null = [Win32.FaradAiWireNativeEnv]::SendMessageTimeout(
+            [System.IntPtr]0xffff,
+            0x001A,
+            [System.UIntPtr]::Zero,
+            "Environment",
+            0x0002,
+            1000,
+            [ref]$result
+        )
+    } catch {
+        # Best-effort broadcast only
+    }
+}
 if ($env:Path) {
     $env:Path = ($env:Path -split ';' | Where-Object {
         $entry = $_.Trim()
-        $entry -and ($entry.TrimEnd('\') -ine $NormalizedInstallDir)
+        $unquoted = $entry.Trim('"').TrimEnd('\')
+        $entry -and ($unquoted -ine $NormalizedInstallDir)
     }) -join ';'
 }
 

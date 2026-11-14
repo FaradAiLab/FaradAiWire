@@ -24,7 +24,7 @@ class Faradaiwire < Formula
 
   # macOS Background Daemon Service (launchd)
   service do
-    run [opt_bin/"faradaiwire"]
+    run [opt_bin/"faradaiwire", "run"]
     keep_alive true
     log_path var/"log/faradaiwire.log"
     error_log_path var/"log/faradaiwire.error.log"

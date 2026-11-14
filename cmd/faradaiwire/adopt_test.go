@@ -653,3 +653,106 @@ func TestResolveAdoptProbeTimeout_ReadsChunkedSettingsResponse(t *testing.T) {
 		t.Fatalf("expected 12s from chunked /admin/settings response, got %v", got)
 	}
 }
+
+func TestResolveAdminEndpointHost_UsesAdminHost(t *testing.T) {
+	t.Setenv("FARADAI_WIRE_ADMIN_HOST", "")
+
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		want string
+	}{
+		{
+			name: "nil config defaults to loopback",
+			cfg:  nil,
+			want: "127.0.0.1",
+		},
+		{
+			name: "standalone ignores public listen host and uses admin host",
+			cfg: &config.Config{
+				RuntimeMode: config.RuntimeModeStandalone,
+				ListenHost:  "0.0.0.0",
+				AdminHost:   "127.0.0.2",
+			},
+			want: "127.0.0.2",
+		},
+		{
+			name: "standalone forces non-loopback admin host back to loopback",
+			cfg: &config.Config{
+				RuntimeMode: config.RuntimeModeStandalone,
+				ListenHost:  "127.0.0.1",
+				AdminHost:   "192.168.1.50",
+			},
+			want: "127.0.0.1",
+		},
+		{
+			name: "managed mode uses configured admin host",
+			cfg: &config.Config{
+				RuntimeMode: config.RuntimeModeManaged,
+				ListenHost:  "0.0.0.0",
+				AdminHost:   "10.0.0.5",
+			},
+			want: "10.0.0.5",
+		},
+		{
+			name: "wildcard admin host normalizes to loopback",
+			cfg: &config.Config{
+				RuntimeMode: config.RuntimeModeManaged,
+				ListenHost:  "10.0.0.9",
+				AdminHost:   "0.0.0.0",
+			},
+			want: "127.0.0.1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveAdminEndpointHost(tc.cfg); got != tc.want {
+				t.Fatalf("resolveAdminEndpointHost() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAttachAdminBearerAuth(t *testing.T) {
+	tests := []struct {
+		name        string
+		adminAPIKey string
+		adminToken  string
+		rawURL      string
+		wantHeader  string
+	}{
+		{
+			name:       "fallback token attached on loopback HTTP",
+			adminToken: "fallback-token",
+			rawURL:     "http://127.0.0.1:8095/admin/settings",
+			wantHeader: "Bearer fallback-token",
+		},
+		{
+			name:        "refuses cleartext token over remote HTTP even if token set",
+			adminAPIKey: "primary-key",
+			rawURL:      "http://10.0.0.5:8095/admin/settings",
+			wantHeader:  "",
+		},
+		{
+			name:        "allows token over remote HTTPS and prefers ADMIN_API_KEY",
+			adminAPIKey: "primary-key",
+			adminToken:  "fallback-token",
+			rawURL:      "https://10.0.0.5:8095/admin/settings",
+			wantHeader:  "Bearer primary-key",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ADMIN_API_KEY", tc.adminAPIKey)
+			t.Setenv("FARADAI_WIRE_ADMIN_TOKEN", tc.adminToken)
+
+			req := httptest.NewRequest(http.MethodGet, tc.rawURL, nil)
+			attachAdminBearerAuth(req)
+			if got := req.Header.Get("Authorization"); got != tc.wantHeader {
+				t.Fatalf("Authorization = %q, want %q", got, tc.wantHeader)
+			}
+		})
+	}
+}

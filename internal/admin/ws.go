@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 )
@@ -22,9 +21,44 @@ const (
 
 // wsClient represents an active RFC 6455 WebSocket client connection.
 type wsClient struct {
-	conn net.Conn
-	send chan []byte
-	hub  *WSHub
+	conn      net.Conn
+	send      chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
+	hub       *WSHub
+}
+
+func (c *wsClient) trySend(frame []byte) bool {
+	if c == nil || c.send == nil {
+		return false
+	}
+	if c.done == nil {
+		select {
+		case c.send <- frame:
+			return true
+		default:
+			return false
+		}
+	}
+	select {
+	case <-c.done:
+		return false
+	case c.send <- frame:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *wsClient) close() {
+	c.closeOnce.Do(func() {
+		if c.done != nil {
+			close(c.done)
+		}
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+	})
 }
 
 // WSHub manages active WebSocket client connections and event broadcasting.
@@ -67,40 +101,12 @@ func (h *WSHub) isOriginAllowed(origin string, reqHost string) bool {
 	allowed := h.allowedOrigins
 	h.mu.RUnlock()
 
-	for _, a := range allowed {
-		if a == "*" || strings.EqualFold(a, origin) {
-			return true
-		}
-	}
-
-	u, err := url.Parse(origin)
-	if err != nil {
-		return false
-	}
-
-	// Direct match with request host (e.g. Origin: "http://localhost:8095", Host: "localhost:8095")
-	if strings.EqualFold(u.Host, reqHost) {
+	if isExplicitlyAllowedOrigin(origin, allowed) {
 		return true
 	}
 
-	// Loopback origin matching (localhost, 127.0.0.1, ::1)
-	reqHostname, reqPort, err := net.SplitHostPort(reqHost)
-	if err != nil {
-		reqHostname = reqHost
-	}
-	originHostname := u.Hostname()
-	originPort := u.Port()
-
-	isReqLoopback := reqHostname == "localhost" || reqHostname == "127.0.0.1" || reqHostname == "::1"
-	isOriginLoopback := originHostname == "localhost" || originHostname == "127.0.0.1" || originHostname == "::1"
-
-	if isReqLoopback && isOriginLoopback {
-		if reqPort == originPort {
-			return true
-		}
-	}
-
-	return false
+	// Only accept browser same-host origins automatically when both Origin and Host resolve to loopback.
+	return isLoopbackSameHostOrigin(origin, reqHost)
 }
 
 // SetOnMessage binds a hook called whenever a client sends a text message.
@@ -131,10 +137,8 @@ func (h *WSHub) Broadcast(event interface{}) {
 	defer h.mu.RUnlock()
 
 	for client := range h.clients {
-		select {
-		case client.send <- frame:
-		default:
-			// Client send channel full: drop frame to prevent slow client blocking
+		if !client.trySend(frame) {
+			// Client closed or send channel full: drop frame to prevent slow client blocking
 			slog.Warn("WebSocket client buffer full, dropping frame")
 		}
 	}
@@ -158,10 +162,7 @@ func (h *WSHub) SendDirect(client *wsClient, event interface{}) {
 		return
 	}
 
-	select {
-	case client.send <- frame:
-	default:
-	}
+	client.trySend(frame)
 }
 
 func (h *WSHub) register(c *wsClient) {
@@ -176,13 +177,13 @@ func (h *WSHub) register(c *wsClient) {
 }
 
 func (h *WSHub) unregister(c *wsClient) {
-	h.mu.Lock()
-	if _, exists := h.clients[c]; exists {
-		delete(h.clients, c)
-		close(c.send)
+	if c == nil {
+		return
 	}
+	h.mu.Lock()
+	delete(h.clients, c)
 	h.mu.Unlock()
-	_ = c.conn.Close()
+	c.close()
 }
 
 // encodeTextFrame creates an RFC 6455 unmasked text frame (server-to-client).
@@ -280,6 +281,7 @@ func (h *WSHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	client := &wsClient{
 		conn: conn,
 		send: make(chan []byte, 64),
+		done: make(chan struct{}),
 		hub:  h,
 	}
 
@@ -288,9 +290,14 @@ func (h *WSHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Writer loop
 	go func() {
 		defer h.unregister(client)
-		for msg := range client.send {
-			if _, err := conn.Write(msg); err != nil {
+		for {
+			select {
+			case <-client.done:
 				return
+			case msg := <-client.send:
+				if _, err := conn.Write(msg); err != nil {
+					return
+				}
 			}
 		}
 	}()
@@ -306,10 +313,7 @@ func (h *WSHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if opcode == 0x9 { // Ping frame -> respond with Pong
-			select {
-			case client.send <- encodePongFrame(payload):
-			default:
-			}
+			client.trySend(encodePongFrame(payload))
 			continue
 		}
 		if opcode == 0x1 && len(payload) > 0 { // Text frame

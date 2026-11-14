@@ -74,6 +74,7 @@ type UpstreamSession struct {
 	lastDialStatusCode int
 	settingsCache      *settings.Cache
 	mu                 sync.RWMutex
+	writeMu            sync.Mutex // serializes stdin writes without blocking Close() on mu
 	closeOnce          sync.Once
 
 	// Local stdio subprocess fields
@@ -213,15 +214,8 @@ func (u *UpstreamSession) CallTool(ctx context.Context, req *mcp.Request) (*mcp.
 		}
 	}
 
-	u.mu.Lock()
-	if u.stdin == nil {
-		u.mu.Unlock()
-		return nil, ErrSubprocessTerminated
-	}
-	_, err = stdin.Write(append(reqBytes, '\n'))
-	u.mu.Unlock()
-	if err != nil {
-		return nil, fmt.Errorf("%w: failed to write to stdio subprocess: %v", ErrSubprocessTerminated, err)
+	if err := u.writeStdinLine(reqBytes); err != nil {
+		return nil, err
 	}
 
 	select {
@@ -391,17 +385,27 @@ func (u *UpstreamSession) SendNotification(data []byte) error {
 		return fmt.Errorf("stdio protocol '%s' is not ready (status: %s)", u.ProtocolName, status)
 	}
 
-	u.mu.Lock()
-	defer u.mu.Unlock()
+	return u.writeStdinLine(data)
+}
 
-	if u.stdin == nil {
+func (u *UpstreamSession) writeStdinLine(payload []byte) error {
+	u.writeMu.Lock()
+	defer u.writeMu.Unlock()
+
+	u.mu.RLock()
+	stdin := u.stdin
+	status := u.Status
+	u.mu.RUnlock()
+	if stdin == nil || status == "CLOSED" {
 		return ErrSubprocessTerminated
 	}
 
-	if _, err := u.stdin.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("%w: %v", ErrSubprocessTerminated, err)
+	line := make([]byte, len(payload)+1)
+	copy(line, payload)
+	line[len(payload)] = '\n'
+	if _, err := stdin.Write(line); err != nil {
+		return fmt.Errorf("%w: failed to write to stdio subprocess: %w", ErrSubprocessTerminated, err)
 	}
-
 	return nil
 }
 

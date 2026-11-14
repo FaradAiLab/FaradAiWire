@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1098,5 +1099,72 @@ func TestHTTPDialer_UpstreamHeaderStripping_NoToken(t *testing.T) {
 	}
 	if v := hdrs.Get("Cookie"); v != "" {
 		t.Errorf("expected Cookie to be stripped, got %q", v)
+	}
+}
+
+type blockingWriteCloser struct {
+	writing chan struct{}
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingWriteCloser) Write(p []byte) (int, error) {
+	select {
+	case b.writing <- struct{}{}:
+	default:
+	}
+	<-b.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (b *blockingWriteCloser) Close() error {
+	b.once.Do(func() {
+		close(b.closed)
+	})
+	return nil
+}
+
+func TestUpstreamSession_CloseDoesNotDeadlockOnBlockedStdin(t *testing.T) {
+	bwc := &blockingWriteCloser{
+		writing: make(chan struct{}, 1),
+		closed:  make(chan struct{}),
+	}
+	sess := &UpstreamSession{
+		ProtocolName: "blocked-stdin-test",
+		Type:         "stdio",
+		Status:       "READY",
+		stdin:        bwc,
+	}
+
+	writeErrCh := make(chan error, 1)
+	go func() {
+		writeErrCh <- sess.SendNotification([]byte(`{"jsonrpc":"2.0","method":"notify"}`))
+	}()
+
+	select {
+	case <-bwc.writing:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for SendNotification to enter stdin.Write")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		sess.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("UpstreamSession.Close deadlocked while stdin.Write was blocked")
+	}
+
+	select {
+	case err := <-writeErrCh:
+		if !errors.Is(err, ErrSubprocessTerminated) {
+			t.Fatalf("expected ErrSubprocessTerminated after Close, got %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("SendNotification did not unblock after Close closed stdin")
 	}
 }

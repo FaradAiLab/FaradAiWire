@@ -101,7 +101,7 @@ func SecurityHeaders(cfg SecurityHeadersConfig) func(http.Handler) http.Handler 
 
 			// 3. Handle Preflight OPTIONS requests
 			if r.Method == http.MethodOptions {
-				if origin != "" && !originAllowed && len(allowedMap) > 0 {
+				if origin != "" && !originAllowed && !allowAllOrigins {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}

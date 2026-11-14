@@ -14,8 +14,13 @@ class Faradaiwire < Formula
   end
 
   on_linux do
-    url "https://github.com/FaradAiLab/FaradAiWire/releases/download/v#{version}/faradaiwire_#{version}_linux_amd64.tar.gz"
-    sha256 "{{LINUX_AMD64_SHA}}"
+    if Hardware::CPU.arm?
+      url "https://github.com/FaradAiLab/FaradAiWire/releases/download/v#{version}/faradaiwire_#{version}_linux_arm64.tar.gz"
+      sha256 "{{LINUX_ARM64_SHA}}"
+    else
+      url "https://github.com/FaradAiLab/FaradAiWire/releases/download/v#{version}/faradaiwire_#{version}_linux_amd64.tar.gz"
+      sha256 "{{LINUX_AMD64_SHA}}"
+    end
   end
 
   def install
@@ -24,7 +29,7 @@ class Faradaiwire < Formula
 
   # macOS Background Daemon Service (launchd)
   service do
-    run [opt_bin/"faradaiwire"]
+    run [opt_bin/"faradaiwire", "run"]
     keep_alive true
     log_path var/"log/faradaiwire.log"
     error_log_path var/"log/faradaiwire.error.log"

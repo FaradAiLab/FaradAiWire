@@ -6,13 +6,18 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
+	"github.com/FaradAiLab/FaradAiWire/internal/session"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
@@ -458,5 +463,105 @@ func TestStdioProxy_SubprocessCrash_AutoRestart(t *testing.T) {
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatalf("StdioProxy did not terminate on Stop()")
+	}
+}
+
+type blockingDialer struct {
+	dialStarted chan struct{}
+	releaseDial chan struct{}
+	inner       session.Dialer
+	dialCount   atomic.Int32
+	sessMu      sync.Mutex
+	lastSess    *session.UpstreamSession
+	startOnce   sync.Once
+}
+
+func (d *blockingDialer) Dial(ctx context.Context, proto agent.ProtocolConfig, eventCh chan<- session.SSEEvent, clientSessionID string, headers http.Header) *session.UpstreamSession {
+	d.dialCount.Add(1)
+	d.startOnce.Do(func() {
+		close(d.dialStarted)
+	})
+	<-d.releaseDial
+	sess := d.inner.Dial(ctx, proto, eventCh, clientSessionID, headers)
+	d.sessMu.Lock()
+	d.lastSess = sess
+	d.sessMu.Unlock()
+	return sess
+}
+
+func TestStdioProxy_StopDuringDial(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	_, outWriter := io.Pipe()
+	t.Cleanup(func() {
+		_ = inWriter.Close()
+		_ = outWriter.Close()
+	})
+
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Setenv("MOCK_MODE", "normal")
+
+	dialer := &blockingDialer{
+		dialStarted: make(chan struct{}),
+		releaseDial: make(chan struct{}),
+		inner:       session.NewStdioDialer(),
+	}
+
+	p := NewStdioProxyWithIO(
+		os.Args[0],
+		[]string{"-test.run=TestHelperProcess", "--"},
+		true,
+		nil,
+		config.UserContextConfig{},
+		inReader,
+		outWriter,
+		dialer,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	startErrCh := make(chan error, 1)
+	go func() {
+		startErrCh <- p.Start(ctx)
+	}()
+
+	select {
+	case <-dialer.dialStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for Dial to start")
+	}
+
+	// Stop arrives while Dial is in-flight (currSession is still nil).
+	p.Stop()
+	close(dialer.releaseDial)
+
+	select {
+	case err := <-startErrCh:
+		if err != nil {
+			t.Fatalf("expected clean exit when Stop occurred during Dial, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("StdioProxy looped or hung after Stop() during Dial()")
+	}
+
+	if got := dialer.dialCount.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 Dial attempt after Stop during Dial, got %d", got)
+	}
+
+	dialer.sessMu.Lock()
+	sess := dialer.lastSess
+	dialer.sessMu.Unlock()
+	if sess == nil {
+		t.Fatalf("expected blockingDialer to capture dialed session")
+	}
+	if sess.IsHealthy() {
+		t.Fatalf("expected dialed session to be closed immediately after Stop()")
+	}
+	if ch := sess.ProcExitCh(); ch != nil {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("expected spawned subprocess to exit when session closed after Stop()")
+		}
 	}
 }

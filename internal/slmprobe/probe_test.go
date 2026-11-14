@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -257,5 +259,45 @@ func TestProbe_PromptGuardPrecedence(t *testing.T) {
 	}
 	if res.ModelName != "prompt-guard-v2" {
 		t.Errorf("expected ModelName=prompt-guard-v2, got %s", res.ModelName)
+	}
+}
+
+func TestDefaultProber_BlocksIMDSAndUnsafeRedirects(t *testing.T) {
+	prober := NewProber(WithTimeout(250 * time.Millisecond))
+
+	tests := []struct {
+		name      string
+		targetURL string
+	}{
+		{
+			name:      "cloud metadata 169.254.169.254 redirect blocked",
+			targetURL: "http://169.254.169.254/latest/meta-data/",
+		},
+		{
+			name:      "AWS ECS link-local metadata 169.254.170.2 redirect blocked",
+			targetURL: "http://169.254.170.2/v2/credentials",
+		},
+		{
+			name:      "IPv6 link-local fe80::1 redirect blocked",
+			targetURL: "http://[fe80::1]:8080/health",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			redirSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, tc.targetURL, http.StatusFound)
+			}))
+			defer redirSrv.Close()
+
+			resp, err := prober.client.Get(redirSrv.URL)
+			if err == nil {
+				resp.Body.Close()
+				t.Fatalf("expected redirect to %s to be blocked", tc.targetURL)
+			}
+			if !strings.Contains(err.Error(), "metadata") && !strings.Contains(err.Error(), "SSRF") && !strings.Contains(err.Error(), "link-local") {
+				t.Fatalf("expected SSRF/metadata/link-local error, got: %v", err)
+			}
+		})
 	}
 }

@@ -130,19 +130,53 @@ func resolveAdoptProbeTimeout(explicit time.Duration, cfg *config.Config, dbPath
 	return fallback
 }
 
+func resolveAdminEndpointHost(cfg *config.Config) string {
+	if cfg == nil {
+		return "127.0.0.1"
+	}
+	host := normalizeGatewayHost(cfg.GetAdminHost())
+	if cfg.IsStandalone() && !isLoopbackHost(host) {
+		return "127.0.0.1"
+	}
+	return host
+}
+
+func adminScheme(cfg *config.Config) string {
+	if cfg != nil && cfg.AdminTLS.Enabled {
+		return "https"
+	}
+	return "http"
+}
+
+func resolveAdminBearerToken() string {
+	for _, envVar := range []string{"ADMIN_API_KEY", "FARADAI_WIRE_ADMIN_TOKEN"} {
+		if tok := strings.TrimSpace(os.Getenv(envVar)); tok != "" {
+			return tok
+		}
+	}
+	return ""
+}
+
+// attachAdminBearerAuth attaches the configured admin Bearer token to req only when
+// req targets a loopback host or uses an encrypted https:// scheme.
+func attachAdminBearerAuth(req *http.Request) {
+	if req == nil || req.URL == nil {
+		return
+	}
+	useTLS := strings.EqualFold(req.URL.Scheme, "https")
+	host := req.URL.Hostname()
+	if adminKey := resolveAdminBearerToken(); adminKey != "" && (isLoopbackHost(host) || useTLS) {
+		req.Header.Set("Authorization", "Bearer "+adminKey)
+	}
+}
+
 func queryAdminProbeTimeout(cfg *config.Config) (time.Duration, bool) {
 	if cfg == nil {
 		return 0, false
 	}
-	host := normalizeGatewayHost(cfg.GetListenHost())
-	if cfg.IsStandalone() || host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
-	}
+	host := resolveAdminEndpointHost(cfg)
 	adminPort := cfg.GetAdminPort()
-	scheme := "http"
-	if cfg.AdminTLS.Enabled {
-		scheme = "https"
-	}
+	scheme := adminScheme(cfg)
 	settingsURL := fmt.Sprintf("%s://%s/admin/settings", scheme, net.JoinHostPort(host, strconv.Itoa(adminPort)))
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
@@ -151,9 +185,7 @@ func queryAdminProbeTimeout(cfg *config.Config) (time.Duration, bool) {
 	if err != nil {
 		return 0, false
 	}
-	if adminKey := strings.TrimSpace(os.Getenv("ADMIN_API_KEY")); adminKey != "" && (isLoopbackHost(host) || scheme == "https") {
-		req.Header.Set("Authorization", "Bearer "+adminKey)
-	}
+	attachAdminBearerAuth(req)
 	resp, reqErr := adoptAdminHTTPClient.Do(req)
 	if reqErr != nil || resp == nil {
 		return 0, false

@@ -145,6 +145,12 @@ func IsSafeIP(ip net.IP, opts SafeTransportOptions) error {
 		return nil
 	}
 
+	// Link-Local addresses (169.254.0.0/16 including AWS ECS 169.254.170.2, and fe80::/10)
+	// are blocked whenever SSRF protection is enabled, even if private LAN/loopback IPs are allowed.
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return fmt.Errorf("%w (%s)", ErrLinkLocalBlocked, ip.String())
+	}
+
 	if !opts.BlockPrivateIPs {
 		return nil
 	}
@@ -162,12 +168,7 @@ func IsSafeIP(ip net.IP, opts SafeTransportOptions) error {
 		return fmt.Errorf("%w: multicast IP (%s)", ErrSSRFBlocked, ip.String())
 	}
 
-	// 4. Link-Local addresses
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return fmt.Errorf("%w (%s)", ErrLinkLocalBlocked, ip.String())
-	}
-
-	// 5. RFC 1918 & IPv6 ULA Private IP ranges
+	// 4. RFC 1918 & IPv6 ULA Private IP ranges
 	if ip.IsPrivate() {
 		return fmt.Errorf("%w (%s)", ErrPrivateIPBlocked, ip.String())
 	}

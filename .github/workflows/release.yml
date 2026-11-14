@@ -34,6 +34,10 @@ jobs:
             arch: amd64
             runner: ubuntu-latest
             binary_name: faradaiwire
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            binary_name: faradaiwire
           - os: windows
             arch: amd64
             runner: windows-latest
@@ -47,14 +51,26 @@ jobs:
 
       - name: Resolve Version Information
         shell: bash
+        env:
+          RAW_INPUT_VER: ${{ github.event.inputs.version || github.ref_name }}
         run: |
-          RAW_VER="${{ github.event.inputs.version || github.ref_name }}"
+          RAW_VER="${RAW_INPUT_VER}"
+          case "$RAW_VER" in
+            *$'\n'*|*$'\r'*)
+              echo "Invalid release version: contains newline" >&2
+              exit 1
+              ;;
+          esac
           if [ -z "$RAW_VER" ] || [ "$RAW_VER" = "main" ] || [ "$RAW_VER" = "master" ]; then
             RAW_VER="v1.0.0"
           fi
-          echo "RELEASE_VERSION=${RAW_VER}" >> $GITHUB_ENV
+          if [[ ! "$RAW_VER" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release version format: $RAW_VER" >&2
+            exit 1
+          fi
+          echo "RELEASE_VERSION=${RAW_VER}" >> "$GITHUB_ENV"
           CLEAN_VER="${RAW_VER#v}"
-          echo "CLEAN_VERSION=${CLEAN_VER}" >> $GITHUB_ENV
+          echo "CLEAN_VERSION=${CLEAN_VER}" >> "$GITHUB_ENV"
 
       - name: Setup Node.js (Web UI build)
         uses: actions/setup-node@v4
@@ -86,11 +102,12 @@ jobs:
           fi
 
       - name: Compile Native Binary with CGO
+        shell: bash
         env:
           CGO_ENABLED: '1'
         run: |
           mkdir -p dist
-          go build -v -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" -o dist/${{ matrix.binary_name }} ./cmd/faradaiwire
+          go build -v -ldflags="-s -w -X main.version=$RELEASE_VERSION" -o dist/${{ matrix.binary_name }} ./cmd/faradaiwire
 
       - name: Package Unix Archive (.tar.gz)
         if: matrix.os != 'windows'
@@ -122,12 +139,25 @@ jobs:
 
       - name: Resolve Release Metadata
         id: release_meta
+        shell: bash
+        env:
+          RAW_INPUT_VER: ${{ github.event.inputs.version || github.ref_name }}
         run: |
-          RAW_VER="${{ github.event.inputs.version || github.ref_name }}"
+          RAW_VER="${RAW_INPUT_VER}"
+          case "$RAW_VER" in
+            *$'\n'*|*$'\r'*)
+              echo "Invalid release version: contains newline" >&2
+              exit 1
+              ;;
+          esac
           if [ -z "$RAW_VER" ] || [ "$RAW_VER" = "main" ] || [ "$RAW_VER" = "master" ]; then
             RAW_VER="v1.0.0"
           fi
-          echo "version=${RAW_VER}" >> $GITHUB_OUTPUT
+          if [[ ! "$RAW_VER" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release version format: $RAW_VER" >&2
+            exit 1
+          fi
+          echo "version=${RAW_VER}" >> "$GITHUB_OUTPUT"
 
       - name: Download Built Artifacts
         uses: actions/download-artifact@v4
@@ -143,20 +173,23 @@ jobs:
           cat checksums.txt
 
       - name: Render Homebrew Formula & Cask
+        env:
+          RAW_VER: ${{ steps.release_meta.outputs.version }}
         run: |
-          RAW_VER="${{ steps.release_meta.outputs.version }}"
           CLEAN_VER="${RAW_VER#v}"
 
           cd release_assets
           ARM64_SHA=$(grep '_darwin_arm64\.tar\.gz$' checksums.txt | awk '{print $1}')
           AMD64_SHA=$(grep '_darwin_amd64\.tar\.gz$' checksums.txt | awk '{print $1}')
           LINUX_SHA=$(grep '_linux_amd64\.tar\.gz$' checksums.txt | awk '{print $1}')
+          LINUX_ARM64_SHA=$(grep '_linux_arm64\.tar\.gz$' checksums.txt | awk '{print $1}')
 
           if [ -f ../deploy/homebrew/faradaiwire.rb.tmpl ]; then
             sed -e "s/{{VERSION}}/${CLEAN_VER}/g" \
                 -e "s/{{DARWIN_ARM64_SHA}}/${ARM64_SHA}/g" \
                 -e "s/{{DARWIN_AMD64_SHA}}/${AMD64_SHA}/g" \
                 -e "s/{{LINUX_AMD64_SHA}}/${LINUX_SHA}/g" \
+                -e "s/{{LINUX_ARM64_SHA}}/${LINUX_ARM64_SHA}/g" \
                 ../deploy/homebrew/faradaiwire.rb.tmpl > faradaiwire.rb
             echo "Generated Homebrew Formula:"
             cat faradaiwire.rb
@@ -185,6 +218,7 @@ jobs:
       - name: Publish to Homebrew Tap
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.version }}
         run: |
           if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
             echo "⚠️ HOMEBREW_TAP_TOKEN secret is not set. Skipping automatic push to FaradAiLab/homebrew-tap."
@@ -214,7 +248,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "Formula & Cask are already up to date."
           else
-            git commit -m "feat(formula): bump faradaiwire to ${{ steps.release_meta.outputs.version }}"
+            git commit -m "feat(formula): bump faradaiwire to ${RELEASE_TAG}"
             git push origin main
             echo "🎉 Successfully published formula to FaradAiLab/homebrew-tap!"
           fi

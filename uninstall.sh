@@ -153,6 +153,28 @@ if [ "$REMOVED_BIN" = "0" ]; then
     echo "ℹ️  No installed $BINARY_NAME binary found in standard locations."
 fi
 
+# 5b. Remove FaradAiWire PATH block from shell startup files if added by install.sh
+remove_path_from_rc() {
+    rc_file="$1"
+    [ -f "$rc_file" ] || return 0
+    grep -q '# >>> FaradAiWire PATH >>>' "$rc_file" 2>/dev/null || return 0
+
+    tmp_rc=$(mktemp)
+    awk '
+        /# >>> FaradAiWire PATH >>>/ { skip=1; next }
+        /# <<< FaradAiWire PATH <<</ { skip=0; next }
+        !skip { print }
+    ' "$rc_file" > "$tmp_rc"
+    # Preserve target file inode/permissions even if symlinked
+    cat "$tmp_rc" > "$rc_file"
+    rm -f "$tmp_rc"
+    echo "🔧 Removed FaradAiWire PATH entry from $rc_file"
+}
+
+for rc_candidate in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+    remove_path_from_rc "$rc_candidate"
+done
+
 # 6. Optionally remove runtime data & analytics
 if [ "$PURGE" = "1" ] || [ "$PURGE" = "true" ]; then
     if [ -d "$DATA_DIR" ]; then

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/slmprobe"
 	"github.com/FaradAiLab/FaradAiWire/web"
 )
@@ -178,7 +179,7 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // validateSLMURL enforces pragmatic standalone security guardrails (ADR 0027):
@@ -298,7 +299,7 @@ func (a *AdminServer) handleSLMProbe(w http.ResponseWriter, r *http.Request) {
 				ModelName:        modelName,
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(probeRes)
+			_ = json.NewEncoder(w).Encode(probeRes)
 			return
 		}
 	}
@@ -307,9 +308,10 @@ func (a *AdminServer) handleSLMProbe(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	probeRes := slmprobe.Probe(ctx, classifierURL)
+	probeRes.ConfiguredURL = redactURLCredentials(probeRes.ConfiguredURL)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(probeRes)
+	_ = json.NewEncoder(w).Encode(probeRes)
 }
 
 func (a *AdminServer) handleSLMConfigure(w http.ResponseWriter, r *http.Request) {
@@ -337,50 +339,96 @@ func (a *AdminServer) handleSLMConfigure(w http.ResponseWriter, r *http.Request)
 		targetURL = strings.TrimSpace(req.CustomURL)
 	}
 
-	if targetURL != "" {
-		if err := validateSLMURL(targetURL); err != nil {
-			http.Error(w, "Invalid classifier URL: "+err.Error(), http.StatusBadRequest)
-			return
+	for _, field := range []struct {
+		label string
+		raw   string
+	}{
+		{"classifier URL", targetURL},
+		{"ollama URL", strings.TrimSpace(req.OllamaURL)},
+		{"docker URL", strings.TrimSpace(req.DockerURL)},
+		{"custom URL", strings.TrimSpace(req.CustomURL)},
+	} {
+		if field.raw != "" {
+			if err := validateSLMURL(field.raw); err != nil {
+				http.Error(w, "Invalid "+field.label+": "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 	}
 
-	a.mu.Lock()
-	if a.cfg != nil {
+	a.configMutMu.Lock()
+	defer a.configMutMu.Unlock()
+
+	applySLMMutation := func(cfg *config.Config) {
 		if req.Mode != "" {
-			a.cfg.Filters.Guard.Discovery.Mode = req.Mode
+			cfg.Filters.Guard.Discovery.Mode = req.Mode
 		}
 		if req.OllamaURL != "" {
-			a.cfg.Filters.Guard.Discovery.OllamaURL = req.OllamaURL
+			cfg.Filters.Guard.Discovery.OllamaURL = strings.TrimSpace(req.OllamaURL)
 		}
 		if req.DockerURL != "" {
-			a.cfg.Filters.Guard.Discovery.DockerURL = req.DockerURL
+			cfg.Filters.Guard.Discovery.DockerURL = strings.TrimSpace(req.DockerURL)
 		}
 		if req.CustomURL != "" {
-			a.cfg.Filters.Guard.Discovery.CustomURL = req.CustomURL
+			cfg.Filters.Guard.Discovery.CustomURL = strings.TrimSpace(req.CustomURL)
 		}
 		if targetURL != "" {
-			a.cfg.Filters.InjectionScanner.ClassifierURL = targetURL
+			cfg.Filters.InjectionScanner.ClassifierURL = targetURL
 		}
 		if req.Enabled != nil {
-			a.cfg.Filters.InjectionScanner.Enabled = *req.Enabled
-			a.cfg.Filters.Guard.Enabled = *req.Enabled
+			cfg.Filters.InjectionScanner.Enabled = *req.Enabled
+			cfg.Filters.Guard.Enabled = *req.Enabled
 		} else if targetURL != "" {
-			a.cfg.Filters.InjectionScanner.Enabled = true
-		}
-		if a.cfgProvider != nil {
-			_ = a.cfgProvider.Save(a.cfg)
+			cfg.Filters.InjectionScanner.Enabled = true
+			cfg.Filters.Guard.Enabled = true
 		}
 	}
-	a.mu.Unlock()
 
-	if a.reloadFunc != nil {
-		_ = a.reloadFunc()
+	a.mu.RLock()
+	origCfg := a.cfg
+	cfgProvider := a.cfgProvider
+	reloadCfgFn := a.reloadConfigFunc
+	reloadFn := a.reloadFunc
+	var nextCfg *config.Config
+	if origCfg != nil {
+		nextCfg = origCfg.Clone()
+	}
+	a.mu.RUnlock()
+
+	if nextCfg != nil {
+		applySLMMutation(nextCfg)
+	}
+
+	if reloadCfgFn == nil && reloadFn != nil && nextCfg != nil && cfgProvider != nil {
+		if err := cfgProvider.Save(nextCfg); err != nil {
+			http.Error(w, "Failed to save configuration: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := a.applyConfigReload(nextCfg); err != nil {
+			_ = cfgProvider.Save(origCfg)
+			http.Error(w, "Failed to reload configuration: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		if err := a.applyConfigReload(nextCfg); err != nil {
+			http.Error(w, "Failed to reload configuration: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if nextCfg != nil && cfgProvider != nil {
+			if err := cfgProvider.Save(nextCfg); err != nil {
+				if origCfg != nil {
+					_ = a.applyConfigReload(origCfg)
+				}
+				http.Error(w, "Failed to save configuration: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":         "success",
-		"classifier_url": targetURL,
+		"classifier_url": redactURLCredentials(targetURL),
 		"mode":           req.Mode,
 		"message":        "SLM configuration successfully updated",
 	})

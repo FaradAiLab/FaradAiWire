@@ -181,12 +181,35 @@ func (s *StdioProxy) runOnce(ctx context.Context, linesCh <-chan []byte) error {
 	eventCh := make(chan session.SSEEvent, 128)
 	upSess := s.dialer.Dial(ctx, proto, eventCh, "stdio-proxy-client", nil)
 	if upSess == nil || !upSess.IsHealthy() {
+		if upSess != nil {
+			upSess.Close()
+		}
 		return fmt.Errorf("failed to dial stdio subprocess: %s", s.cmdPath)
 	}
 
 	s.mu.Lock()
+	if s.isStopped {
+		s.mu.Unlock()
+		upSess.Close()
+		return nil
+	}
 	s.currSession = upSess
 	s.mu.Unlock()
+
+	var sessionWg sync.WaitGroup
+	// Wait for event forwarder and in-flight inbound handlers AFTER upSess.Close() and sessionCancel() run.
+	defer func() {
+		done := make(chan struct{})
+		go func() {
+			sessionWg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(150 * time.Millisecond):
+			// Avoid hanging shutdown if client stdout pipe is stalled without a reader.
+		}
+	}()
 
 	defer func() {
 		s.mu.Lock()
@@ -201,16 +224,18 @@ func (s *StdioProxy) runOnce(ctx context.Context, linesCh <-chan []byte) error {
 	defer sessionCancel()
 
 	// Forward server notifications from eventCh to client stdout
-	var eventWg sync.WaitGroup
-	eventWg.Add(1)
+	sessionWg.Add(1)
 	go func() {
-		defer eventWg.Done()
+		defer sessionWg.Done()
 		for {
 			select {
 			case <-sessionCtx.Done():
 				return
 			case ev, ok := <-eventCh:
 				if !ok {
+					return
+				}
+				if sessionCtx.Err() != nil {
 					return
 				}
 				_ = s.writeOutput([]byte(ev.Data))
@@ -243,7 +268,12 @@ func (s *StdioProxy) runOnce(ctx context.Context, linesCh <-chan []byte) error {
 					return nil
 				}
 			}
-			go s.handleInboundLine(sessionCtx, userCtx, upSess, line)
+			lineCopy := line
+			sessionWg.Add(1)
+			go func() {
+				defer sessionWg.Done()
+				s.handleInboundLine(sessionCtx, userCtx, upSess, lineCopy)
+			}()
 		}
 	}
 }
@@ -252,6 +282,9 @@ func (s *StdioProxy) runOnce(ctx context.Context, linesCh <-chan []byte) error {
 func (s *StdioProxy) handleInboundLine(ctx context.Context, userCtx context.Context, upSess *session.UpstreamSession, line []byte) {
 	req, _, isRequest, err := mcp.ParseMessage(line)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		resp := mcp.NewErrorResponse(nil, mcp.ErrParseError, "Parse error: "+err.Error(), nil)
 		_ = s.writeJSON(resp)
 		return
@@ -274,6 +307,9 @@ func (s *StdioProxy) handleInboundLine(ctx context.Context, userCtx context.Cont
 			var mcpErr *mcp.Error
 			filteredReq, mcpErr = s.pipeline.ProcessRequest(userCtx, req)
 			if mcpErr != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				resp := mcp.NewErrorResponse(req.ID, mcpErr.Code, mcpErr.Message, mcpErr.Data)
 				_ = s.writeJSON(resp)
 				return
@@ -283,6 +319,9 @@ func (s *StdioProxy) handleInboundLine(ctx context.Context, userCtx context.Cont
 		// Execute against stdio subprocess
 		resp, callErr := upSess.CallTool(ctx, filteredReq)
 		if callErr != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			errResp := mcp.NewErrorResponse(req.ID, mcp.ErrInternalError, callErr.Error(), nil)
 			_ = s.writeJSON(errResp)
 			return

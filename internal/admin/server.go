@@ -2,10 +2,15 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -249,6 +254,14 @@ func (a *AdminServer) SetConfig(cfg *config.Config) {
 	}
 }
 
+// Config returns the active configuration snapshot safely.
+func (a *AdminServer) Config() *config.Config {
+	a.mu.RLock()
+	cfg := a.cfg
+	a.mu.RUnlock()
+	return cfg
+}
+
 func safeTransportOptsEqual(a, b transport.SafeTransportOptions) bool {
 	return a.Enabled == b.Enabled &&
 		a.BlockPrivateIPs == b.BlockPrivateIPs &&
@@ -481,18 +494,22 @@ func (a *AdminServer) Handler() http.Handler {
 	mux.HandleFunc("/admin/agents/sync-tools", a.withMutationGuard(a.handleAgentSyncTools))
 	mux.HandleFunc("/admin/agents/rollback", a.withMutationGuard(a.handleAgentRollback))
 
-	var h http.Handler = mux
+	var h http.Handler = a.withAdminSecurity(mux)
 
-	if a.cfg != nil && a.cfg.Security.RateLimiting.Enabled != nil && *a.cfg.Security.RateLimiting.Enabled {
-		rlCfg := a.cfg.GetHTTPRateLimitConfig()
+	a.mu.RLock()
+	cfg := a.cfg
+	a.mu.RUnlock()
+
+	if cfg != nil && cfg.Security.RateLimiting.Enabled != nil && *cfg.Security.RateLimiting.Enabled {
+		rlCfg := cfg.GetHTTPRateLimitConfig()
 		h = middleware.HTTPRateLimit(rlCfg.Rate, rlCfg.Burst)(h)
 	}
 
 	var allowedOrigins []string
 	var enableHSTS bool
-	if a.cfg != nil {
-		allowedOrigins = a.cfg.Security.CORSAllowedOrigins
-		enableHSTS = a.cfg.AdminTLS.Enabled
+	if cfg != nil {
+		allowedOrigins = cfg.Security.CORSAllowedOrigins
+		enableHSTS = cfg.AdminTLS.Enabled
 	}
 
 	adminCSP := "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self' ws: wss:; frame-ancestors 'none';"
@@ -505,6 +522,154 @@ func (a *AdminServer) Handler() http.Handler {
 	return secMiddleware(h)
 }
 
+func isLoopbackHost(host string) bool {
+	h := strings.TrimSpace(host)
+	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+func resolveConfiguredAdminToken() string {
+	for _, envVar := range []string{"ADMIN_API_KEY", "FARADAI_WIRE_ADMIN_TOKEN"} {
+		if tok := strings.TrimSpace(os.Getenv(envVar)); tok != "" {
+			return tok
+		}
+	}
+	return ""
+}
+
+func isExplicitlyAllowedOrigin(origin string, allowedOrigins []string) bool {
+	trimmedOrigin := strings.TrimSpace(origin)
+	if trimmedOrigin == "" {
+		return false
+	}
+	for _, candidate := range allowedOrigins {
+		trimmedCandidate := strings.TrimSpace(candidate)
+		if trimmedCandidate == "" || trimmedCandidate == "*" {
+			continue
+		}
+		if strings.EqualFold(trimmedCandidate, trimmedOrigin) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLoopbackSameHostOrigin(origin string, reqHost string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	reqHostname, reqPort, err := net.SplitHostPort(reqHost)
+	if err != nil {
+		reqHostname = reqHost
+	}
+	return isLoopbackHost(reqHostname) && isLoopbackHost(u.Hostname()) && reqPort == u.Port()
+}
+
+func requiresAdminAuthForPath(path string) bool {
+	if path == "/admin/dashboard" || path == "/admin/dashboard/" || strings.HasPrefix(path, "/admin/assets/") {
+		return false
+	}
+	return strings.HasPrefix(path, "/admin") || strings.HasPrefix(path, "/api") || path == "/ws"
+}
+
+func isMutatingMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func isDisallowedCSRFContentType(mediaType string) bool {
+	switch mediaType {
+	case "text/plain", "application/x-www-form-urlencoded", "multipart/form-data":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *AdminServer) withAdminSecurity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.mu.RLock()
+		cfg := a.cfg
+		a.mu.RUnlock()
+
+		var allowedOrigins []string
+		adminHost := "127.0.0.1"
+		if cfg != nil {
+			allowedOrigins = cfg.Security.CORSAllowedOrigins
+			adminHost = cfg.GetAdminHost()
+		}
+
+		isProtectedPath := requiresAdminAuthForPath(r.URL.Path)
+		mutating := isMutatingMethod(r.Method)
+
+		// 1. Enforce cross-site / Origin / DNS-rebinding protections on Admin/API/WS paths and mutations.
+		if isProtectedPath || mutating {
+			origin := strings.TrimSpace(r.Header.Get("Origin"))
+			explicitOriginAllowed := origin != "" && isExplicitlyAllowedOrigin(origin, allowedOrigins)
+
+			if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") && !explicitOriginAllowed {
+				http.Error(w, "Forbidden: cross-site admin request blocked", http.StatusForbidden)
+				return
+			}
+			if origin != "" && !explicitOriginAllowed && !isLoopbackSameHostOrigin(origin, r.Host) {
+				http.Error(w, "Forbidden: unauthorized request origin", http.StatusForbidden)
+				return
+			}
+		}
+
+		if mutating {
+			if ct := strings.TrimSpace(r.Header.Get("Content-Type")); ct != "" {
+				mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(ct, ";", 2)[0]))
+				if isDisallowedCSRFContentType(mediaType) {
+					http.Error(w, "Unsupported Media Type: JSON required for admin mutations", http.StatusUnsupportedMediaType)
+					return
+				}
+			}
+		}
+
+		// 2. Enforce Bearer authentication on Admin APIs/WS when a token is configured or server binds non-loopback.
+		if isProtectedPath {
+			expectedToken := resolveConfiguredAdminToken()
+			if expectedToken != "" || !isLoopbackHost(adminHost) {
+				authHeader := r.Header.Get("Authorization")
+				const bearerPrefix = "Bearer "
+				if expectedToken == "" || len(authHeader) <= len(bearerPrefix) || !strings.EqualFold(authHeader[:len(bearerPrefix)], bearerPrefix) {
+					w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
+					http.Error(w, "Unauthorized: admin bearer token required", http.StatusUnauthorized)
+					return
+				}
+				providedToken := strings.TrimSpace(authHeader[len(bearerPrefix):])
+				if providedToken == "" {
+					w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
+					http.Error(w, "Unauthorized: admin bearer token required", http.StatusUnauthorized)
+					return
+				}
+				providedHash := sha256.Sum256([]byte(providedToken))
+				expectedHash := sha256.Sum256([]byte(expectedToken))
+				if subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) != 1 {
+					w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
+					http.Error(w, "Unauthorized: invalid admin bearer token", http.StatusUnauthorized)
+					return
+				}
+			}
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // StartTasks is a no-op in standalone mode.
 func (a *AdminServer) StartTasks(ctx context.Context) {
 }
@@ -513,11 +678,15 @@ func (a *AdminServer) StartTasks(ctx context.Context) {
 // Explicit admin_host / FARADAI_WIRE_ADMIN_HOST opts into custom interfaces;
 // otherwise standalone mode enforces loopback ("127.0.0.1") per ADR-0028.
 func (a *AdminServer) ListenAddr() string {
+	a.mu.RLock()
+	cfg := a.cfg
+	a.mu.RUnlock()
+
 	adminPort := 8095
-	if a.cfg != nil {
-		adminPort = a.cfg.GetAdminPort()
+	if cfg != nil {
+		adminPort = cfg.GetAdminPort()
 	}
-	adminHost := a.cfg.GetAdminHost()
+	adminHost := cfg.GetAdminHost()
 	return net.JoinHostPort(adminHost, strconv.Itoa(adminPort))
 }
 
@@ -526,6 +695,21 @@ func (a *AdminServer) Start(ctx context.Context) error {
 	addr := a.ListenAddr()
 	adminHost, portStr, _ := net.SplitHostPort(addr)
 	adminPort, _ := strconv.Atoi(portStr)
+
+	a.mu.RLock()
+	cfg := a.cfg
+	a.mu.RUnlock()
+
+	adminToken := resolveConfiguredAdminToken()
+	if !isLoopbackHost(adminHost) && adminToken == "" {
+		return fmt.Errorf("refusing to bind Admin Server to non-loopback host %q without ADMIN_API_KEY or FARADAI_WIRE_ADMIN_TOKEN configured", adminHost)
+	}
+	if !isLoopbackHost(adminHost) && (cfg == nil || !cfg.AdminTLS.Enabled) {
+		slog.Warn("Admin Server exposed on non-loopback interface without TLS; configure admin_tls or terminate TLS upstream",
+			slog.String("host", adminHost),
+			slog.Int("port", adminPort),
+		)
+	}
 
 	handler := a.Handler()
 	a.mu.Lock()
@@ -539,10 +723,10 @@ func (a *AdminServer) Start(ctx context.Context) error {
 	a.mu.Unlock()
 
 	errCh := make(chan error, 1)
-	if a.cfg.AdminTLS.Enabled {
+	if cfg != nil && cfg.AdminTLS.Enabled {
 		slog.Info("Admin UI listening on HTTPS", slog.String("host", adminHost), slog.Int("port", adminPort))
 		go func() {
-			if err := server.ListenAndServeTLS(a.cfg.AdminTLS.CertFile, a.cfg.AdminTLS.KeyFile); err != nil && err != http.ErrServerClosed {
+			if err := server.ListenAndServeTLS(cfg.AdminTLS.CertFile, cfg.AdminTLS.KeyFile); err != nil && err != http.ErrServerClosed {
 				slog.Error("HTTPS Server error", slog.String("error", err.Error()))
 				errCh <- err
 			} else {

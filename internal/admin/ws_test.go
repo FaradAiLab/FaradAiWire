@@ -2,8 +2,10 @@ package admin
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -125,3 +127,168 @@ func TestWSHub_SendDirect_Safety(t *testing.T) {
 	hub.SendDirect(dummyClient, map[string]string{"type": "TEST"})
 }
 
+func TestWSHub_CSWSH_DNSRebindingBlocked(t *testing.T) {
+	hub := NewWSHub()
+
+	tests := []struct {
+		name     string
+		reqURL   string
+		origin   string
+		wantCode int
+	}{
+		{
+			name:     "arbitrary matching Host and Origin rejected",
+			reqURL:   "http://evil.com:8095/ws",
+			origin:   "http://evil.com:8095",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "non-http scheme rejected",
+			reqURL:   "http://127.0.0.1:8095/ws",
+			origin:   "file://localhost:8095",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "loopback cross-port rejected",
+			reqURL:   "http://127.0.0.1:8095/ws",
+			origin:   "http://localhost:9999",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "loopback matching port allowed past origin check",
+			reqURL:   "http://127.0.0.1:8095/ws",
+			origin:   "http://localhost:8095",
+			wantCode: http.StatusBadRequest, // missing Upgrade headers
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.reqURL, nil)
+			req.Header.Set("Origin", tc.origin)
+			rec := httptest.NewRecorder()
+			hub.ServeHTTP(rec, req)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("expected HTTP %d, got %d", tc.wantCode, rec.Code)
+			}
+		})
+	}
+}
+
+func TestWSHub_ConcurrentPingBroadcastUnregister(t *testing.T) {
+	hub := NewWSHub()
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	// Drain peer side so writes don't stall
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := clientConn.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	c := &wsClient{
+		conn: serverConn,
+		send: make(chan []byte, 16),
+		done: make(chan struct{}),
+		hub:  hub,
+	}
+	hub.register(c)
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		defer hub.unregister(c)
+		for {
+			select {
+			case <-c.done:
+				return
+			case msg := <-c.send:
+				if _, err := serverConn.Write(msg); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	var workers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		workers.Add(1)
+		go func(id int) {
+			defer workers.Done()
+			for j := 0; j < 50; j++ {
+				c.trySend(encodePongFrame([]byte("ping")))
+				hub.Broadcast(map[string]int{"worker": id, "iter": j})
+				hub.SendDirect(c, map[string]int{"direct": j})
+			}
+		}(i)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	hub.unregister(c)
+	hub.unregister(c) // idempotent
+
+	workers.Wait()
+	select {
+	case <-writerDone:
+	case <-time.After(time.Second):
+		t.Fatal("writer goroutine did not exit after unregister")
+	}
+}
+
+func TestWSHub_CSWSH_WildcardCORSStillRejectsUntrustedOrigin(t *testing.T) {
+	hub := NewWSHub()
+	hub.SetAllowedOrigins([]string{"*", " * ", " https://trusted.example.com "})
+
+	cases := []struct {
+		name         string
+		origin       string
+		secFetchSite string
+		wantBlocked  bool
+	}{
+		{
+			name:        "untrusted origin rejected even when wildcard present",
+			origin:      "http://evil.com",
+			wantBlocked: true,
+		},
+		{
+			name:         "cross-site origin rejected even when wildcard present",
+			origin:       "https://evil.com",
+			secFetchSite: "cross-site",
+			wantBlocked:  true,
+		},
+		{
+			name:        "whitespace-only origin rejected",
+			origin:      "   ",
+			wantBlocked: true,
+		},
+		{
+			name:        "explicit allowlisted origin allowed with whitespace and case normalization",
+			origin:      " https://TRUSTED.example.com ",
+			wantBlocked: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8095/ws", nil)
+			req.Header.Set("Origin", tc.origin)
+			if tc.secFetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.secFetchSite)
+			}
+			rec := httptest.NewRecorder()
+			hub.ServeHTTP(rec, req)
+
+			if tc.wantBlocked && rec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403 Forbidden, got %d", rec.Code)
+			}
+			if !tc.wantBlocked && rec.Code == http.StatusForbidden {
+				t.Fatalf("did not expect 403 Forbidden for allowlisted origin, got %d", rec.Code)
+			}
+		})
+	}
+}

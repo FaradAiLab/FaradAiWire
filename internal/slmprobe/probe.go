@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 )
 
 const (
@@ -82,24 +84,26 @@ func WithOllamaURL(tagsURL, baseURL string) Option {
 	}
 }
 
-// NewProber initializes a Prober with sensible defaults.
+// NewProber initializes a Prober with sensible defaults and an SSRF-safe HTTP client.
 func NewProber(opts ...Option) *Prober {
 	p := &Prober{
-		client: &http.Client{
-			Transport: &http.Transport{
-				DisableKeepAlives: true,
-				MaxIdleConns:      10,
-				IdleConnTimeout:   1 * time.Second,
-			},
-		},
-		timeout:              DefaultMaxProbeTimeout,
-		promptGuardHealthURL: DefaultPromptGuardHealthURL,
+		timeout:               DefaultMaxProbeTimeout,
+		promptGuardHealthURL:  DefaultPromptGuardHealthURL,
 		promptGuardPredictURL: DefaultPromptGuardPredictURL,
-		ollamaTagsURL:        DefaultOllamaTagsURL,
-		ollamaBaseURL:        DefaultOllamaBaseURL,
+		ollamaTagsURL:         DefaultOllamaTagsURL,
+		ollamaBaseURL:         DefaultOllamaBaseURL,
 	}
 	for _, opt := range opts {
 		opt(p)
+	}
+	if p.client == nil {
+		// Permit loopback and LAN inference engines (Ollama/Docker) while unconditionally
+		// blocking cloud IMDS endpoints (169.254.169.254, fd00:ec2::254), DNS rebinding, and unsafe redirects.
+		p.client = transport.NewSafeHTTPClient(transport.SafeTransportOptions{
+			Enabled:         true,
+			BlockPrivateIPs: false,
+			DialTimeout:     p.timeout,
+		}, p.timeout)
 	}
 	return p
 }

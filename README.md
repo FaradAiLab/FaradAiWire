@@ -60,7 +60,7 @@ brew tap FaradAiLab/tap
 brew install faradaiwire
 
 # Run in foreground:
-faradaiwire
+faradaiwire run
 
 # Or manage as a background service:
 brew services start faradaiwire
@@ -69,13 +69,13 @@ brew services start faradaiwire
 ### 🐧 Linux & macOS (Single-Command Shell)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/install.sh | sh
-faradaiwire
+faradaiwire run
 ```
 
 ### 🪟 Windows (PowerShell)
 ```powershell
 irm https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/install.ps1 | iex
-faradaiwire
+faradaiwire run
 ```
 
 ### 🛠️ Build from Source (Go 1.23+)

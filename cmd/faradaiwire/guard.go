@@ -19,8 +19,8 @@ import (
 )
 
 var (
-	guardStatusHTTPClient  = &http.Client{Timeout: 500 * time.Millisecond}
-	guardDefaultHTTPClient = &http.Client{Timeout: 5 * time.Second}
+	guardStatusHTTPClient  = &http.Client{Timeout: 500 * time.Millisecond, CheckRedirect: blockRedirects}
+	guardDefaultHTTPClient = &http.Client{Timeout: 5 * time.Second, CheckRedirect: blockRedirects}
 )
 
 const maxGuardAdminResponseBytes = 4 << 20
@@ -45,12 +45,21 @@ const (
 
 // fetchModelsFromGateway attempts to retrieve models from a running gateway admin API.
 func fetchModelsFromGateway(ctx context.Context, host string, port int, clients ...*http.Client) ([]*guard.Model, error) {
-	endpoint := fmt.Sprintf("http://%s/admin/guards/models", net.JoinHostPort(normalizeGuardHost(host), strconv.Itoa(port)))
+	return fetchModelsFromGatewayWithScheme(ctx, "http", host, port, clients...)
+}
+
+func fetchModelsFromGatewayWithScheme(ctx context.Context, scheme string, host string, port int, clients ...*http.Client) ([]*guard.Model, error) {
+	if scheme == "" {
+		scheme = "http"
+	}
+	normalizedHost := normalizeGuardHost(host)
+	endpoint := fmt.Sprintf("%s://%s/admin/guards/models", scheme, net.JoinHostPort(normalizedHost, strconv.Itoa(port)))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create guard models request: %w", err)
 	}
+	attachAdminBearerAuth(req)
 
 	client := guardStatusHTTPClient
 	if len(clients) > 0 && clients[0] != nil {
@@ -252,10 +261,10 @@ func executeGuardList(configPath string, out io.Writer) int {
 	var models []*guard.Model
 
 	// 1. Try querying running gateway admin REST endpoint first
-	host := cfg.GetListenHost()
+	host := resolveAdminEndpointHost(cfg)
 	adminPort := cfg.GetAdminPort()
 	if target := net.JoinHostPort(host, strconv.Itoa(adminPort)); target != "" {
-		m, err := fetchModelsFromGateway(ctx, host, adminPort)
+		m, err := fetchModelsFromGatewayWithScheme(ctx, adminScheme(cfg), host, adminPort)
 		if err == nil && len(m) > 0 {
 			models = m
 		}
@@ -279,12 +288,21 @@ func executeGuardList(configPath string, out io.Writer) int {
 
 // fetchGuardStatusFromGateway queries the runtime status from the admin REST endpoint.
 func fetchGuardStatusFromGateway(ctx context.Context, host string, port int, clients ...*http.Client) (*guard.ProcessStatus, error) {
-	endpoint := fmt.Sprintf("http://%s/admin/guards/status", net.JoinHostPort(normalizeGuardHost(host), strconv.Itoa(port)))
+	return fetchGuardStatusFromGatewayWithScheme(ctx, "http", host, port, clients...)
+}
+
+func fetchGuardStatusFromGatewayWithScheme(ctx context.Context, scheme string, host string, port int, clients ...*http.Client) (*guard.ProcessStatus, error) {
+	if scheme == "" {
+		scheme = "http"
+	}
+	normalizedHost := normalizeGuardHost(host)
+	endpoint := fmt.Sprintf("%s://%s/admin/guards/status", scheme, net.JoinHostPort(normalizedHost, strconv.Itoa(port)))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create guard status request: %w", err)
 	}
+	attachAdminBearerAuth(req)
 
 	client := guardStatusHTTPClient
 	if len(clients) > 0 && clients[0] != nil {
@@ -385,12 +403,12 @@ func executeGuardStatus(configPath string, out io.Writer, client ...*http.Client
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	host := cfg.GetListenHost()
+	host := resolveAdminEndpointHost(cfg)
 	adminPort := cfg.GetAdminPort()
 
 	useColor := os.Getenv("NO_COLOR") == ""
 
-	status, err := fetchGuardStatusFromGateway(ctx, host, adminPort, client...)
+	status, err := fetchGuardStatusFromGatewayWithScheme(ctx, adminScheme(cfg), host, adminPort, client...)
 	if err != nil {
 		fmt.Fprintf(out, "\n%sFaradAiWire is offline or admin API unreachable at %s:%d.%s\n", ansiDim, host, adminPort, ansiReset)
 		// Render offline/stopped state
@@ -423,11 +441,12 @@ func executeGuardInstall(configPath string, modelID string, out io.Writer, clien
 		cfg = &config.Config{}
 	}
 
-	host := normalizeGuardHost(cfg.GetListenHost())
+	host := resolveAdminEndpointHost(cfg)
 	adminPort := cfg.GetAdminPort()
+	scheme := adminScheme(cfg)
 	hostPort := net.JoinHostPort(host, strconv.Itoa(adminPort))
 	escapedModelID := url.PathEscape(modelID)
-	installURL := fmt.Sprintf("http://%s/admin/guards/models/%s/install", hostPort, escapedModelID)
+	installURL := fmt.Sprintf("%s://%s/admin/guards/models/%s/install", scheme, hostPort, escapedModelID)
 
 	httpClient := guardDefaultHTTPClient
 	if len(client) > 0 && client[0] != nil {
@@ -438,6 +457,7 @@ func executeGuardInstall(configPath string, modelID string, out io.Writer, clien
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, installURL, nil)
 	var resp *http.Response
 	if err == nil {
+		attachAdminBearerAuth(req)
 		resp, err = httpClient.Do(req)
 	}
 
@@ -464,7 +484,7 @@ func executeGuardInstall(configPath string, modelID string, out io.Writer, clien
 		fmt.Fprintf(out, "Initiating installation for model '%s' via FaradAiWire...\n", modelID)
 
 		// Poll progress
-		progressURL := fmt.Sprintf("http://%s/admin/guards/models/%s/progress", hostPort, escapedModelID)
+		progressURL := fmt.Sprintf("%s://%s/admin/guards/models/%s/progress", scheme, hostPort, escapedModelID)
 		lastStep := ""
 		deadline := time.Now().Add(5 * time.Minute)
 		for time.Now().Before(deadline) {
@@ -475,6 +495,7 @@ func executeGuardInstall(configPath string, modelID string, out io.Writer, clien
 				pCancel()
 				continue
 			}
+			attachAdminBearerAuth(pReq)
 			pResp, pErr := httpClient.Do(pReq)
 			if pErr != nil {
 				pCancel()
@@ -556,9 +577,10 @@ func executeGuardUninstall(configPath string, modelID string, out io.Writer, cli
 		cfg = &config.Config{}
 	}
 
-	host := normalizeGuardHost(cfg.GetListenHost())
+	host := resolveAdminEndpointHost(cfg)
 	adminPort := cfg.GetAdminPort()
-	deleteURL := fmt.Sprintf("http://%s/admin/guards/models/%s", net.JoinHostPort(host, strconv.Itoa(adminPort)), url.PathEscape(modelID))
+	scheme := adminScheme(cfg)
+	deleteURL := fmt.Sprintf("%s://%s/admin/guards/models/%s", scheme, net.JoinHostPort(host, strconv.Itoa(adminPort)), url.PathEscape(modelID))
 
 	httpClient := guardDefaultHTTPClient
 	if len(client) > 0 && client[0] != nil {
@@ -570,6 +592,7 @@ func executeGuardUninstall(configPath string, modelID string, out io.Writer, cli
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, deleteURL, nil)
 	var resp *http.Response
 	if err == nil {
+		attachAdminBearerAuth(req)
 		resp, err = httpClient.Do(req)
 	}
 

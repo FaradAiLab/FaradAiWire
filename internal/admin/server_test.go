@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/auth"
@@ -222,7 +223,6 @@ func TestAdminServer_MutationGuard_ManagedMode(t *testing.T) {
 	})
 }
 
-
 func TestPathGuard_AgentEndpoints_RejectsTraversal(t *testing.T) {
 	tempBase := t.TempDir()
 	agentsDir := filepath.Join(tempBase, "agents")
@@ -314,7 +314,6 @@ func TestPathGuard_AgentEndpoints_RejectsTraversal(t *testing.T) {
 		}
 	})
 }
-
 
 func TestSSRF_ProbeAndDiscoverMCPTools_BlocksRestrictedDestinations(t *testing.T) {
 	blockedURLs := []string{
@@ -414,8 +413,6 @@ func TestAdminServer_CORSOriginAllowlist(t *testing.T) {
 		t.Errorf("expected no Access-Control-Allow-Origin for unauthorized origin, got %q", got)
 	}
 }
-
-
 
 type mockTelemetryReader struct {
 	lastFilter duckdb.QueryFilter
@@ -723,14 +720,21 @@ func TestAdmin_SLMProbe_And_Configure(t *testing.T) {
 	if !reloaded {
 		t.Errorf("expected reloadFunc to be triggered on slm configure")
 	}
-	if cfg.Filters.InjectionScanner.ClassifierURL != "http://localhost:8088/predict" {
-		t.Errorf("expected classifier_url updated in cfg, got %s", cfg.Filters.InjectionScanner.ClassifierURL)
+	srvCfg := server.Config()
+	if srvCfg == nil {
+		t.Fatalf("expected server.Config() to be non-nil")
 	}
-	if cfg.Filters.Guard.Discovery.Mode != "docker" {
-		t.Errorf("expected discovery mode 'docker', got %s", cfg.Filters.Guard.Discovery.Mode)
+	if srvCfg.Filters.InjectionScanner.ClassifierURL != "http://localhost:8088/predict" {
+		t.Errorf("expected classifier_url updated in server config, got %s", srvCfg.Filters.InjectionScanner.ClassifierURL)
 	}
-	if cfg.Filters.Guard.Discovery.DockerURL != "http://localhost:8088" {
-		t.Errorf("expected discovery docker_url updated, got %s", cfg.Filters.Guard.Discovery.DockerURL)
+	if srvCfg.Filters.Guard.Discovery.Mode != "docker" {
+		t.Errorf("expected discovery mode 'docker', got %s", srvCfg.Filters.Guard.Discovery.Mode)
+	}
+	if srvCfg.Filters.Guard.Discovery.DockerURL != "http://localhost:8088" {
+		t.Errorf("expected discovery docker_url updated, got %s", srvCfg.Filters.Guard.Discovery.DockerURL)
+	}
+	if cfg.Filters.InjectionScanner.ClassifierURL != "" {
+		t.Errorf("expected original cfg pointer not to be mutated in-place, got %s", cfg.Filters.InjectionScanner.ClassifierURL)
 	}
 
 	// 4. Verify /admin/status reflects neural_active tier after configuration
@@ -981,5 +985,450 @@ func TestAdminServer_Status_ActiveFilters_ExactCountAndNoDuplicates(t *testing.T
 			t.Errorf("duplicate filter in active_filters: %s (all: %v)", f, statusResp.ActiveFilters)
 		}
 		seen[f] = true
+	}
+}
+
+func TestAdminServer_NonLoopbackStartRequiresAuthToken(t *testing.T) {
+	t.Setenv("ADMIN_API_KEY", "")
+	t.Setenv("FARADAI_WIRE_ADMIN_TOKEN", "")
+
+	tests := []struct {
+		name      string
+		adminHost string
+	}{
+		{name: "wildcard 0.0.0.0 refused without token", adminHost: "0.0.0.0"},
+		{name: "LAN interface refused without token", adminHost: "192.168.1.50"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				AdminHost: tc.adminHost,
+				AdminPort: 19416,
+			}
+			srv := NewAdminServer(cfg, nil, nil)
+			err := srv.Start(context.Background())
+			if err == nil {
+				t.Fatalf("expected Start() to refuse non-loopback %s without auth token", tc.adminHost)
+			}
+			if !strings.Contains(err.Error(), "ADMIN_API_KEY") {
+				t.Fatalf("expected helpful error mentioning ADMIN_API_KEY, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestAdminServer_BearerAuthAndCSRFProtection(t *testing.T) {
+	t.Run("Bearer token enforced on API endpoints when ADMIN_API_KEY is set", func(t *testing.T) {
+		t.Setenv("ADMIN_API_KEY", "secret-admin-token")
+		srv := NewAdminServer(&config.Config{}, func() error { return nil }, nil)
+		h := srv.Handler()
+
+		// Static dashboard page and /admin/assets/ stay reachable without bearer auth
+		dashRec := httptest.NewRecorder()
+		h.ServeHTTP(dashRec, httptest.NewRequest(http.MethodGet, "/admin/dashboard", nil))
+		if dashRec.Code != http.StatusOK {
+			t.Fatalf("expected 200 on /admin/dashboard, got %d", dashRec.Code)
+		}
+
+		assetRec := httptest.NewRecorder()
+		h.ServeHTTP(assetRec, httptest.NewRequest(http.MethodGet, "/admin/assets/app.js", nil))
+		if assetRec.Code == http.StatusUnauthorized {
+			t.Fatalf("did not expect 401 on /admin/assets/*, got %d", assetRec.Code)
+		}
+
+		// Cross-site GET on /admin/api-keys blocked with 403 even before bearer check
+		crossGet := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8095/admin/api-keys", nil)
+		crossGet.Header.Set("Sec-Fetch-Site", "cross-site")
+		crossGetRec := httptest.NewRecorder()
+		h.ServeHTTP(crossGetRec, crossGet)
+		if crossGetRec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 on cross-site GET /admin/api-keys, got %d", crossGetRec.Code)
+		}
+
+		// API endpoint without Authorization returns 401
+		unauthRec := httptest.NewRecorder()
+		h.ServeHTTP(unauthRec, httptest.NewRequest(http.MethodGet, "/admin/status", nil))
+		if unauthRec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 on /admin/status without token, got %d", unauthRec.Code)
+		}
+
+		// Wrong token returns 401
+		wrongReq := httptest.NewRequest(http.MethodPost, "/api/reload", nil)
+		wrongReq.Header.Set("Authorization", "Bearer wrong-token")
+		wrongRec := httptest.NewRecorder()
+		h.ServeHTTP(wrongRec, wrongReq)
+		if wrongRec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 with wrong token, got %d", wrongRec.Code)
+		}
+
+		// Valid token succeeds
+		okReq := httptest.NewRequest(http.MethodPost, "/api/reload", nil)
+		okReq.Header.Set("Authorization", "Bearer secret-admin-token")
+		okRec := httptest.NewRecorder()
+		h.ServeHTTP(okRec, okReq)
+		if okRec.Code != http.StatusOK {
+			t.Fatalf("expected 200 with valid bearer token, got %d", okRec.Code)
+		}
+	})
+
+	t.Run("Cross-origin mutations and simple form Content-Types rejected", func(t *testing.T) {
+		srv := NewAdminServer(&config.Config{}, func() error { return nil }, nil)
+		h := srv.Handler()
+
+		tests := []struct {
+			name        string
+			url         string
+			origin      string
+			secFetch    string
+			contentType string
+			wantCode    int
+		}{
+			{
+				name:        "disallowed cross-origin POST rejected",
+				url:         "http://127.0.0.1:8095/admin/reload",
+				origin:      "https://evil.example",
+				contentType: "application/json",
+				wantCode:    http.StatusForbidden,
+			},
+			{
+				name:     "Sec-Fetch-Site cross-site POST rejected",
+				url:      "http://127.0.0.1:8095/admin/reload",
+				secFetch: "cross-site",
+				wantCode: http.StatusForbidden,
+			},
+			{
+				name:        "text/plain simple CSRF POST rejected",
+				url:         "http://127.0.0.1:8095/admin/reload",
+				contentType: "text/plain; charset=utf-8",
+				wantCode:    http.StatusUnsupportedMediaType,
+			},
+			{
+				name:        "application/x-www-form-urlencoded CSRF POST rejected",
+				url:         "http://127.0.0.1:8095/admin/reload",
+				contentType: "application/x-www-form-urlencoded",
+				wantCode:    http.StatusUnsupportedMediaType,
+			},
+			{
+				name:        "loopback same-port Origin permitted",
+				url:         "http://127.0.0.1:8095/admin/reload",
+				origin:      "http://localhost:8095",
+				contentType: "application/json",
+				wantCode:    http.StatusOK,
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, tc.url, strings.NewReader("{}"))
+				if tc.origin != "" {
+					req.Header.Set("Origin", tc.origin)
+				}
+				if tc.secFetch != "" {
+					req.Header.Set("Sec-Fetch-Site", tc.secFetch)
+				}
+				if tc.contentType != "" {
+					req.Header.Set("Content-Type", tc.contentType)
+				}
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != tc.wantCode {
+					t.Fatalf("expected HTTP %d, got %d (body: %s)", tc.wantCode, rec.Code, rec.Body.String())
+				}
+			})
+		}
+	})
+}
+
+func TestHandleSLMConfigure_ValidatesAllSLMURLs(t *testing.T) {
+	srv := NewAdminServer(&config.Config{}, nil, nil)
+	h := srv.Handler()
+
+	bodies := []struct {
+		name string
+		body string
+	}{
+		{name: "ollama_url IMDS", body: `{"ollama_url":"http://169.254.169.254/latest/meta-data/"}`},
+		{name: "docker_url IMDS", body: `{"docker_url":"http://169.254.169.254/predict"}`},
+		{name: "custom_url file scheme", body: `{"custom_url":"file:///etc/passwd"}`},
+	}
+
+	for _, tc := range bodies {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 Bad Request, got %d (%s)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("redacts credentials in response and does not mutate cfg on reload failure", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Filters.InjectionScanner.ClassifierURL = "http://127.0.0.1:8088/predict"
+		failSrv := NewAdminServer(cfg, func() error { return errors.New("reload boom") }, nil)
+		failReq := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(`{"classifier_url":"http://admin:secret@127.0.0.1:9000/predict"}`))
+		failReq.Header.Set("Content-Type", "application/json")
+		failRec := httptest.NewRecorder()
+		failSrv.Handler().ServeHTTP(failRec, failReq)
+		if failRec.Code != http.StatusInternalServerError {
+			t.Fatalf("expected 500 on reload failure, got %d", failRec.Code)
+		}
+		if cfg.Filters.InjectionScanner.ClassifierURL != "http://127.0.0.1:8088/predict" {
+			t.Fatalf("expected cfg to remain unchanged on reload failure, got %q", cfg.Filters.InjectionScanner.ClassifierURL)
+		}
+
+		okSrv := NewAdminServer(&config.Config{}, func() error { return nil }, nil)
+		okReq := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(`{"classifier_url":"http://admin:secret@127.0.0.1:9000/predict"}`))
+		okReq.Header.Set("Content-Type", "application/json")
+		okRec := httptest.NewRecorder()
+		okSrv.Handler().ServeHTTP(okRec, okReq)
+		if okRec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", okRec.Code)
+		}
+		if strings.Contains(okRec.Body.String(), "secret") {
+			t.Fatalf("expected password redacted in response body, got %s", okRec.Body.String())
+		}
+	})
+}
+
+func TestHandleSLMConfigure_LifecycleAndConcurrency(t *testing.T) {
+	t.Run("live SetReloadConfigFunc swaps config without origCfg overwrite", func(t *testing.T) {
+		origCfg := &config.Config{
+			RuntimeMode: config.RuntimeModeStandalone,
+		}
+		origCfg.Filters.InjectionScanner.ClassifierURL = "http://127.0.0.1:8088/predict"
+
+		srv := NewAdminServer(origCfg, nil, nil)
+		oldClient := srv.SafeHTTPClient()
+
+		cfgProvider := config.NewYAMLConfigProvider(filepath.Join(t.TempDir(), "config.yaml"))
+		srv.SetConfigProvider(cfgProvider)
+
+		var reloadedCfg *config.Config
+		srv.SetReloadConfigFunc(func(next *config.Config) error {
+			reloadedCfg = next
+			srv.SetConfig(next)
+			return nil
+		})
+
+		body := `{"mode":"docker","docker_url":"http://127.0.0.1:18088","classifier_url":"http://127.0.0.1:18088/predict"}`
+		req := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if reloadedCfg == nil {
+			t.Fatalf("expected SetReloadConfigFunc to receive nextCfg")
+		}
+		if srv.Config() != reloadedCfg || srv.Config() == origCfg {
+			t.Fatalf("expected server.Config() to point to reloaded nextCfg and not origCfg")
+		}
+		if origCfg.Filters.InjectionScanner.ClassifierURL != "http://127.0.0.1:8088/predict" {
+			t.Fatalf("expected origCfg not to be mutated in-place, got %q", origCfg.Filters.InjectionScanner.ClassifierURL)
+		}
+		if srv.SafeHTTPClient() == oldClient {
+			t.Fatalf("expected SetConfig to invalidate cached safeHTTPClient")
+		}
+
+		persisted, err := cfgProvider.Load()
+		if err != nil {
+			t.Fatalf("expected config saved after reload, load failed: %v", err)
+		}
+		if persisted.Filters.InjectionScanner.ClassifierURL != "http://127.0.0.1:18088/predict" {
+			t.Fatalf("expected persisted classifier_url updated, got %q", persisted.Filters.InjectionScanner.ClassifierURL)
+		}
+	})
+
+	t.Run("reload failure skips disk save when using SetReloadConfigFunc", func(t *testing.T) {
+		origCfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+		origCfg.Filters.InjectionScanner.ClassifierURL = "http://127.0.0.1:8088/predict"
+
+		cfgProvider := config.NewYAMLConfigProvider(filepath.Join(t.TempDir(), "config.yaml"))
+		if err := cfgProvider.Save(origCfg); err != nil {
+			t.Fatalf("seed config: %v", err)
+		}
+
+		srv := NewAdminServer(origCfg, nil, nil)
+		srv.SetConfigProvider(cfgProvider)
+		srv.SetReloadConfigFunc(func(*config.Config) error {
+			return errors.New("reload boom")
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(`{"classifier_url":"http://127.0.0.1:19000/predict"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("expected 500 InternalServerError, got %d", rec.Code)
+		}
+		persisted, err := cfgProvider.Load()
+		if err != nil {
+			t.Fatalf("load persisted config: %v", err)
+		}
+		if persisted.Filters.InjectionScanner.ClassifierURL != "http://127.0.0.1:8088/predict" {
+			t.Fatalf("expected disk config unchanged after reload failure, got %q", persisted.Filters.InjectionScanner.ClassifierURL)
+		}
+	})
+
+	t.Run("legacy reloadFunc failure rolls back disk save", func(t *testing.T) {
+		origCfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+		origCfg.Filters.InjectionScanner.ClassifierURL = "http://127.0.0.1:8088/predict"
+
+		cfgProvider := config.NewYAMLConfigProvider(filepath.Join(t.TempDir(), "config.yaml"))
+		if err := cfgProvider.Save(origCfg); err != nil {
+			t.Fatalf("seed config: %v", err)
+		}
+
+		srv := NewAdminServer(origCfg, func() error { return errors.New("legacy reload boom") }, nil)
+		srv.SetConfigProvider(cfgProvider)
+
+		req := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(`{"classifier_url":"http://127.0.0.1:19000/predict"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("expected 500 InternalServerError, got %d", rec.Code)
+		}
+		persisted, err := cfgProvider.Load()
+		if err != nil {
+			t.Fatalf("load persisted config: %v", err)
+		}
+		if persisted.Filters.InjectionScanner.ClassifierURL != "http://127.0.0.1:8088/predict" {
+			t.Fatalf("expected disk config rolled back after legacy reload failure, got %q", persisted.Filters.InjectionScanner.ClassifierURL)
+		}
+	})
+
+	t.Run("concurrent readers and configures are race-free", func(t *testing.T) {
+		origCfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+		srv := NewAdminServer(origCfg, nil, nil)
+		srv.SetReloadConfigFunc(func(next *config.Config) error {
+			srv.SetConfig(next)
+			return nil
+		})
+		handler := srv.Handler()
+
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				for j := 0; j < 10; j++ {
+					statusRec := httptest.NewRecorder()
+					handler.ServeHTTP(statusRec, httptest.NewRequest(http.MethodGet, "/admin/status", nil))
+
+					settingsRec := httptest.NewRecorder()
+					handler.ServeHTTP(settingsRec, httptest.NewRequest(http.MethodGet, "/admin/settings", nil))
+
+					body := fmt.Sprintf(`{"classifier_url":"http://127.0.0.1:%d/predict"}`, 18000+idx)
+					cfgReq := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(body))
+					cfgReq.Header.Set("Content-Type", "application/json")
+					cfgRec := httptest.NewRecorder()
+					handler.ServeHTTP(cfgRec, cfgReq)
+				}
+			}(i)
+		}
+		wg.Wait()
+	})
+}
+
+func TestHandleSLMProbe_RedactsCredentials(t *testing.T) {
+	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	cfg.Filters.InjectionScanner.ClassifierURL = "http://admin:supersecret@127.0.0.1:19999/predict"
+	srv := NewAdminServer(cfg, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/slm/probe", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "supersecret") {
+		t.Fatalf("expected password redacted in /admin/slm/probe response, got %s", rec.Body.String())
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode /admin/slm/probe JSON: %v", err)
+	}
+	if got, _ := payload["configured_url"].(string); got != "http://admin:xxxxx@127.0.0.1:19999/predict" {
+		t.Fatalf("expected redacted configured_url, got %q", got)
+	}
+}
+
+func TestAdminServer_CORSWildcardDoesNotBypassCSRF(t *testing.T) {
+	t.Setenv("ADMIN_API_KEY", "csrf-test-token")
+
+	cases := []struct {
+		name           string
+		allowedOrigins []string
+		origin         string
+		secFetchSite   string
+		wantCode       int
+	}{
+		{
+			name:           "wildcard does not allow evil cross-origin POST",
+			allowedOrigins: []string{"*"},
+			origin:         "http://evil.example",
+			wantCode:       http.StatusForbidden,
+		},
+		{
+			name:           "trimmed wildcard does not bypass Sec-Fetch-Site cross-site",
+			allowedOrigins: []string{" * "},
+			origin:         "http://evil.example",
+			secFetchSite:   "cross-site",
+			wantCode:       http.StatusForbidden,
+		},
+		{
+			name:           "opaque null origin rejected even with wildcard",
+			allowedOrigins: []string{"*"},
+			origin:         "null",
+			wantCode:       http.StatusForbidden,
+		},
+		{
+			name:           "whitespace-only origin with cross-site fetch rejected even with wildcard",
+			allowedOrigins: []string{"*"},
+			origin:         "   ",
+			secFetchSite:   "cross-site",
+			wantCode:       http.StatusForbidden,
+		},
+		{
+			name:           "explicit allowlisted origin allowed with whitespace and case normalization",
+			allowedOrigins: []string{"*", " https://Trusted.Example.com "},
+			origin:         "  https://trusted.example.com  ",
+			secFetchSite:   "cross-site",
+			wantCode:       http.StatusOK,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				AdminPort: 8095,
+				Security: config.SecurityConfig{
+					CORSAllowedOrigins: tc.allowedOrigins,
+				},
+			}
+			srv := NewAdminServer(cfg, func() error { return nil }, nil)
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8095/api/reload", nil)
+			req.Header.Set("Authorization", "Bearer csrf-test-token")
+			req.Header.Set("Origin", tc.origin)
+			if tc.secFetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.secFetchSite)
+			}
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantCode {
+				t.Fatalf("expected status %d, got %d: %s", tc.wantCode, rec.Code, rec.Body.String())
+			}
+		})
 	}
 }

@@ -464,3 +464,136 @@ func TestExecuteGuard_RejectsUnsafeModelIDs(t *testing.T) {
 		t.Fatalf("expected exit code 1 for path separator model ID on uninstall, got %d", code)
 	}
 }
+
+func TestGuardHTTPClients_BlockRedirects(t *testing.T) {
+	cases := []struct {
+		name   string
+		client *http.Client
+	}{
+		{name: "guardStatusHTTPClient", client: guardStatusHTTPClient},
+		{name: "guardDefaultHTTPClient", client: guardDefaultHTTPClient},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.client.CheckRedirect == nil {
+				t.Fatalf("expected %s.CheckRedirect to be configured", tc.name)
+			}
+
+			clientCopy := *tc.client
+			clientCopy.Transport = roundTripFunc(func(req *http.Request) *http.Response {
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header:     http.Header{"Location": []string{"https://evil.example/redirect"}},
+					Body:       http.NoBody,
+					Request:    req,
+				}
+			})
+
+			req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:8095/admin/guards/status", nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			resp, err := clientCopy.Do(req)
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
+			if err == nil || !strings.Contains(err.Error(), "redirects are disallowed") {
+				t.Fatalf("expected redirect-blocked error, got resp=%v err=%v", resp, err)
+			}
+		})
+	}
+}
+
+func TestExecuteGuardInstall_HTTPSProgressAuth(t *testing.T) {
+	t.Setenv("ADMIN_API_KEY", "secret-guard-token")
+	t.Setenv("FARADAI_WIRE_ADMIN_TOKEN", "")
+
+	cases := []struct {
+		name           string
+		tlsEnabled     bool
+		wantScheme     string
+		wantAuthHeader string
+	}{
+		{
+			name:           "HTTPS non-loopback sends bearer auth on install and progress",
+			tlsEnabled:     true,
+			wantScheme:     "https",
+			wantAuthHeader: "Bearer secret-guard-token",
+		},
+		{
+			name:           "HTTP non-loopback omits bearer auth on install and progress",
+			tlsEnabled:     false,
+			wantScheme:     "http",
+			wantAuthHeader: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgDir := t.TempDir()
+			cfgPath := filepath.Join(cfgDir, "config.yaml")
+			cfgYAML := "runtime_mode: MANAGED\nadmin_host: 192.0.2.10\nadmin_port: 8095\nadmin_tls:\n  enabled: false\n"
+			if tc.tlsEnabled {
+				cfgYAML = "runtime_mode: MANAGED\nadmin_host: 192.0.2.10\nadmin_port: 8095\nadmin_tls:\n  enabled: true\n"
+			}
+			if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			type seenReq struct {
+				method string
+				scheme string
+				path   string
+				auth   string
+			}
+			var recorded []seenReq
+
+			mockClient := &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) *http.Response {
+					recorded = append(recorded, seenReq{
+						method: req.Method,
+						scheme: req.URL.Scheme,
+						path:   req.URL.Path,
+						auth:   req.Header.Get("Authorization"),
+					})
+
+					rec := httptest.NewRecorder()
+					switch {
+					case req.Method == http.MethodPost && req.URL.Path == "/admin/guards/models/qwen3guard/install":
+						rec.WriteHeader(http.StatusAccepted)
+					case req.Method == http.MethodGet && req.URL.Path == "/admin/guards/models/qwen3guard/progress":
+						rec.Header().Set("Content-Type", "application/json")
+						_ = json.NewEncoder(rec).Encode(guard.InstallProgress{
+							ModelID:  "qwen3guard",
+							Step:     guard.StepCompleted,
+							Status:   guard.InstallStatusInstalled,
+							Progress: 1.0,
+							Message:  "Done",
+						})
+					default:
+						rec.WriteHeader(http.StatusNotFound)
+					}
+					return rec.Result()
+				}),
+			}
+
+			var buf strings.Builder
+			if code := executeGuardInstall(cfgPath, "qwen3guard", &buf, mockClient); code != 0 {
+				t.Fatalf("expected exit code 0, got %d; output: %s", code, buf.String())
+			}
+
+			if len(recorded) != 2 {
+				t.Fatalf("expected 2 requests (install + progress), got %d: %+v", len(recorded), recorded)
+			}
+			for _, req := range recorded {
+				if req.scheme != tc.wantScheme {
+					t.Errorf("path %s: expected scheme %q, got %q", req.path, tc.wantScheme, req.scheme)
+				}
+				if req.auth != tc.wantAuthHeader {
+					t.Errorf("path %s: expected Authorization %q, got %q", req.path, tc.wantAuthHeader, req.auth)
+				}
+			}
+		})
+	}
+}

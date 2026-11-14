@@ -691,8 +691,15 @@ func (a *AdminServer) handleReload(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	}
 
-	if a.reloadFunc != nil {
-		if err := a.reloadFunc(); err != nil {
+	a.configMutMu.Lock()
+	defer a.configMutMu.Unlock()
+
+	a.mu.RLock()
+	reloadFn := a.reloadFunc
+	a.mu.RUnlock()
+
+	if reloadFn != nil {
+		if err := reloadFn(); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
