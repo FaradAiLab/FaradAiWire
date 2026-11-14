@@ -20,7 +20,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/processguard"
 )
 
-const version = config.Version
+var version = config.Version
 
 // isHelpArg returns true if the argument represents a standard help request.
 func isHelpArg(arg string) bool {

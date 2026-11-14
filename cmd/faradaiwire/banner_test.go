@@ -26,6 +26,9 @@ func TestPrintStartupBanner_Standby(t *testing.T) {
 	if !strings.Contains(out, "FaradAiWire v") {
 		t.Errorf("expected banner to contain FaradAiWire header")
 	}
+	if strings.Contains(out, "FaradAiWire vv") {
+		t.Errorf("expected single 'v' prefix in banner header, got: %s", out)
+	}
 	if !strings.Contains(out, "http://127.0.0.1:8090") {
 		t.Errorf("expected banner to contain ingress address")
 	}

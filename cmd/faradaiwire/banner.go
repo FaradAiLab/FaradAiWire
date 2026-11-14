@@ -35,7 +35,7 @@ func statusTag(enabled bool) string {
 
 // printStartupBanner renders a developer-friendly status summary and contextual SLM hints.
 func printStartupBanner(cfg *config.Config, out io.Writer) {
-	fmt.Fprintf(out, "\nFaradAiWire v%s (%s Mode)\n", version, cfg.GetRuntimeMode())
+	fmt.Fprintf(out, "\nFaradAiWire v%s (%s Mode)\n", strings.TrimPrefix(version, "v"), cfg.GetRuntimeMode())
 	fmt.Fprintf(out, "├── Ingress Proxy   : http://%s:%d (MCP SSE / Stdio)\n", cfg.GetListenHost(), cfg.GetListenPort())
 	fmt.Fprintf(out, "├── Admin Console   : http://%s:%d\n", cfg.GetListenHost(), cfg.GetAdminPort())
 	fmt.Fprintln(out, "└── Security Engine :")

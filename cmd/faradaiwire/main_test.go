@@ -203,7 +203,7 @@ func TestCLI_RunCLI_HelpAndDispatch(t *testing.T) {
 			name:       "version prints version",
 			args:       []string{"version"},
 			wantExit:   0,
-			wantOutput: "FaradAiWire Security Gateway",
+			wantOutput: "FaradAiWire Security Gateway " + version,
 			isStderr:   false,
 		},
 		{
