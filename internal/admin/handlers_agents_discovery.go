@@ -251,7 +251,7 @@ func (a *AdminServer) syncAgentToolsProbed(ctx context.Context, agentName string
 
 		protoTimeout := timeout
 		if proto.IsStdio() {
-			protoTimeout = a.stdioProbeTimeout()
+			protoTimeout = a.stdioProbeTimeout(proto.GetCommand())
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, protoTimeout)
 		if proto.IsStdio() {

@@ -38,6 +38,47 @@ export class ProbeError extends Error {
   }
 }
 
+export interface ProbeProtocolRequest {
+  id?: string
+  type: string
+  url?: string
+  command?: string
+  args?: string[]
+  env?: string[]
+  auth_token?: string
+  headers?: Record<string, string>
+}
+
+export interface ProbeProgressEvent {
+  message: string
+  elapsed_ms: number
+  timeout_sec: number
+}
+
+export interface ProbeProtocolResult {
+  status: string
+  count: number
+  tools: ToolMetadata[]
+  transport_mode?: string
+}
+
+function toProbeError(data: unknown, fallbackMsg: string): ProbeError {
+  if (!data || typeof data !== 'object') {
+    return new ProbeError(fallbackMsg)
+  }
+  const obj = data as Record<string, unknown>
+  let errMsg = fallbackMsg
+  if (typeof obj.message === 'string' && obj.message) {
+    errMsg = obj.message
+  } else if (obj.error) {
+    errMsg = typeof obj.error === 'string' ? obj.error : JSON.stringify(obj.error)
+  }
+  const errorCode = typeof obj.error === 'string' ? obj.error : undefined
+  const statusCode = typeof obj.status_code === 'number' ? obj.status_code : undefined
+  const remediation = typeof obj.remediation === 'string' ? obj.remediation : undefined
+  return new ProbeError(errMsg, errorCode, statusCode, remediation)
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...options,
@@ -48,21 +89,14 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   })
 
   if (!res.ok) {
-    let errMsg = `Request failed: ${res.status} ${res.statusText}`
-    let errorCode: string | undefined
-    let statusCode: number | undefined
-    let remediation: string | undefined
+    const fallback = `Request failed: ${res.status} ${res.statusText}`
+    let parsed: unknown = null
     try {
-      const data = await res.json()
-      if (data.message) errMsg = data.message
-      else if (data.error) errMsg = typeof data.error === 'string' ? data.error : JSON.stringify(data.error)
-      errorCode = typeof data.error === 'string' ? data.error : undefined
-      statusCode = typeof data.status_code === 'number' ? data.status_code : undefined
-      remediation = typeof data.remediation === 'string' ? data.remediation : undefined
+      parsed = await res.json()
     } catch {
       // ignore
     }
-    throw new ProbeError(errMsg, errorCode, statusCode, remediation)
+    throw toProbeError(parsed, fallback)
   }
 
   return res.json()
@@ -142,24 +176,106 @@ export const api = {
     request<{ status: string; message: string }>(`/admin/protocols/${id}`, {
       method: 'DELETE',
     }),
-  probeProtocol: (
-    probeReq: {
-      id?: string
-      type: string
-      url?: string
-      command?: string
-      args?: string[]
-      env?: string[]
-      auth_token?: string
-      headers?: Record<string, string>
-    },
-    signal?: AbortSignal
-  ) =>
-    request<{ status: string; count: number; tools: ToolMetadata[] }>('/admin/protocols/probe', {
+  probeProtocol: (probeReq: ProbeProtocolRequest, signal?: AbortSignal) =>
+    request<ProbeProtocolResult>('/admin/protocols/probe', {
       method: 'POST',
       body: JSON.stringify(probeReq),
       signal,
     }),
+
+  probeProtocolStream: async (
+    probeReq: ProbeProtocolRequest,
+    onProgress?: (ev: ProbeProgressEvent) => void,
+    signal?: AbortSignal
+  ): Promise<ProbeProtocolResult> => {
+    const res = await fetch('/admin/protocols/probe?stream=1', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify(probeReq),
+      signal,
+    })
+
+    if (!res.ok) {
+      const fallback = `Request failed: ${res.status} ${res.statusText}`
+      let parsed: unknown = null
+      try {
+        parsed = await res.json()
+      } catch {
+        // ignore
+      }
+      throw toProbeError(parsed, fallback)
+    }
+
+    const contentType = res.headers.get('content-type') || ''
+    if (!contentType.includes('text/event-stream') || !res.body) {
+      return res.json() as Promise<ProbeProtocolResult>
+    }
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let finalResult: ProbeProtocolResult | null = null
+
+    const processFrame = (frame: string) => {
+      if (!frame.trim()) return
+      let eventName = 'message'
+      const dataLines: string[] = []
+      for (const rawLine of frame.split(/\r?\n/)) {
+        if (rawLine.startsWith('event:')) {
+          eventName = rawLine.slice(6).trim()
+        } else if (rawLine.startsWith('data:')) {
+          dataLines.push(rawLine.slice(5).trimStart())
+        }
+      }
+      if (dataLines.length === 0) return
+      const payloadStr = dataLines.join('\n')
+      let data: unknown
+      try {
+        data = JSON.parse(payloadStr)
+      } catch {
+        return
+      }
+      if (eventName === 'progress' && onProgress && data && typeof data === 'object') {
+        onProgress(data as ProbeProgressEvent)
+      } else if (eventName === 'result') {
+        finalResult = data as ProbeProtocolResult
+      } else if (eventName === 'error') {
+        throw toProbeError(data, 'Probe failed')
+      }
+    }
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (value) {
+          buffer += decoder.decode(value, { stream: !done })
+          let idx: number
+          while ((idx = buffer.indexOf('\n\n')) !== -1) {
+            const frame = buffer.slice(0, idx)
+            buffer = buffer.slice(idx + 2)
+            processFrame(frame)
+          }
+        }
+        if (done) {
+          buffer += decoder.decode()
+          if (buffer.trim()) {
+            processFrame(buffer)
+          }
+          break
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+
+    if (!finalResult) {
+      throw new ProbeError('Probe stream ended without a result')
+    }
+    return finalResult
+  },
 
   // Agents
   getAgents: (signal?: AbortSignal) => request<{ agents: AgentItem[] }>('/admin/agents', { signal }),

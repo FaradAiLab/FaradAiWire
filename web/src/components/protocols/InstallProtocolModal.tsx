@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react'
-import { Network, Zap, CheckCircle2, XCircle, Trash2, Plus, AlertTriangle } from 'lucide-react'
+import React, { useState, useEffect, useRef } from 'react'
+import { Network, Zap, CheckCircle2, XCircle, Trash2, Plus, AlertTriangle, Loader2 } from 'lucide-react'
 import { PresetMetadata, ToolMetadata, ProtocolItem, ProtocolConfig } from '../../types'
 import { api, ProbeError } from '../../api'
 import { Modal } from '../ui/Modal'
@@ -35,6 +35,12 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
 
   // In-modal probe state
   const [probing, setProbing] = useState(false)
+  const [probeLogs, setProbeLogs] = useState<{ id: number; text: string }[]>([])
+  const [probeElapsedSec, setProbeElapsedSec] = useState(0)
+  const [probeTimeoutSec, setProbeTimeoutSec] = useState<number | null>(null)
+  const probeAbortRef = useRef<AbortController | null>(null)
+  const probeLogBoxRef = useRef<HTMLDivElement | null>(null)
+  const nextLogIdRef = useRef(0)
   const [probeResult, setProbeResult] = useState<{
     success: boolean
     message: string
@@ -96,14 +102,53 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
       setProtoArgs('')
       setProtoEnv([])
     }
+    probeAbortRef.current?.abort()
+    probeAbortRef.current = null
+    setProbing(false)
     setProbeResult(null)
+    setProbeLogs([])
+    setProbeElapsedSec(0)
+    setProbeTimeoutSec(null)
+    return () => {
+      probeAbortRef.current?.abort()
+      probeAbortRef.current = null
+    }
   }, [presetToInstall, protocolToEdit, isOpen])
 
-  const handleModalProbe = async () => {
-    try {
-      setProbing(true)
-      setProbeResult(null)
+  useEffect(() => {
+    const el = probeLogBoxRef.current
+    if (el) {
+      el.scrollTop = el.scrollHeight
+    }
+  }, [probeLogs])
 
+  const switchTransportType = (nextType: 'sse' | 'stdio') => {
+    probeAbortRef.current?.abort()
+    probeAbortRef.current = null
+    setProbing(false)
+    setProtoType(nextType)
+    setProbeResult(null)
+    setProbeLogs([])
+    setProbeElapsedSec(0)
+    setProbeTimeoutSec(null)
+  }
+
+  const handleModalProbe = async () => {
+    probeAbortRef.current?.abort()
+    const controller = new AbortController()
+    probeAbortRef.current = controller
+
+    setProbing(true)
+    setProbeResult(null)
+    setProbeLogs([])
+    setProbeElapsedSec(0)
+    setProbeTimeoutSec(null)
+
+    const timer = window.setInterval(() => {
+      setProbeElapsedSec((sec) => sec + 1)
+    }, 1000)
+
+    try {
       const envList = protoEnv
         .filter((e) => e.key.trim().length > 0)
         .map((e) => `${e.key.trim()}=${e.value.trim()}`)
@@ -120,20 +165,36 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
         }
       })
 
-      const res = await api.probeProtocol({
-        id: protoId.trim() || undefined,
-        type: protoType,
-        url: (protoType === 'sse' || protoType === 'http') ? protoUrl.trim() : undefined,
-        auth_token: (protoType === 'sse' || protoType === 'http') && protoAuthToken.trim() ? protoAuthToken.trim() : undefined,
-        headers: (protoType === 'sse' || protoType === 'http') && Object.keys(headersObj).length > 0 ? headersObj : undefined,
-        command: protoType === 'stdio' ? protoCommand.trim() : undefined,
-        args: protoType === 'stdio' && argsList.length > 0 ? argsList : undefined,
-        env: protoType === 'stdio' && envList.length > 0 ? envList : undefined,
-      })
+      const res = await api.probeProtocolStream(
+        {
+          id: protoId.trim() || undefined,
+          type: protoType,
+          url: (protoType === 'sse' || protoType === 'http') ? protoUrl.trim() : undefined,
+          auth_token: (protoType === 'sse' || protoType === 'http') && protoAuthToken.trim() ? protoAuthToken.trim() : undefined,
+          headers: (protoType === 'sse' || protoType === 'http') && Object.keys(headersObj).length > 0 ? headersObj : undefined,
+          command: protoType === 'stdio' ? protoCommand.trim() : undefined,
+          args: protoType === 'stdio' && argsList.length > 0 ? argsList : undefined,
+          env: protoType === 'stdio' && envList.length > 0 ? envList : undefined,
+        },
+        (ev) => {
+          if (typeof ev.timeout_sec === 'number' && ev.timeout_sec > 0) {
+            setProbeTimeoutSec(ev.timeout_sec)
+          }
+          if (ev.message) {
+            setProbeLogs((prev) => {
+              if (prev[prev.length - 1]?.text === ev.message) return prev
+              const entry = { id: ++nextLogIdRef.current, text: ev.message }
+              const next = [...prev, entry]
+              return next.length > 12 ? next.slice(next.length - 12) : next
+            })
+          }
+        },
+        controller.signal
+      )
 
-      const transportLabel = (res as Record<string, unknown>).transport_mode === 'streamable_http'
+      const transportLabel = res.transport_mode === 'streamable_http'
         ? 'Streamable HTTP'
-        : (res as Record<string, unknown>).transport_mode === 'sse'
+        : res.transport_mode === 'sse'
         ? 'SSE'
         : ''
       const badge = transportLabel ? ` via ${transportLabel}` : ''
@@ -142,9 +203,12 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
         success: true,
         message: `Probe successful! Discovered ${res.count} tool(s)${badge}.`,
         tools: res.tools || [],
-        transportMode: (res as Record<string, unknown>).transport_mode as string | undefined,
+        transportMode: res.transport_mode,
       })
     } catch (err: unknown) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return
+      }
       if (err instanceof ProbeError && err.errorCode === 'UPSTREAM_HTTP_ERROR') {
         setProbeResult({
           success: false,
@@ -161,7 +225,11 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
         })
       }
     } finally {
-      setProbing(false)
+      window.clearInterval(timer)
+      if (probeAbortRef.current === controller) {
+        probeAbortRef.current = null
+        setProbing(false)
+      }
     }
   }
 
@@ -282,10 +350,7 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
                 type="radio"
                 name="protoType"
                 checked={protoType === 'sse' || protoType === 'http'}
-                onChange={() => {
-                  setProtoType('sse')
-                  setProbeResult(null)
-                }}
+                onChange={() => switchTransportType('sse')}
                 className="text-accent-primary focus:ring-accent-primary"
               />
               <span className="text-primary text-xs">Remote SSE (HTTP/S)</span>
@@ -295,10 +360,7 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
                 type="radio"
                 name="protoType"
                 checked={protoType === 'stdio'}
-                onChange={() => {
-                  setProtoType('stdio')
-                  setProbeResult(null)
-                }}
+                onChange={() => switchTransportType('stdio')}
                 className="text-accent-primary focus:ring-accent-primary"
               />
               <span className="text-primary text-xs">Local Stdio Subprocess</span>
@@ -470,11 +532,54 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
             isLoading={probing}
             icon={<Zap className="w-3.5 h-3.5 text-accent-primary" />}
           >
-            {probing ? 'Probing target...' : 'Test Connection'}
+            {probing ? `Probing (${probeElapsedSec}s)...` : 'Test Connection'}
           </Button>
+
+          {probing && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="mt-2 p-3 rounded-xl border border-cyan-500/30 bg-cyan-500/5 text-xs font-mono space-y-1.5"
+            >
+              <div className="flex items-center justify-between gap-2 text-cyan-700 dark:text-cyan-300 font-semibold">
+                <div className="flex items-center gap-2">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-accent-primary shrink-0" />
+                  <span>
+                    {protoType === 'stdio'
+                      ? 'Launching MCP subprocess & awaiting handshake...'
+                      : 'Connecting to remote MCP endpoint...'}
+                  </span>
+                </div>
+                <span className="text-[11px] text-muted tabular-nums shrink-0">
+                  {probeElapsedSec}s{probeTimeoutSec ? ` / ${probeTimeoutSec}s` : ''}
+                </span>
+              </div>
+
+              {protoType === 'stdio' && (
+                <div className="text-[10px] text-muted leading-relaxed">
+                  First-time package runners (uvx/npx) may download runtime dependencies on cold start.
+                </div>
+              )}
+
+              {probeLogs.length > 0 && (
+                <div
+                  ref={probeLogBoxRef}
+                  className="mt-1.5 max-h-28 overflow-y-auto rounded-lg bg-[#0F172A] border border-[#1E293B] px-2.5 py-2 text-[11px] text-cyan-300 space-y-0.5"
+                >
+                  {probeLogs.map((entry) => (
+                    <div key={entry.id} className="whitespace-pre-wrap break-all leading-snug">
+                      {entry.text}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {probeResult && (
             <div
+              role={probeResult.success ? 'status' : 'alert'}
+              aria-live="polite"
               className={`mt-2 p-3 rounded-xl border text-xs font-mono ${
                 probeResult.success
                   ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-800 dark:text-emerald-300'

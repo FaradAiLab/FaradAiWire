@@ -382,16 +382,38 @@ func (a *AdminServer) probeTimeout() time.Duration {
 	return 5 * time.Second
 }
 
-const defaultStdioProbeTimeout = 30 * time.Second
+const (
+	defaultStdioProbeTimeout        = 30 * time.Second
+	defaultPackageStdioProbeTimeout = 120 * time.Second
+)
+
+func isPackageRunnerCommand(command string) bool {
+	base := strings.TrimSpace(command)
+	if idx := strings.LastIndexAny(base, `/\`); idx >= 0 {
+		base = base[idx+1:]
+	}
+	base = strings.ToLower(strings.TrimSuffix(base, ".exe"))
+	switch base {
+	case "uvx", "uv", "npx", "bunx", "pnpm", "yarn", "pipx", "docker", "podman":
+		return true
+	default:
+		return false
+	}
+}
 
 // stdioProbeTimeout resolves the timeout for local stdio MCP probes.
-// Package-runner launchers (uvx, npx, pipx, docker) can exceed 5s on cold-start
-// package downloads, so stdio probes floor at 30s unless configured higher.
-func (a *AdminServer) stdioProbeTimeout() time.Duration {
-	if t := a.probeTimeout(); t > defaultStdioProbeTimeout {
+// Subprocess package launchers (uvx, npx, pipx, docker) can exceed 30s on
+// cold-start runtime/package downloads (e.g. fetching CPython + wheels), so
+// they floor at 120s while other stdio probes floor at 30s.
+func (a *AdminServer) stdioProbeTimeout(command string) time.Duration {
+	floor := defaultStdioProbeTimeout
+	if isPackageRunnerCommand(command) {
+		floor = defaultPackageStdioProbeTimeout
+	}
+	if t := a.probeTimeout(); t > floor {
 		return t
 	}
-	return defaultStdioProbeTimeout
+	return floor
 }
 
 // withMutationGuard enforces read-only access to policies and agents when running in MANAGED mode.

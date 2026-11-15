@@ -20,21 +20,75 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 )
 
-// safeBuffer provides a thread-safe bytes.Buffer wrapper for concurrent subprocess stdio.
+const (
+	maxSafeBufferBytes = 64 * 1024 // retain at most the most recent 64 KiB of subprocess stderr
+	maxSafeLineBytes   = 4 * 1024  // cap per-line progress accumulator before newline/\r
+)
+
+// safeBuffer provides a thread-safe bounded bytes.Buffer wrapper for concurrent subprocess stdio
+// with an optional line-by-line progress callback (triggered on \n or \r).
 type safeBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	lineAcc bytes.Buffer
+	onLine  func(string)
 }
 
 func (s *safeBuffer) Write(p []byte) (n int, err error) {
+	var completed []string
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.buf.Write(p)
+	n, err = s.buf.Write(p)
+	// Keep retention amortized O(1) by compacting back down to the tail limit when doubled.
+	if s.buf.Len() > maxSafeBufferBytes*2 {
+		tail := append([]byte(nil), s.buf.Bytes()[s.buf.Len()-maxSafeBufferBytes:]...)
+		s.buf.Reset()
+		s.buf.Write(tail)
+	}
+	if s.onLine != nil {
+		for _, b := range p {
+			if b == '\n' || b == '\r' {
+				if line := strings.TrimSpace(s.lineAcc.String()); line != "" {
+					completed = append(completed, line)
+				}
+				s.lineAcc.Reset()
+			} else if s.lineAcc.Len() < maxSafeLineBytes {
+				s.lineAcc.WriteByte(b)
+			}
+		}
+	}
+	cb := s.onLine
+	s.mu.Unlock()
+
+	if cb != nil {
+		for _, line := range completed {
+			cb(line)
+		}
+	}
+	return n, err
+}
+
+func (s *safeBuffer) FlushPending() {
+	s.mu.Lock()
+	var line string
+	if s.onLine != nil {
+		line = strings.TrimSpace(s.lineAcc.String())
+		s.lineAcc.Reset()
+	}
+	cb := s.onLine
+	s.mu.Unlock()
+
+	if cb != nil && line != "" {
+		cb(line)
+	}
 }
 
 func (s *safeBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.buf.Len() > maxSafeBufferBytes {
+		return string(s.buf.Bytes()[s.buf.Len()-maxSafeBufferBytes:])
+	}
 	return s.buf.String()
 }
 
@@ -582,6 +636,12 @@ func formatStdioTimeoutError(command string, ctxErr error, stderr string) error 
 
 // ProbeAndDiscoverMCPToolsStdio executes a local subprocess MCP server via stdin/stdout, performs the MCP initialization handshake, and calls tools/list.
 func ProbeAndDiscoverMCPToolsStdio(ctx context.Context, command string, args []string, env []string) ([]map[string]interface{}, error) {
+	return ProbeAndDiscoverMCPToolsStdioWithProgress(ctx, command, args, env, nil)
+}
+
+// ProbeAndDiscoverMCPToolsStdioWithProgress behaves like ProbeAndDiscoverMCPToolsStdio while
+// streaming completed stderr progress lines (e.g. uvx/npx download status) to onProgress.
+func ProbeAndDiscoverMCPToolsStdioWithProgress(ctx context.Context, command string, args []string, env []string, onProgress func(string)) ([]map[string]interface{}, error) {
 	trimmedCmd := strings.TrimSpace(command)
 	if trimmedCmd == "" {
 		return nil, errors.New("command cannot be empty for stdio probe")
@@ -604,7 +664,7 @@ func ProbeAndDiscoverMCPToolsStdio(ctx context.Context, command string, args []s
 		return nil, fmt.Errorf("failed to open stdout pipe: %w", err)
 	}
 
-	var stderrBuf safeBuffer
+	stderrBuf := safeBuffer{onLine: onProgress}
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
@@ -621,6 +681,7 @@ func ProbeAndDiscoverMCPToolsStdio(ctx context.Context, command string, args []s
 		procGuard.killTree()
 		procGuard.markReaped()
 		_ = cmd.Wait()
+		stderrBuf.FlushPending()
 	}()
 
 	scanner := bufio.NewScanner(stdoutPipe)

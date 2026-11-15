@@ -65,7 +65,9 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
     exclude_tools: [],
   })
   const [savingAgent, setSavingAgent] = useState(false)
+  const [isCreatedInSession, setIsCreatedInSession] = useState(false)
   const [isDlpSaving, setIsDlpSaving] = useState(false)
+  const effectiveMode: 'create' | 'edit' = mode === 'edit' || isCreatedInSession ? 'edit' : 'create'
   const [dlpReloadToken, setDlpReloadToken] = useState(0)
   const [banner, setBanner] = useState<{
     type: 'success' | 'error' | 'info'
@@ -156,6 +158,7 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
   // Initialize form state
   useEffect(() => {
     if (!isOpen) return
+    setIsCreatedInSession(false)
     setActiveTab('general')
     setBanner(null)
     setDetachTarget(null)
@@ -350,11 +353,13 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
     try {
       setSavingAgent(true)
       setBanner(null)
-      if (mode === 'create') {
+      if (effectiveMode === 'create') {
         await api.createAgent(payload)
+        setIsCreatedInSession(true)
+        await reloadFromRemote(agentName.trim())
         showBanner(
           'success',
-          `Agent '${agentName}' registered successfully with snapshot checkpoint.`
+          `Agent '${agentName.trim()}' registered successfully with snapshot checkpoint.`
         )
       } else {
         await api.updateAgent(agentName.trim(), payload)
@@ -379,12 +384,12 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
     <Drawer
       isOpen={isOpen}
       onClose={onClose}
-      title={mode === 'create' ? 'Create Security Profile' : `Profile Studio: ${agentName}`}
+      title={effectiveMode === 'create' ? 'Create Security Profile' : `Profile Studio: ${agentName}`}
       subtitle="Unified governance studio for profile routing, MCP tool scoping, and defense-in-depth pipeline."
       icon={<Bot className="w-5 h-5 text-accent" />}
       maxWidth="5xl"
       headerAction={
-        mode === 'edit' && agentName ? (
+        effectiveMode === 'edit' && agentName ? (
           <Button
             type="button"
             variant="outline"
@@ -488,7 +493,7 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
                 isLoading={savingAgent}
                 disabled={savingAgent || !agentName.trim()}
               >
-                {mode === 'create' ? 'Create Agent' : 'Save General Config'}
+                {effectiveMode === 'create' ? 'Create Agent' : 'Save General Config'}
               </Button>
             )}
             {activeTab === 'guardrails' && (
@@ -614,7 +619,7 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
             />
 
             <GeneralConfigTab
-              mode={mode}
+              mode={effectiveMode}
               agentName={agentName}
               setAgentName={setAgentName}
               description={description}
@@ -640,7 +645,7 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
         {/* Tab 2: DLP Pipeline */}
         {activeTab === 'dlp' && (
           <div>
-            {mode === 'create' && !agentName.trim() ? (
+            {effectiveMode === 'create' && !agentName.trim() ? (
               <div className="p-6 text-center text-xs text-muted font-mono">
                 Please specify an Agent Name in General Settings first.
               </div>
@@ -705,7 +710,7 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
         />
       )}
 
-      {mode === 'edit' && agentName && (
+      {effectiveMode === 'edit' && agentName && (
         <AgentRollbackModal
           isOpen={isRollbackOpen}
           agentName={agentName}

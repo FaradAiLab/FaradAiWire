@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
@@ -227,14 +228,8 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 
 	probeTimeout := a.probeTimeout()
 	if reqType == "stdio" {
-		probeTimeout = a.stdioProbeTimeout()
+		probeTimeout = a.stdioProbeTimeout(req.Command)
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
-	defer cancel()
-
-	var tools []map[string]interface{}
-	var probeErr error
-	var transportMode string
 
 	switch reqType {
 	case "stdio":
@@ -247,9 +242,6 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 			})
 			return
 		}
-		tools, probeErr = ProbeAndDiscoverMCPToolsStdio(ctx, req.Command, req.Args, req.Env)
-		transportMode = "stdio"
-
 	case "sse", "http":
 		if strings.TrimSpace(req.URL) == "" {
 			w.Header().Set("Content-Type", "application/json")
@@ -260,21 +252,6 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 			})
 			return
 		}
-		ssrfOpts := transport.DefaultSafeOptions()
-		a.mu.RLock()
-		cfg := a.cfg
-		a.mu.RUnlock()
-		if cfg != nil {
-			ssrfOpts = transport.OptionsFromConfig(cfg.Security.SSRFProtection)
-		}
-		result, err := ProbeWithAutoNegotiation(ctx, a.SafeHTTPClient(), req.URL, req.AuthToken, req.Headers, ssrfOpts)
-		if err != nil {
-			probeErr = err
-		} else {
-			tools = result.Tools
-			transportMode = result.TransportMode
-		}
-
 	default:
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -285,27 +262,43 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	wantsStream := r.URL.Query().Get("stream") == "1" ||
+		strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream")
+
+	ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
+	defer cancel()
+
+	runProbe := func(onProgress func(string)) ([]map[string]interface{}, string, error) {
+		switch reqType {
+		case "stdio":
+			tools, err := ProbeAndDiscoverMCPToolsStdioWithProgress(ctx, req.Command, req.Args, req.Env, onProgress)
+			return tools, "stdio", err
+		default: // "sse", "http"
+			ssrfOpts := transport.DefaultSafeOptions()
+			a.mu.RLock()
+			cfg := a.cfg
+			a.mu.RUnlock()
+			if cfg != nil {
+				ssrfOpts = transport.OptionsFromConfig(cfg.Security.SSRFProtection)
+			}
+			result, err := ProbeWithAutoNegotiation(ctx, a.SafeHTTPClient(), req.URL, req.AuthToken, req.Headers, ssrfOpts)
+			if err != nil {
+				return nil, "", err
+			}
+			return result.Tools, result.TransportMode, nil
+		}
+	}
+
+	if wantsStream {
+		streamProtocolProbe(w, r, ctx, reqType, req.Command, probeTimeout, runProbe)
+		return
+	}
+
+	tools, transportMode, probeErr := runProbe(nil)
+
 	w.Header().Set("Content-Type", "application/json")
 	if probeErr != nil {
-		status := http.StatusBadGateway
-		errCode := "PROBE_FAILED"
-		respPayload := map[string]interface{}{
-			"message": probeErr.Error(),
-		}
-
-		var upstreamErr *UpstreamHTTPError
-		if errors.As(probeErr, &upstreamErr) {
-			// Structured upstream HTTP error with actionable diagnostics
-			status = http.StatusBadGateway
-			errCode = upstreamErr.Category
-			respPayload["status_code"] = upstreamErr.StatusCode
-			respPayload["remediation"] = upstreamErr.Remediation
-		} else if strings.Contains(probeErr.Error(), "SSRF") || strings.Contains(probeErr.Error(), "security violation") {
-			status = http.StatusBadRequest
-			errCode = "SSRF_VIOLATION"
-		}
-
-		respPayload["error"] = errCode
+		status, respPayload := buildProbeErrorPayload(probeErr)
 		w.WriteHeader(status)
 		json.NewEncoder(w).Encode(respPayload)
 		return
@@ -322,6 +315,140 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 		"tools":          tools,
 		"transport_mode": transportMode,
 	})
+}
+
+func streamProtocolProbe(
+	w http.ResponseWriter,
+	r *http.Request,
+	ctx context.Context,
+	reqType string,
+	command string,
+	probeTimeout time.Duration,
+	runProbe func(onProgress func(string)) ([]map[string]interface{}, string, error),
+) {
+	flusher, canFlush := w.(http.Flusher)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	startedAt := time.Now()
+	timeoutSec := int(probeTimeout.Seconds())
+	initialMsg := fmt.Sprintf("Connecting to %s endpoint...", reqType)
+	if reqType == "stdio" {
+		initialMsg = fmt.Sprintf("Starting stdio subprocess '%s'...", command)
+	}
+	emitProgress := func(msg string) {
+		writeProbeSSE(w, flusher, canFlush, "progress", map[string]interface{}{
+			"message":     msg,
+			"elapsed_ms":  time.Since(startedAt).Milliseconds(),
+			"timeout_sec": timeoutSec,
+		})
+	}
+	emitProgress(initialMsg)
+
+	progressCh := make(chan string, 64)
+	type probeOutcome struct {
+		tools         []map[string]interface{}
+		transportMode string
+		err           error
+	}
+	doneCh := make(chan probeOutcome, 1)
+
+	go func() {
+		tools, mode, err := runProbe(func(line string) {
+			select {
+			case progressCh <- line:
+			default:
+				// Drop excess progress lines rather than blocking the subprocess stderr pipe.
+			}
+		})
+		doneCh <- probeOutcome{tools: tools, transportMode: mode, err: err}
+	}()
+
+	drainProgress := func() {
+		for {
+			select {
+			case line := <-progressCh:
+				emitProgress(line)
+			default:
+				return
+			}
+		}
+	}
+
+	var outcome probeOutcome
+	for waiting := true; waiting; {
+		select {
+		case line := <-progressCh:
+			emitProgress(line)
+		case outcome = <-doneCh:
+			waiting = false
+		case <-ctx.Done():
+			// Wait for runProbe goroutine to unwind and flush pending stderr lines before closing.
+			outcome = <-doneCh
+			waiting = false
+		}
+	}
+
+	// Skip writing SSE frames if the HTTP client disconnected/aborted the request.
+	if r.Context().Err() != nil {
+		return
+	}
+
+	drainProgress()
+
+	if outcome.err != nil {
+		_, respPayload := buildProbeErrorPayload(outcome.err)
+		writeProbeSSE(w, flusher, canFlush, "error", respPayload)
+		return
+	}
+
+	tools := outcome.tools
+	if tools == nil {
+		tools = make([]map[string]interface{}, 0)
+	}
+	writeProbeSSE(w, flusher, canFlush, "result", map[string]interface{}{
+		"status":         "success",
+		"count":          len(tools),
+		"tools":          tools,
+		"transport_mode": outcome.transportMode,
+	})
+}
+
+func buildProbeErrorPayload(probeErr error) (int, map[string]interface{}) {
+	status := http.StatusBadGateway
+	errCode := "PROBE_FAILED"
+	respPayload := map[string]interface{}{
+		"message": probeErr.Error(),
+	}
+
+	var upstreamErr *UpstreamHTTPError
+	if errors.As(probeErr, &upstreamErr) {
+		// Structured upstream HTTP error with actionable diagnostics
+		status = http.StatusBadGateway
+		errCode = upstreamErr.Category
+		respPayload["status_code"] = upstreamErr.StatusCode
+		respPayload["remediation"] = upstreamErr.Remediation
+	} else if strings.Contains(probeErr.Error(), "SSRF") || strings.Contains(probeErr.Error(), "security violation") {
+		status = http.StatusBadRequest
+		errCode = "SSRF_VIOLATION"
+	}
+
+	respPayload["error"] = errCode
+	return status, respPayload
+}
+
+func writeProbeSSE(w http.ResponseWriter, flusher http.Flusher, canFlush bool, event string, payload interface{}) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
+	if canFlush {
+		flusher.Flush()
+	}
 }
 
 // handleProtocols manages CRUD operations for MCP protocol definitions.
