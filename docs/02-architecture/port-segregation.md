@@ -39,7 +39,7 @@ Many traditional API proxies multiplex administrative routes (`/admin`, `/metric
 | :--- | :--- | :--- |
 | **Primary Consumer** | AI Agents (Claude Code, Cursor, SDKs) | Developers, Security Engineers, Browsers |
 | **Default Binding** | `127.0.0.1:8090` | `127.0.0.1:8095` (Strict Loopback) |
-| **Authentication** | Fail-Closed (`Authorization: Bearer <key>`) | Loopback Standalone or `X-API-Key` |
+| **Authentication** | Fail-Closed (`Authorization: Bearer <key>`) | Loopback Standalone or `Authorization: Bearer <token>` (`ADMIN_API_KEY` / `FARADAI_WIRE_ADMIN_TOKEN`) |
 | **Primary Endpoints** | `/sse`, `/message`, `/mcp` | `/admin/dashboard`, `/admin/status`, REST APIs |
 | **Payload Protocols** | JSON-RPC 2.0 over SSE & HTTP POST | HTML/React UI, JSON REST responses |
 | **Security Pipeline** | Full Inspection Pipeline (Prefill, DLP, SLM) | Direct Administrative Handlers |
@@ -62,7 +62,8 @@ The Proxy Ingress listener handles high-volume JSON-RPC 2.0 streaming.
 ## Port 8095: Admin Console Details
 
 The Admin Console listener hosts the embedded developer dashboard and system configuration APIs.
-- **Loopback Binding ([ADR-0028](../adr/0028-open-core-admin-auth-purge-and-strict-loopback-isolation.md)):** By default, Port 8095 strictly binds to `127.0.0.1`. In container environments, access is guarded via `API_KEY` or `X-API-Key` header.
+- **Loopback Binding ([ADR-0028](../adr/0028-open-core-admin-auth-purge-and-strict-loopback-isolation.md)):** By default, Port 8095 strictly binds to `127.0.0.1` (`admin_host` / `--admin-host` / `FARADAI_WIRE_ADMIN_HOST`). Binding the Admin Console to a non-loopback address fails closed at startup unless `ADMIN_API_KEY` or `FARADAI_WIRE_ADMIN_TOKEN` is configured, in which case protected Admin APIs require `Authorization: Bearer <token>`.
+- **Browser CSRF & CSWSH Isolation:** Admin routes and WebSocket upgrades validate `Sec-Fetch-Site`, `Origin`, and `Content-Type: application/json` (on mutations). Setting `security.cors_allowed_origins: ["*"]` does not bypass Origin/CSRF or WebSocket Origin checks.
 - **Capabilities:**
   - **Embedded Web Console (`/admin/dashboard`):** Real-time threat visualizer, audit log stream, and agent studio.
   - **Health & Status (`/admin/status`):** Subsystem health, active connections, and DuckDB row counts.

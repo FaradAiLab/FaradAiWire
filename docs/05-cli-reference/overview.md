@@ -16,6 +16,8 @@ Usage: faradaiwire <command> [options]
 
 Commands:
   run       Start the FaradAiWire PEP gateway daemon
+  connect   Register a downstream stdio or SSE MCP server in faradaiwire.yaml
+  adopt     Discover and securely wrap local MCP clients to route through FaradAiWire
   doctor    Diagnose system health, port bindings, and discover local SLM inference engines
   audit     Perform static security analysis on agent skill directories or MCP packages
   guard     Inspect and manage local Small Language Models (list, status, install, uninstall)

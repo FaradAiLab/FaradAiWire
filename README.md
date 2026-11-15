@@ -1,7 +1,7 @@
 # FaradAiWire 🛡️
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8.svg)](go.mod)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](go.mod)
 [![Architecture: Open Core PEP](https://img.shields.io/badge/Architecture-Open_Core_PEP-success.svg)](#-open-core--enterprise-edition-fawee)
 
 FaradAiWire is a lightweight, zero-trust security gateway for AI agents, specifically protecting against Model Context Protocol (MCP) threats, prompt injection, sensitive data leakage, and malicious agent skills.
@@ -78,7 +78,7 @@ irm https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/install.ps1 | 
 faradaiwire run
 ```
 
-### 🛠️ Build from Source (Go 1.23+)
+### 🛠️ Build from Source (Go 1.25+)
 ```bash
 git clone https://github.com/FaradAiLab/FaradAiWire.git
 cd FaradAiWire
@@ -121,7 +121,7 @@ To elevate defense against complex zero-day indirect prompt injections and jailb
 | Port | Service | Endpoints | Authentication |
 | :--- | :--- | :--- | :--- |
 | **8090** | **Proxy Ingress** | `/sse`, `/message`, `/mcp` | Fail-closed (`Authorization: Bearer <key>`) |
-| **8095** | **Admin Console** | `/admin/dashboard`, `/admin/status`, REST APIs | Local Standalone or `X-API-Key` |
+| **8095** | **Admin Console** | `/admin/dashboard`, `/admin/status`, REST APIs | Loopback standalone or `Authorization: Bearer <token>` (`ADMIN_API_KEY` / `FARADAI_WIRE_ADMIN_TOKEN`) |
 
 ---
 
@@ -131,9 +131,11 @@ FaradAiWire can be configured via `config.yaml` or overridden through environmen
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `API_KEY` | *(None)* | Master secret for Admin endpoints and agent ingress authentication. |
+| `API_KEY` | *(None)* | Agent ingress proxy authentication secret (`Authorization: Bearer <key>`). |
+| `ADMIN_API_KEY` / `FARADAI_WIRE_ADMIN_TOKEN` | *(None)* | Admin Console Bearer token. Required at startup if `admin_host` is bound to a non-loopback address. |
 | `GATEWAY_ID` | `faradaiwire-gw-local-01` | Unique node identifier recorded in audit telemetry. |
-| `FARADAI_WIRE_HOST` | `127.0.0.1` | Network interface to bind listeners (`0.0.0.0` for containers). |
+| `FARADAI_WIRE_HOST` | `127.0.0.1` | Network interface to bind the proxy ingress listener (`0.0.0.0` for containers). |
+| `FARADAI_WIRE_ADMIN_HOST` | `127.0.0.1` | Network interface to bind the Admin Console listener (defaults to strict loopback). |
 | `FARADAI_WIRE_HOME` | `~/.faradaiwire` | Data directory for runtime state, keys, and DuckDB analytics. |
 | `FARADAI_WIRE_DEFAULT_AGENT` | `default` | Fallback agent domain if no routing header is present. |
 | `FARADAI_WIRE_ALLOW_LOCAL_TARGETS` | `false` | Set to `true` to allow upstream MCP targets on loopback/private IPs. |

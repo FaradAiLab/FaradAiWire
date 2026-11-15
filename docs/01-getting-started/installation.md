@@ -16,7 +16,7 @@ FaradAiWire is distributed as a single-tenant host-native binary to ensure seaml
   - Linux Kernel 5.4+ (Ubuntu, Debian, Fedora, Arch; `x86_64` & `aarch64`)
   - Windows 10 / 11 / Server 2022 (`x64`)
 - **Memory & CPU:** $\ge 256\text{ MB}$ RAM, 1 vCPU (static regex engine consumes $<30\text{ MB}$ at idle).
-- **Compilation Requirements (Source only):** Go 1.23+ with `CGO_ENABLED=1` (required for embedded DuckDB analytics engine) and a C compiler (`clang` on macOS, `gcc` on Linux).
+- **Compilation Requirements (Source only):** Go 1.25+ with `CGO_ENABLED=1` (required for embedded DuckDB analytics engine) and a C compiler (`clang` on macOS, `gcc` on Linux).
 
 ---
 
@@ -55,11 +55,13 @@ brew services stop faradaiwire
 
 ### 2. Linux & macOS (Universal Shell Installer)
 
-A zero-dependency POSIX shell script that auto-detects OS architecture and installs the binary to `/usr/local/bin` (or `~/.local/bin` when non-root):
+A zero-dependency POSIX shell script that uses TLS 1.2+, prefers Homebrew on macOS when available, verifies downloads against `checksums.txt` (SHA-256), and installs the binary to `/usr/local/bin` (or `~/.local/bin` when non-root with `PATH` setup):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/install.sh | sh
 ```
+
+You can pin a specific release with `FARADAI_WIRE_VERSION=v0.1.3`.
 
 ---
 
@@ -71,16 +73,16 @@ Run in a PowerShell terminal (requires PowerShell 5.1+):
 irm https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/install.ps1 | iex
 ```
 
-The script installs `faradaiwire.exe` to `%LOCALAPPDATA%\Programs\faradaiwire` (`$env:LOCALAPPDATA\Programs\faradaiwire`) and appends it to your User `PATH`.
+The script enforces TLS 1.2, verifies the downloaded archive against `checksums.txt` (SHA-256), stops any running `faradaiwire` process before replacing the binary, installs `faradaiwire.exe` to `%LOCALAPPDATA%\Programs\faradaiwire` (`$env:LOCALAPPDATA\Programs\faradaiwire`), and appends it to your User `PATH`. Pin a specific release with `$env:FARADAI_WIRE_VERSION = "v0.1.3"`.
 
 ---
 
 ### 4. Direct Binary Download (GitHub Releases)
 
-Pre-compiled release archives with standalone executables and cryptographically signed SHA-256 checksums:
+Pre-compiled release archives (including `linux_amd64`, `linux_arm64`, `darwin_amd64`, `darwin_arm64`, and `windows_amd64`) with standalone executables and SHA-256 checksums:
 
 1. Visit [GitHub Releases](https://github.com/FaradAiLab/FaradAiWire/releases).
-2. Download the archive matching your target architecture (e.g. `faradaiwire_darwin_arm64.tar.gz`).
+2. Download the archive matching your target architecture (e.g. `faradaiwire_darwin_arm64.tar.gz` or `faradaiwire_linux_arm64.tar.gz`).
 3. Verify the checksum:
    ```bash
    shasum -a 256 -c checksums.txt
@@ -93,7 +95,7 @@ Pre-compiled release archives with standalone executables and cryptographically 
 
 ---
 
-### 5. Build from Source (Go 1.23+)
+### 5. Build from Source (Go 1.25+)
 
 To develop or compile the latest unreleased features directly from source:
 

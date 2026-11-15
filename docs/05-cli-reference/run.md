@@ -23,8 +23,9 @@ faradaiwire run [flags]
 | :--- | :--- | :--- | :--- |
 | **`--config`** | `string` | *(Auto-discovered)* | Explicit path to a YAML configuration file. |
 | **`--standalone`**| `bool` | `false` | Force offline-first standalone mode (zero-egress, disables any cloud telemetry). |
-| **`--host`** | `string` | `127.0.0.1` | Network interface address to bind HTTP listeners to. Use `0.0.0.0` in containers. |
+| **`--host`** | `string` | `127.0.0.1` | Network interface address to bind the proxy ingress listener (`0.0.0.0` in containers). |
 | **`--port`** | `int` | `8090` | Ingress proxy port for agent tool traffic (`/sse`, `/message`, `/mcp`). |
+| **`--admin-host`**| `string` | `127.0.0.1` | Network interface address to bind the Admin Console listener. Non-loopback bindings require `ADMIN_API_KEY` or `FARADAI_WIRE_ADMIN_TOKEN`. |
 | **`--admin-port`**| `int` | `8095` | Admin Console port for web UI, metrics, and REST management APIs. |
 
 ---

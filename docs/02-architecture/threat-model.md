@@ -87,6 +87,15 @@ A developer installs a third-party agent skill or MCP wrapper from GitHub that c
 
 ---
 
+## Admin Control Plane & Supply-Chain Hardening
+
+- **Fail-Closed Non-Loopback Admin Binding:** By default, the Admin Console binds to `127.0.0.1`. Binding `admin_host` to a non-loopback interface without `ADMIN_API_KEY` or `FARADAI_WIRE_ADMIN_TOKEN` refuses startup.
+- **CSRF & Cross-Site WebSocket Hijacking (CSWSH) Defense:** Browser requests to `/admin`, `/api`, and `/ws` enforce `Sec-Fetch-Site` (`cross-site` rejected with `403`), explicit `Origin` checks, and `application/json` `Content-Type` validation on state-changing requests (`415` otherwise). Wildcard CORS (`cors_allowed_origins: ["*"]`) never bypasses CSRF or WebSocket origin checks.
+- **Credential Redaction & Redirect Prevention:** Admin status and SLM endpoints (`/admin/status`, `/admin/slm/probe`, `/admin/slm/configure`) redact embedded URL credentials before returning responses, and CLI HTTP clients (`guard`, `adopt`) block HTTP redirects and restrict Bearer token transmission to loopback or HTTPS endpoints.
+- **Verified Installer Artifacts:** Both `install.sh` and `install.ps1` require TLS 1.2+ and verify downloaded release archives against `checksums.txt` (SHA-256) prior to installation.
+
+---
+
 ## The Zero-Egress Guarantee
 
 FaradAiWire's open-source Core is **100% offline-first**:

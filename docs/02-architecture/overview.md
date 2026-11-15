@@ -114,7 +114,7 @@ Any filter returning a terminal error (`*mcp.Error`) immediately aborts pipeline
 
 ---
 
-## Memory & Concurrency Design (Go 1.23+)
+## Memory & Concurrency Design (Go 1.25+)
 
 FaradAiWire is engineered in Go for minimal footprint and extreme concurrency:
 - **Zero-Allocation Hot Path:** Payload inspection reuses `sync.Pool` byte buffers and zero-copy byte slices to achieve sub-millisecond P99 response times.

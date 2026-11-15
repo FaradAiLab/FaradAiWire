@@ -63,7 +63,7 @@ Expected JSON response:
 ```json
 {
   "status": "healthy",
-  "version": "1.0.0",
+  "version": "v0.1.3",
   "runtime_mode": "standalone",
   "ingress_port": 8090,
   "admin_port": 8095,

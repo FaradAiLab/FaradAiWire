@@ -24,9 +24,12 @@ Settings are resolved in the following order (highest precedence first):
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| **`API_KEY`** | *(None)* | Master secret for agent Ingress Bearer authentication and Admin API endpoints. |
+| **`API_KEY`** | *(None)* | Master secret for agent Ingress Bearer authentication. |
+| **`ADMIN_API_KEY`** | *(None)* | Bearer secret for Admin REST APIs & WebSockets (`/admin/*`, `/api/*`, `/ws`). Required when binding Admin Console to a non-loopback host. |
+| **`FARADAI_WIRE_ADMIN_TOKEN`** | *(None)* | Alternative env var for the Admin Bearer token when `ADMIN_API_KEY` is unset. |
 | **`GATEWAY_ID`** | `faradaiwire-gw-local-01` | Unique node identifier recorded in audit telemetry and DuckDB events. |
-| **`FARADAI_WIRE_HOST`** | `127.0.0.1` | Network interface address to bind listeners (`0.0.0.0` for containers). |
+| **`FARADAI_WIRE_HOST`** | `127.0.0.1` | Network interface address to bind Ingress listeners (`0.0.0.0` for containers). |
+| **`FARADAI_WIRE_ADMIN_HOST`** | `127.0.0.1` | Network interface address for the Admin Console listener (`admin_host` / `--admin-host` takes higher precedence). |
 | **`FARADAI_WIRE_HOME`** | `~/.faradaiwire` | Data directory for runtime state, DuckDB analytics database, and pinned schemas. |
 | **`FARADAI_WIRE_DEFAULT_AGENT`** | `default` | Fallback agent domain name when no `X-Farad-Agent` header is present. |
 | **`FARADAI_WIRE_ALLOW_LOCAL_TARGETS`**| `false` | When set to `true`, permits upstream MCP targets on loopback/private IPs (disables SSRF block). |
@@ -35,6 +38,15 @@ Settings are resolved in the following order (highest precedence first):
 | **`FARADAI_WIRE_HMAC_SECRET`** | *(None)* | 32-byte cryptographic secret used for verifying signed context headers. |
 | **`LISTEN_PORT`** | `8090` | Ingress proxy port for agent traffic. |
 | **`ADMIN_PORT`** | `8095` | Admin Console and REST API port. |
+
+---
+
+## Installer & Maintenance Variables
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| **`FARADAI_WIRE_VERSION`** | *(Latest release)* | Pin a specific release tag (e.g. `v0.1.3`) in `install.sh` or `install.ps1` instead of auto-discovering the latest GitHub release. |
+| **`FARADAI_WIRE_PURGE`** | `0` | Set to `1` (or `true`) to remove `~/.faradaiwire` runtime data during `uninstall.sh` / `uninstall.ps1`. |
 
 ---
 

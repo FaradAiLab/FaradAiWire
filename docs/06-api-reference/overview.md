@@ -23,7 +23,7 @@ graph TD
     end
 
     subgraph Admin Port [Port 8095: Admin Console]
-        Admin["Browser / Admin Client"] -->|"Source: 127.0.0.1 or X-API-Key"| V2{"Loopback / Auth"}
+        Admin["Browser / Admin Client"] -->|"Loopback or Authorization: Bearer"| V2{"Loopback / CSRF / Auth"}
         V2 -->|"Allowed"| AdminAPI["Admin REST Handlers"]
         V2 -->|"Denied"| E403["HTTP 403 Forbidden"]
     end

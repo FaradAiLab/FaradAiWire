@@ -5,7 +5,13 @@ description: "HTTP endpoints on Port 8095 for gateway status, configuration togg
 
 # Admin REST API Endpoints 🛠️
 
-All endpoints documented here are hosted on FaradAiWire's **Admin Console Port (`8095`)**.
+All endpoints documented here are hosted on FaradAiWire's **Admin Console Port (`8095`)** (bound to `127.0.0.1` by default via `--admin-host` / `admin_host`).
+
+### Authentication & CSRF Protections
+
+- **Bearer Authentication:** When `ADMIN_API_KEY` or `FARADAI_WIRE_ADMIN_TOKEN` is configured (mandatory whenever `admin_host` is bound to a non-loopback interface), protected `/admin` and `/api` endpoints require `Authorization: Bearer <token>` (checked in constant time; `/admin/dashboard` and `/admin/assets/*` remain reachable so the web UI can load).
+- **CSRF & Origin Enforcement:** Cross-site browser requests (`Sec-Fetch-Site: cross-site` or disallowed `Origin`) are rejected with `403 Forbidden`. Setting `security.cors_allowed_origins: ["*"]` does not disable Origin validation for CSRF or WebSocket upgrades.
+- **JSON Content-Type:** Mutating requests (`POST`, `PUT`, `PATCH`, `DELETE`) must use `Content-Type: application/json` (otherwise rejected with `415 Unsupported Media Type`).
 
 ---
 
@@ -23,7 +29,7 @@ curl -s http://127.0.0.1:8095/admin/status
 ```json
 {
   "status": "healthy",
-  "version": "1.0.0",
+  "version": "v0.1.3",
   "runtime_mode": "standalone",
   "ingress_port": 8090,
   "admin_port": 8095,
@@ -121,4 +127,35 @@ curl -N http://127.0.0.1:8095/api/v1/logs/events
 event: audit_verdict
 data: {"id":"evt-109","timestamp":"2026-10-30T21:00:00Z","verdict":"BLOCKED","rule":"sensitive_files","tool":"fetch","agent":"claude-code"}
 ```
+
+---
+
+## 6. SLM Guard Probe & Configuration
+
+### `GET /admin/slm/probe`
+Probes configured or locally available SLM inference backends (Ollama, Docker Model Runner, local runtime, or custom URL). Any embedded URL credentials in `configured_url` are redacted before returning the JSON payload.
+
+### `POST /admin/slm/configure`
+Updates SLM guard settings and atomically reloads configuration across the admin server and live gateway.
+
+**Request (`Content-Type: application/json`):**
+```json
+{
+  "classifier_url": "http://127.0.0.1:11434",
+  "enabled": true,
+  "mode": "local"
+}
+```
+Supported optional fields: `classifier_url`, `enabled`, `mode`, `ollama_url`, `docker_url`, `custom_url`.
+
+**Response (`200 OK`):**
+```json
+{
+  "status": "success",
+  "classifier_url": "http://127.0.0.1:11434",
+  "mode": "local",
+  "message": "SLM configuration successfully updated"
+}
+```
+*(Embedded credentials in `classifier_url` are redacted in the response.)*
 
