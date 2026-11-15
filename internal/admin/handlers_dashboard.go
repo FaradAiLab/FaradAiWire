@@ -139,6 +139,7 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	ingressURL := fmt.Sprintf("http://%s:%d", listenHost, listenPort)
 
 	resp := map[string]interface{}{
+		"version":             config.GetVersion(),
 		"active_filters":      activeFilters,
 		"gateway_id":          gatewayID,
 		"status":              "Ready",

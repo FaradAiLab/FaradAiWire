@@ -384,3 +384,23 @@ func TestConfig_Clone(t *testing.T) {
 		t.Error("expected original pointer booleans to remain true")
 	}
 }
+
+func TestGetVersion(t *testing.T) {
+	orig := config.RuntimeVersion
+	defer func() { config.RuntimeVersion = orig }()
+
+	config.RuntimeVersion = config.Version
+	if got := config.GetVersion(); got != config.Version {
+		t.Errorf("GetVersion() = %q, want %q", got, config.Version)
+	}
+
+	config.RuntimeVersion = "0.1.9"
+	if got := config.GetVersion(); got != "v0.1.9" {
+		t.Errorf("GetVersion() without prefix = %q, want %q", got, "v0.1.9")
+	}
+
+	config.RuntimeVersion = "   "
+	if got := config.GetVersion(); got != config.Version {
+		t.Errorf("GetVersion() blank fallback = %q, want %q", got, config.Version)
+	}
+}

@@ -83,3 +83,30 @@ func TestProbeAndDiscoverMCPToolsStdio_KillsGrandchildOnTimeout(t *testing.T) {
 		t.Fatalf("expected grandchild process group to be killed promptly, took %v", elapsed)
 	}
 }
+
+func TestProbeAndDiscoverMCPToolsStdio_TimeoutIncludesStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell test skipped on Windows")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	_, err := ProbeAndDiscoverMCPToolsStdio(ctx, "sh", []string{"-c", "echo 'downloading packages...' >&2; sleep 10"}, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "downloading packages...") {
+		t.Fatalf("expected timeout error to include stderr output, got: %v", err)
+	}
+}
+
+func TestStdioProbeTimeout_FloorsAt30s(t *testing.T) {
+	s := NewAdminServer(nil, nil, nil)
+	if got := s.probeTimeout(); got != 5*time.Second {
+		t.Fatalf("expected default probeTimeout=5s, got %v", got)
+	}
+	if got := s.stdioProbeTimeout(); got != 30*time.Second {
+		t.Fatalf("expected default stdioProbeTimeout=30s, got %v", got)
+	}
+}

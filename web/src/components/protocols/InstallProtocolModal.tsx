@@ -282,7 +282,10 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
                 type="radio"
                 name="protoType"
                 checked={protoType === 'sse' || protoType === 'http'}
-                onChange={() => setProtoType('sse')}
+                onChange={() => {
+                  setProtoType('sse')
+                  setProbeResult(null)
+                }}
                 className="text-accent-primary focus:ring-accent-primary"
               />
               <span className="text-primary text-xs">Remote SSE (HTTP/S)</span>
@@ -292,7 +295,10 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
                 type="radio"
                 name="protoType"
                 checked={protoType === 'stdio'}
-                onChange={() => setProtoType('stdio')}
+                onChange={() => {
+                  setProtoType('stdio')
+                  setProbeResult(null)
+                }}
                 className="text-accent-primary focus:ring-accent-primary"
               />
               <span className="text-primary text-xs">Local Stdio Subprocess</span>
@@ -306,7 +312,7 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
               label="Remote SSE URL"
               type="url"
               required
-              placeholder="https://mcp.context7.com/mcp"
+              placeholder="https://mcp.example.com/mcp"
               value={protoUrl}
               onChange={(e) => setProtoUrl(e.target.value)}
               isMono
@@ -315,7 +321,11 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
             <Input
               label="Authentication Token (Bearer)"
               type="password"
-              placeholder="e.g. ctx7_live_... or ${CONTEXT7_API_KEY}"
+              placeholder={
+                presetToInstall?.env_requirements?.length
+                  ? `e.g. \${${presetToInstall.env_requirements[0]}} or bearer token`
+                  : 'e.g. ${MCP_API_KEY} or bearer token'
+              }
               value={protoAuthToken}
               onChange={(e) => setProtoAuthToken(e.target.value)}
               isMono
@@ -326,7 +336,7 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
               <div className="flex items-center justify-between">
                 <div>
                   <label className="text-xs font-semibold text-primary">Custom HTTP Headers</label>
-                  <p className="text-[10px] text-muted">Optional custom headers forwarded upstream (e.g. X-API-Key, Context7-API-Key, Organization-Id)</p>
+                  <p className="text-[10px] text-muted">Optional custom headers forwarded upstream (e.g. X-API-Key, Authorization, Organization-Id)</p>
                 </div>
                 <button
                   type="button"

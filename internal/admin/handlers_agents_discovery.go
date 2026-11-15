@@ -249,7 +249,11 @@ func (a *AdminServer) syncAgentToolsProbed(ctx context.Context, agentName string
 		var rawTools []map[string]interface{}
 		var pErr error
 
-		probeCtx, cancel := context.WithTimeout(ctx, timeout)
+		protoTimeout := timeout
+		if proto.IsStdio() {
+			protoTimeout = a.stdioProbeTimeout()
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, protoTimeout)
 		if proto.IsStdio() {
 			cmd := proto.GetCommand()
 			if cmd != "" {

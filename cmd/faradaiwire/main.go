@@ -22,6 +22,12 @@ import (
 
 var version = config.Version
 
+func init() {
+	if v := strings.TrimSpace(version); v != "" && v != config.Version {
+		config.RuntimeVersion = v
+	}
+}
+
 // isHelpArg returns true if the argument represents a standard help request.
 func isHelpArg(arg string) bool {
 	return arg == "-h" || arg == "--help" || arg == "-help" || arg == "help"

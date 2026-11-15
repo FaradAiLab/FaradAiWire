@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
+	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
@@ -291,7 +292,7 @@ func (c *InboundCoordinator) ExecuteMessage(
 				},
 				"serverInfo": map[string]interface{}{
 					"name":    serverName,
-					"version": "1.0.0",
+					"version": strings.TrimPrefix(config.GetVersion(), "v"),
 				},
 			})
 			jsonResp := &mcp.Response{

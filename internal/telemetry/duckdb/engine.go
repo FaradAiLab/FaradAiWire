@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	_ "github.com/marcboeker/go-duckdb"
 )
@@ -343,7 +344,7 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 
 		releaseVer := ev.ReleaseVersion
 		if releaseVer == "" {
-			releaseVer = "v1.0.0"
+			releaseVer = config.GetVersion()
 		}
 
 		toolName := ev.ToolName

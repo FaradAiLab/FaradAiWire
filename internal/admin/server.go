@@ -382,6 +382,18 @@ func (a *AdminServer) probeTimeout() time.Duration {
 	return 5 * time.Second
 }
 
+const defaultStdioProbeTimeout = 30 * time.Second
+
+// stdioProbeTimeout resolves the timeout for local stdio MCP probes.
+// Package-runner launchers (uvx, npx, pipx, docker) can exceed 5s on cold-start
+// package downloads, so stdio probes floor at 30s unless configured higher.
+func (a *AdminServer) stdioProbeTimeout() time.Duration {
+	if t := a.probeTimeout(); t > defaultStdioProbeTimeout {
+		return t
+	}
+	return defaultStdioProbeTimeout
+}
+
 // withMutationGuard enforces read-only access to policies and agents when running in MANAGED mode.
 // Any attempt to toggle configuration, clear schemas, sync tools, approve/discard diffs, or rollback
 // returns HTTP 403 Forbidden with {"error": "FORBIDDEN_MANAGED_MODE", "message": "Policy editing is locked: Gateway is managed by organization."}.

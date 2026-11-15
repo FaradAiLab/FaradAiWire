@@ -568,6 +568,18 @@ func extractJSONFromSSEOrDirect(body []byte) []byte {
 	return trimmed
 }
 
+func formatStdioTimeoutError(command string, ctxErr error, stderr string) error {
+	trimmedErr := strings.TrimSpace(stderr)
+	if trimmedErr != "" {
+		const maxStderrLen = 400
+		if len(trimmedErr) > maxStderrLen {
+			trimmedErr = trimmedErr[len(trimmedErr)-maxStderrLen:]
+		}
+		return fmt.Errorf("stdio subprocess '%s' timed out before responding (%w); stderr: %s", command, ctxErr, trimmedErr)
+	}
+	return fmt.Errorf("stdio subprocess '%s' timed out before responding (%w) — cold-start package downloads (uvx/npx) may need more time; increase timeouts.probe_timeout_sec in Operational Settings", command, ctxErr)
+}
+
 // ProbeAndDiscoverMCPToolsStdio executes a local subprocess MCP server via stdin/stdout, performs the MCP initialization handshake, and calls tools/list.
 func ProbeAndDiscoverMCPToolsStdio(ctx context.Context, command string, args []string, env []string) ([]map[string]interface{}, error) {
 	trimmedCmd := strings.TrimSpace(command)
@@ -626,7 +638,7 @@ func ProbeAndDiscoverMCPToolsStdio(ctx context.Context, command string, args []s
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, formatStdioTimeoutError(trimmedCmd, ctx.Err(), stderrBuf.String())
 		default:
 		}
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -651,7 +663,7 @@ func ProbeAndDiscoverMCPToolsStdio(ctx context.Context, command string, args []s
 
 	if !initReceived {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, formatStdioTimeoutError(trimmedCmd, ctx.Err(), stderrBuf.String())
 		}
 		return nil, fmt.Errorf("stdio process did not respond to initialize: %s", stderrBuf.String())
 	}
@@ -671,7 +683,7 @@ func ProbeAndDiscoverMCPToolsStdio(ctx context.Context, command string, args []s
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, formatStdioTimeoutError(trimmedCmd, ctx.Err(), stderrBuf.String())
 		default:
 		}
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -699,7 +711,7 @@ func ProbeAndDiscoverMCPToolsStdio(ctx context.Context, command string, args []s
 	}
 
 	if ctx.Err() != nil {
-		return nil, ctx.Err()
+		return nil, formatStdioTimeoutError(trimmedCmd, ctx.Err(), stderrBuf.String())
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading stdio output: %w", err)

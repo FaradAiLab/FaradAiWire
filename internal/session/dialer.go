@@ -586,7 +586,8 @@ func BuildSafeSubprocessEnv(protoEnv []string, expandHostRefs bool) []string {
 	if runtime.GOOS == "windows" {
 		baseKeys = []string{
 			"PATH", "Path", "SYSTEMROOT", "SystemRoot", "WINDIR", "windir",
-			"USERPROFILE", "USERNAME", "TEMP", "TMP", "COMSPEC",
+			"USERPROFILE", "USERNAME", "HOMEDRIVE", "HOMEPATH",
+			"LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "COMSPEC",
 		}
 	} else {
 		baseKeys = []string{

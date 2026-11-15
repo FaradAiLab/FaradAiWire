@@ -23,6 +23,9 @@ export const Header: React.FC<HeaderProps> = ({
   const isOnline = status?.status === 'active' || status?.status === 'healthy' || status?.status?.toLowerCase() === 'ready'
   const isManaged = status?.runtime_mode === 'MANAGED'
   const slmActive = status?.slm_tier === 'neural_active' || status?.slm_status === 'active'
+  const versionBadge = status?.version
+    ? `${status.version.startsWith('v') ? status.version : `v${status.version}`} Core`
+    : 'Core'
 
   return (
     <header className="border-b border-gray-200 dark:border-white/10 bg-white/90 dark:bg-dark-bg/80 backdrop-blur-md sticky top-0 z-50 px-6 py-3.5 flex flex-wrap items-center justify-between gap-4 transition-colors">
@@ -36,7 +39,7 @@ export const Header: React.FC<HeaderProps> = ({
               FaradAiWire
             </h1>
             <span className="text-xs px-2 py-0.5 rounded font-mono font-medium bg-cyan-100 text-cyan-800 dark:bg-cyan-950 dark:text-cyan-400 border border-cyan-300 dark:border-cyan-800/40">
-              v1.0 Core
+              {versionBadge}
             </span>
           </div>
           <p className="text-xs text-gray-500 dark:text-gray-400">Standalone AI Gateway & Agent Studio</p>

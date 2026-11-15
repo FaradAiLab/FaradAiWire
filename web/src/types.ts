@@ -1,4 +1,5 @@
 export interface GatewayStatus {
+  version?: string
   status: string
   active_filters: string[]
   active_filters_count: number

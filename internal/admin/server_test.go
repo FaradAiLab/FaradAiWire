@@ -685,6 +685,9 @@ func TestAdmin_SLMProbe_And_Configure(t *testing.T) {
 	if slmStatus["tier"] != "regex_standby" {
 		t.Errorf("expected tier=regex_standby, got %v", slmStatus["tier"])
 	}
+	if statusResp["version"] != config.GetVersion() {
+		t.Errorf("expected version=%q in /admin/status, got %v", config.GetVersion(), statusResp["version"])
+	}
 
 	// 2. Verify GET /admin/slm/probe returns 200 and ProbeResult
 	reqProbe := httptest.NewRequest(http.MethodGet, "/admin/slm/probe", nil)

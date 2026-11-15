@@ -216,13 +216,6 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 
 	hydrateProbeSecrets(&req, a.getProtocolStore())
 
-	ctx, cancel := context.WithTimeout(r.Context(), a.probeTimeout())
-	defer cancel()
-
-	var tools []map[string]interface{}
-	var probeErr error
-	var transportMode string
-
 	reqType := strings.ToLower(strings.TrimSpace(req.Type))
 	if reqType == "" {
 		if req.URL != "" {
@@ -231,6 +224,17 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 			reqType = "stdio"
 		}
 	}
+
+	probeTimeout := a.probeTimeout()
+	if reqType == "stdio" {
+		probeTimeout = a.stdioProbeTimeout()
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
+	defer cancel()
+
+	var tools []map[string]interface{}
+	var probeErr error
+	var transportMode string
 
 	switch reqType {
 	case "stdio":
