@@ -172,38 +172,43 @@ jobs:
           echo "Generated Checksums:"
           cat checksums.txt
 
-      - name: Render Homebrew Formula & Cask
+      - name: Render Homebrew Cask
         env:
           RAW_VER: ${{ steps.release_meta.outputs.version }}
         run: |
           CLEAN_VER="${RAW_VER#v}"
 
-          cd release_assets
-          ARM64_SHA=$(grep '_darwin_arm64\.tar\.gz$' checksums.txt | awk '{print $1}')
-          AMD64_SHA=$(grep '_darwin_amd64\.tar\.gz$' checksums.txt | awk '{print $1}')
-          LINUX_SHA=$(grep '_linux_amd64\.tar\.gz$' checksums.txt | awk '{print $1}')
-          LINUX_ARM64_SHA=$(grep '_linux_arm64\.tar\.gz$' checksums.txt | awk '{print $1}')
+          ARM64_SHA=$(grep '_darwin_arm64\.tar\.gz$' release_assets/checksums.txt | awk '{print $1}')
+          AMD64_SHA=$(grep '_darwin_amd64\.tar\.gz$' release_assets/checksums.txt | awk '{print $1}')
+          LINUX_SHA=$(grep '_linux_amd64\.tar\.gz$' release_assets/checksums.txt | awk '{print $1}')
+          LINUX_ARM64_SHA=$(grep '_linux_arm64\.tar\.gz$' release_assets/checksums.txt | awk '{print $1}')
 
-          if [ -f ../deploy/homebrew/faradaiwire.rb.tmpl ]; then
-            sed -e "s/{{VERSION}}/${CLEAN_VER}/g" \
-                -e "s/{{DARWIN_ARM64_SHA}}/${ARM64_SHA}/g" \
-                -e "s/{{DARWIN_AMD64_SHA}}/${AMD64_SHA}/g" \
-                -e "s/{{LINUX_AMD64_SHA}}/${LINUX_SHA}/g" \
-                -e "s/{{LINUX_ARM64_SHA}}/${LINUX_ARM64_SHA}/g" \
-                ../deploy/homebrew/faradaiwire.rb.tmpl > faradaiwire.rb
-            echo "Generated Homebrew Formula:"
-            cat faradaiwire.rb
+          if [ -z "$ARM64_SHA" ] || [ -z "$AMD64_SHA" ] || [ -z "$LINUX_SHA" ] || [ -z "$LINUX_ARM64_SHA" ]; then
+            echo "❌ Missing expected SHA-256 checksum(s) in release_assets/checksums.txt" >&2
+            exit 1
           fi
 
-          if [ -f ../deploy/homebrew/Casks/faradaiwire.rb.tmpl ]; then
-            sed -e "s/{{VERSION}}/${CLEAN_VER}/g" \
-                -e "s/{{DARWIN_ARM64_SHA}}/${ARM64_SHA}/g" \
-                -e "s/{{DARWIN_AMD64_SHA}}/${AMD64_SHA}/g" \
-                ../deploy/homebrew/Casks/faradaiwire.rb.tmpl > faradaiwire-cask.rb
-            echo "Generated Homebrew Cask:"
-            cat faradaiwire-cask.rb
+          if [ ! -f deploy/homebrew/Casks/faradaiwire.rb.tmpl ]; then
+            echo "❌ Missing deploy/homebrew/Casks/faradaiwire.rb.tmpl" >&2
+            exit 1
           fi
-          cd ..
+
+          mkdir -p homebrew_rendered/Casks
+          sed -e "s/{{VERSION}}/${CLEAN_VER}/g" \
+              -e "s/{{DARWIN_ARM64_SHA}}/${ARM64_SHA}/g" \
+              -e "s/{{DARWIN_AMD64_SHA}}/${AMD64_SHA}/g" \
+              -e "s/{{LINUX_AMD64_SHA}}/${LINUX_SHA}/g" \
+              -e "s/{{LINUX_ARM64_SHA}}/${LINUX_ARM64_SHA}/g" \
+              deploy/homebrew/Casks/faradaiwire.rb.tmpl > homebrew_rendered/Casks/faradaiwire.rb
+
+          if grep -q '{{' homebrew_rendered/Casks/faradaiwire.rb; then
+            echo "❌ Unreplaced template placeholder detected in rendered Cask" >&2
+            cat homebrew_rendered/Casks/faradaiwire.rb >&2
+            exit 1
+          fi
+
+          echo "Generated Homebrew Cask:"
+          cat homebrew_rendered/Casks/faradaiwire.rb
 
       - name: Create Official GitHub Release
         uses: softprops/action-gh-release@v2
@@ -232,23 +237,23 @@ jobs:
 
           git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/FaradAiLab/homebrew-tap.git tap_repo
 
-          if [ -f release_assets/faradaiwire.rb ]; then
-            mkdir -p tap_repo/Formula
-            cp release_assets/faradaiwire.rb tap_repo/Formula/faradaiwire.rb
-            git -C tap_repo add Formula/faradaiwire.rb
+          if [ ! -f homebrew_rendered/Casks/faradaiwire.rb ]; then
+            echo "❌ Rendered Cask file missing at homebrew_rendered/Casks/faradaiwire.rb" >&2
+            exit 1
           fi
 
-          if [ -f release_assets/faradaiwire-cask.rb ]; then
-            mkdir -p tap_repo/Casks
-            cp release_assets/faradaiwire-cask.rb tap_repo/Casks/faradaiwire.rb
-            git -C tap_repo add Casks/faradaiwire.rb
-          fi
+          # Ensure legacy Formula is removed so `brew install faradaiwire` resolves cleanly to the Cask
+          git -C tap_repo rm -f --ignore-unmatch Formula/faradaiwire.rb
+
+          mkdir -p tap_repo/Casks
+          cp homebrew_rendered/Casks/faradaiwire.rb tap_repo/Casks/faradaiwire.rb
+          git -C tap_repo add Casks/faradaiwire.rb
 
           cd tap_repo
           if git diff --staged --quiet; then
-            echo "Formula & Cask are already up to date."
+            echo "Cask is already up to date."
           else
-            git commit -m "feat(formula): bump faradaiwire to ${RELEASE_TAG}"
+            git commit -m "feat(cask): bump faradaiwire to ${RELEASE_TAG}"
             git push origin main
-            echo "🎉 Successfully published formula to FaradAiLab/homebrew-tap!"
+            echo "🎉 Successfully published cask to FaradAiLab/homebrew-tap!"
           fi

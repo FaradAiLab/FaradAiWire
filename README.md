@@ -54,16 +54,16 @@ graph TD
 
 FaradAiWire runs as a lightweight, single-tenant native background daemon on developer workstations with zero virtualization overhead.
 
-### 🍎 macOS (Homebrew - Recommended)
+### 🍎 macOS & Linux (Homebrew Cask - Recommended)
 ```bash
 brew tap FaradAiLab/tap
-brew install faradaiwire
+brew install --cask faradaiwire
 
 # Run in foreground:
 faradaiwire run
 
-# Or manage as a background service:
-brew services start faradaiwire
+# Or adopt your AI IDEs (auto-starts the gateway in the background on connect):
+faradaiwire adopt
 ```
 
 ### 🐧 Linux & macOS (Single-Command Shell)

@@ -1,43 +1,43 @@
-class Faradaiwire < Formula
-  desc "Zero-trust security gateway for AI agents & MCP"
-  homepage "https://github.com/FaradAiLab/FaradAiWire"
+cask "faradaiwire" do
   version "{{VERSION}}"
 
   on_macos do
-    if Hardware::CPU.arm?
+    depends_on macos: :monterey
+
+    on_arm do
       url "https://github.com/FaradAiLab/FaradAiWire/releases/download/v#{version}/faradaiwire_#{version}_darwin_arm64.tar.gz"
       sha256 "{{DARWIN_ARM64_SHA}}"
-    else
+    end
+
+    on_intel do
       url "https://github.com/FaradAiLab/FaradAiWire/releases/download/v#{version}/faradaiwire_#{version}_darwin_amd64.tar.gz"
       sha256 "{{DARWIN_AMD64_SHA}}"
+    end
+
+    postflight do
+      system_command "/usr/bin/xattr",
+                     args:         ["-dr", "com.apple.quarantine", "#{staged_path}/faradaiwire"],
+                     must_succeed: false
     end
   end
 
   on_linux do
-    if Hardware::CPU.arm?
+    on_arm do
       url "https://github.com/FaradAiLab/FaradAiWire/releases/download/v#{version}/faradaiwire_#{version}_linux_arm64.tar.gz"
       sha256 "{{LINUX_ARM64_SHA}}"
-    else
+    end
+
+    on_intel do
       url "https://github.com/FaradAiLab/FaradAiWire/releases/download/v#{version}/faradaiwire_#{version}_linux_amd64.tar.gz"
       sha256 "{{LINUX_AMD64_SHA}}"
     end
   end
 
-  def install
-    bin.install "faradaiwire"
-  end
+  name "FaradAiWire"
+  desc "Zero-trust security gateway for AI agents & MCP"
+  homepage "https://github.com/FaradAiLab/FaradAiWire"
 
-  # macOS Background Daemon Service (launchd)
-  service do
-    run [opt_bin/"faradaiwire", "run"]
-    keep_alive true
-    log_path var/"log/faradaiwire.log"
-    error_log_path var/"log/faradaiwire.error.log"
-    working_dir var
-  end
+  binary "faradaiwire"
 
-  test do
-    system "#{bin}/faradaiwire", "--help"
-  end
+  zap trash: "~/.faradaiwire"
 end
-

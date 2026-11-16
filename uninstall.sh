@@ -97,25 +97,20 @@ wait_for_daemon_exit() {
     done
 }
 
-# 3. Handle Homebrew-managed installations cleanly if present
-REMOVED_BIN="0"
-if command -v brew >/dev/null 2>&1 && brew list --formula "$BINARY_NAME" >/dev/null 2>&1; then
-    echo "🍺 Detected Homebrew installation of $BINARY_NAME..."
-    brew services stop "$BINARY_NAME" >/dev/null 2>&1 || true
-    if command -v pkill >/dev/null 2>&1; then
-        pkill -TERM -x "$BINARY_NAME" >/dev/null 2>&1 || true
+# 3. Stop any running foreground/daemon process first (wait up to 10s so DuckDB locks flush)
+if command -v pkill >/dev/null 2>&1; then
+    if pkill -TERM -x "$BINARY_NAME" >/dev/null 2>&1; then
+        echo "🛑 Stopping running $BINARY_NAME process (waiting up to 10s)..."
         wait_for_daemon_exit
     fi
-    brew uninstall "$BINARY_NAME"
+fi
+
+# 4. Handle Homebrew Cask installations cleanly if present
+REMOVED_BIN="0"
+if command -v brew >/dev/null 2>&1 && brew list --cask "$BINARY_NAME" >/dev/null 2>&1; then
+    echo "🍺 Detected Homebrew installation of $BINARY_NAME..."
+    brew uninstall --cask "$BINARY_NAME"
     REMOVED_BIN="1"
-else
-    # 4. Stop any running foreground/daemon process (wait up to 10s so DuckDB locks flush)
-    if command -v pkill >/dev/null 2>&1; then
-        if pkill -TERM -x "$BINARY_NAME" >/dev/null 2>&1; then
-            echo "🛑 Stopping running $BINARY_NAME process (waiting up to 10s)..."
-            wait_for_daemon_exit
-        fi
-    fi
 fi
 
 # 5. Remove manually / install.sh-installed binaries

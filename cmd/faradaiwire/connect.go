@@ -111,6 +111,51 @@ func isDaemonHealthy(host string, port int) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+type detachedDaemonOptions struct {
+	binPath string
+	homeDir string
+	host    string
+	port    int
+	logFile *os.File
+	errOut  io.Writer
+}
+
+// buildDetachedDaemonCmd constructs the detached `faradaiwire run` command pinned to homeDir
+// so auto-spawned daemons do not inherit an IDE workspace working directory or ./config.yaml.
+func buildDetachedDaemonCmd(opts detachedDaemonOptions) *exec.Cmd {
+	errOut := opts.errOut
+	if errOut == nil {
+		errOut = os.Stderr
+	}
+
+	args := []string{"run"}
+	if h := normalizeGatewayHost(opts.host); h != "" {
+		args = append(args, "-host", h)
+	}
+	if opts.port > 0 {
+		args = append(args, "-port", strconv.Itoa(opts.port))
+	}
+	cmd := exec.Command(opts.binPath, args...)
+	if opts.homeDir == "" {
+		fmt.Fprintln(errOut, "[faradaiwire connect] warning: home directory is empty; daemon inheriting current working directory")
+	} else if info, err := os.Stat(opts.homeDir); err != nil {
+		fmt.Fprintf(errOut, "[faradaiwire connect] warning: home directory %q unavailable (%v); daemon inheriting current working directory\n", opts.homeDir, err)
+	} else if !info.IsDir() {
+		fmt.Fprintf(errOut, "[faradaiwire connect] warning: home directory %q is not a directory; daemon inheriting current working directory\n", opts.homeDir)
+	} else {
+		cmd.Dir = opts.homeDir
+	}
+	if opts.logFile != nil {
+		// Strict stdout/stderr redirection: prevent ANY logs/banners from corrupting IDE stdio stream
+		cmd.Stdout = opts.logFile
+		cmd.Stderr = opts.logFile
+	}
+
+	// Detach process group so closing IDE doesn't kill shared daemon
+	configureDetachedDaemon(cmd)
+	return cmd
+}
+
 func spawnDetachedDaemon(ctx context.Context, host string, port int) error {
 	binPath, err := os.Executable()
 	if err != nil {
@@ -121,8 +166,11 @@ func spawnDetachedDaemon(ctx context.Context, host string, port int) error {
 	homeDir := config.DefaultFaradAiWireDir()
 	logsDir := filepath.Join(homeDir, "logs")
 	if err := os.MkdirAll(logsDir, 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "[faradaiwire connect] warning: failed to create logs dir %q (%v); falling back to ./logs\n", logsDir, err)
 		logsDir = "./logs"
-		_ = os.MkdirAll(logsDir, 0700)
+		if fallbackErr := os.MkdirAll(logsDir, 0700); fallbackErr != nil {
+			return fmt.Errorf("create logs dir (%w) and fallback %q (%w)", err, logsDir, fallbackErr)
+		}
 	}
 
 	logFilePath := filepath.Join(logsDir, "daemon.log")
@@ -132,20 +180,14 @@ func spawnDetachedDaemon(ctx context.Context, host string, port int) error {
 		return fmt.Errorf("open daemon log file '%s': %w", logFilePath, err)
 	}
 
-	args := []string{"run"}
-	if h := normalizeGatewayHost(host); h != "" {
-		args = append(args, "-host", h)
-	}
-	if port > 0 {
-		args = append(args, "-port", strconv.Itoa(port))
-	}
-	cmd := exec.Command(binPath, args...)
-	// Strict stdout/stderr redirection: prevent ANY logs/banners from corrupting IDE stdio stream
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-
-	// Detach process group so closing IDE doesn't kill shared daemon
-	configureDetachedDaemon(cmd)
+	cmd := buildDetachedDaemonCmd(detachedDaemonOptions{
+		binPath: binPath,
+		homeDir: homeDir,
+		host:    host,
+		port:    port,
+		logFile: logFile,
+		errOut:  os.Stderr,
+	})
 
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()

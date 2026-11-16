@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -156,6 +157,132 @@ func TestConfigureDetachedDaemon(t *testing.T) {
 	configureDetachedDaemon(cmd)
 	if cmd.SysProcAttr == nil {
 		t.Fatal("expected configureDetachedDaemon to initialize SysProcAttr")
+	}
+}
+
+func TestBuildDetachedDaemonCmd(t *testing.T) {
+	t.Parallel()
+
+	validDir := t.TempDir()
+	filePath := filepath.Join(validDir, "not-a-dir")
+	if err := os.WriteFile(filePath, []byte("x"), 0600); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+	logFile, err := os.CreateTemp(validDir, "daemon-*.log")
+	if err != nil {
+		t.Fatalf("create temp log file: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = logFile.Close()
+	})
+
+	tests := []struct {
+		name               string
+		opts               detachedDaemonOptions
+		wantDir            string
+		wantArgs           []string
+		wantLogWired       bool
+		wantErrOutContains string
+	}{
+		{
+			name: "valid homeDir pins cmd.Dir and normalizes 0.0.0.0",
+			opts: detachedDaemonOptions{
+				binPath: "/usr/local/bin/faradaiwire",
+				homeDir: validDir,
+				host:    "0.0.0.0",
+				port:    8090,
+			},
+			wantDir:  validDir,
+			wantArgs: []string{"/usr/local/bin/faradaiwire", "run", "-host", "127.0.0.1", "-port", "8090"},
+		},
+		{
+			name: "empty homeDir warns and leaves cmd.Dir empty",
+			opts: detachedDaemonOptions{
+				binPath: "/usr/local/bin/faradaiwire",
+				homeDir: "",
+				host:    "127.0.0.1",
+				port:    8090,
+			},
+			wantDir:            "",
+			wantArgs:           []string{"/usr/local/bin/faradaiwire", "run", "-host", "127.0.0.1", "-port", "8090"},
+			wantErrOutContains: "home directory is empty",
+		},
+		{
+			name: "missing homeDir warns and leaves cmd.Dir empty",
+			opts: detachedDaemonOptions{
+				binPath: "/usr/local/bin/faradaiwire",
+				homeDir: filepath.Join(validDir, "does-not-exist"),
+				host:    "127.0.0.1",
+				port:    8090,
+			},
+			wantDir:            "",
+			wantArgs:           []string{"/usr/local/bin/faradaiwire", "run", "-host", "127.0.0.1", "-port", "8090"},
+			wantErrOutContains: "unavailable",
+		},
+		{
+			name: "file homeDir warns and leaves cmd.Dir empty",
+			opts: detachedDaemonOptions{
+				binPath: "/usr/local/bin/faradaiwire",
+				homeDir: filePath,
+				host:    "127.0.0.1",
+				port:    8090,
+			},
+			wantDir:            "",
+			wantArgs:           []string{"/usr/local/bin/faradaiwire", "run", "-host", "127.0.0.1", "-port", "8090"},
+			wantErrOutContains: "is not a directory",
+		},
+		{
+			name: "empty host normalizes to 127.0.0.1 and non-positive port omits flag with logFile wired",
+			opts: detachedDaemonOptions{
+				binPath: "/usr/local/bin/faradaiwire",
+				homeDir: validDir,
+				host:    "",
+				port:    0,
+				logFile: logFile,
+			},
+			wantDir:      validDir,
+			wantArgs:     []string{"/usr/local/bin/faradaiwire", "run", "-host", "127.0.0.1"},
+			wantLogWired: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var errBuf bytes.Buffer
+			opts := tc.opts
+			opts.errOut = &errBuf
+
+			cmd := buildDetachedDaemonCmd(opts)
+			if cmd.Dir != tc.wantDir {
+				t.Fatalf("expected cmd.Dir=%q, got %q", tc.wantDir, cmd.Dir)
+			}
+			if cmd.SysProcAttr == nil {
+				t.Fatal("expected SysProcAttr to be configured")
+			}
+			if len(cmd.Args) != len(tc.wantArgs) {
+				t.Fatalf("expected args %v, got %v", tc.wantArgs, cmd.Args)
+			}
+			for i := range tc.wantArgs {
+				if cmd.Args[i] != tc.wantArgs[i] {
+					t.Fatalf("arg[%d]: expected %q, got %q", i, tc.wantArgs[i], cmd.Args[i])
+				}
+			}
+			if tc.wantLogWired {
+				if cmd.Stdout != opts.logFile || cmd.Stderr != opts.logFile {
+					t.Fatal("expected Stdout and Stderr to be wired to logFile")
+				}
+			} else if cmd.Stdout != nil || cmd.Stderr != nil {
+				t.Fatal("expected Stdout and Stderr to be nil when logFile is nil")
+			}
+			if tc.wantErrOutContains == "" {
+				if errBuf.Len() != 0 {
+					t.Fatalf("expected no stderr warning, got %q", errBuf.String())
+				}
+			} else if !strings.Contains(errBuf.String(), tc.wantErrOutContains) {
+				t.Fatalf("expected stderr warning containing %q, got %q", tc.wantErrOutContains, errBuf.String())
+			}
+		})
 	}
 }
 

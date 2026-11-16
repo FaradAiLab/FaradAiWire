@@ -22,9 +22,9 @@ FaradAiWire is distributed as a single-tenant host-native binary to ensure seaml
 
 ## Installation Channels
 
-### 1. macOS (Homebrew - Recommended)
+### 1. macOS & Linux (Homebrew - Recommended)
 
-The easiest method for macOS users. Automatically integrates with macOS `launchd` service management:
+The easiest method for macOS (12+) and Linux users via Homebrew Cask (pre-compiled binary, no Xcode/CLT required):
 
 ```bash
 # Add FaradAiWire tap:
@@ -39,17 +39,8 @@ brew install faradaiwire
 faradaiwire run
 ```
 
-#### Manage as a Persistent Background Daemon:
-```bash
-# Start background service (auto-starts on login):
-brew services start faradaiwire
-
-# Check service status:
-brew services list
-
-# Stop background service:
-brew services stop faradaiwire
-```
+#### Automatic Background Daemon (IDE Integration):
+When you run `faradaiwire adopt`, your AI IDEs connect through `faradaiwire connect`, which automatically spawns and detaches the `faradaiwire run` background daemon on demand if it is not already running.
 
 ---
 
@@ -147,8 +138,9 @@ faradaiwire doctor
 
 ### Homebrew:
 ```bash
-brew update && brew upgrade faradaiwire
-brew services restart faradaiwire
+brew update && brew upgrade --cask faradaiwire
+# If a detached daemon is currently running, restart it so the new binary takes over:
+pkill -x faradaiwire || true
 ```
 
 ### Shell Installer:
@@ -166,8 +158,8 @@ curl -fsSL https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/install
 
 ### Homebrew (macOS & Linux):
 ```bash
-brew services stop faradaiwire
-brew uninstall faradaiwire
+pkill -x faradaiwire || true
+brew uninstall --cask faradaiwire
 brew untap FaradAiLab/tap
 # Optionally remove runtime data & analytics:
 rm -rf ~/.faradaiwire

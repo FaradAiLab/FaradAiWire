@@ -42,26 +42,38 @@ case "$ARCH" in
         ;;
 esac
 
-# 3. Prefer Homebrew on macOS when available (zero sudo, managed PATH & launchd service)
-if [ "$OS_NAME" = "darwin" ] && command -v brew >/dev/null 2>&1; then
+print_brew_success() {
+    action="$1"
+    echo ""
+    echo "🎉 FaradAiWire ${action} successfully via Homebrew Cask!"
+    echo "Run the gateway with:"
+    echo "  faradaiwire run"
+    echo ""
+    echo "Or open the Admin Console at:"
+    echo "  http://localhost:8095/admin/dashboard"
+}
+
+# 3. Prefer Homebrew Cask on macOS when available and no explicit version pin is requested
+if [ "$OS_NAME" = "darwin" ] && [ -z "${FARADAI_WIRE_VERSION:-}" ] && command -v brew >/dev/null 2>&1; then
     echo "🍺 Homebrew detected on macOS. Installing via FaradAiLab/tap..."
-    if brew list --formula "$BINARY_NAME" >/dev/null 2>&1; then
-        if HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade "$BINARY_NAME"; then
-            echo ""
-            echo "🎉 FaradAiWire upgraded successfully via Homebrew!"
-            echo "Run the gateway with:"
-            echo "  faradaiwire run"
+    TAP_REPO="$(brew --repository faradailab/tap 2>/dev/null || true)"
+    if [ -n "$TAP_REPO" ] && [ -d "$TAP_REPO/.git" ]; then
+        if ! git -C "$TAP_REPO" pull --ff-only >/dev/null 2>&1; then
+            echo "⚠️  Could not refresh FaradAiLab/tap via git pull; continuing with cached tap..."
+        fi
+    fi
+    if brew list --cask "$BINARY_NAME" >/dev/null 2>&1; then
+        if HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --cask "$BINARY_NAME"; then
+            print_brew_success "upgraded"
             exit 0
         fi
-    elif HOMEBREW_NO_AUTO_UPDATE=1 brew tap FaradAiLab/tap && HOMEBREW_NO_AUTO_UPDATE=1 brew install "$BINARY_NAME"; then
-        echo ""
-        echo "🎉 FaradAiWire installed successfully via Homebrew!"
-        echo "Run the gateway with:"
-        echo "  faradaiwire run"
-        echo ""
-        echo "Or open the Admin Console at:"
-        echo "  http://localhost:8095/admin/dashboard"
+    elif HOMEBREW_NO_AUTO_UPDATE=1 brew tap FaradAiLab/tap && HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "FaradAiLab/tap/$BINARY_NAME"; then
+        print_brew_success "installed"
         exit 0
+    fi
+    BREW_PREFIX="$(brew --prefix 2>/dev/null || true)"
+    if [ -n "$BREW_PREFIX" ] && [ -e "$BREW_PREFIX/bin/$BINARY_NAME" ]; then
+        echo "⚠️  Existing Homebrew binary found at $BREW_PREFIX/bin/$BINARY_NAME; it may take PATH precedence over the fallback install."
     fi
     echo "⚠️  Homebrew install could not complete; falling back to direct binary install..."
 fi
