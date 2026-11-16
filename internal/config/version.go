@@ -3,7 +3,7 @@ package config
 import "strings"
 
 // Version defines the current semantic version of FaradAiWire Core.
-const Version = "v0.1.3"
+const Version = "v0.1.5"
 
 // RuntimeVersion holds the active binary version, defaulting to Version and
 // overridable at link time (-ldflags) or startup from cmd/faradaiwire.
