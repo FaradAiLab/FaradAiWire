@@ -69,6 +69,18 @@ func TestIsSelfReference(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "URL pointing to IPv6 loopback canonical port",
+			sName:    "ipv6-wire",
+			url:      "http://[::1]:19410/sse",
+			expected: true,
+		},
+		{
+			name:     "External host using canonical port is not self-reference",
+			sName:    "external-same-port",
+			url:      "https://example.com:19410/mcp",
+			expected: false,
+		},
+		{
 			name:     "Standard third-party tool github",
 			sName:    "github",
 			cmd:      "npx",
@@ -100,6 +112,16 @@ func TestIsSelfReference(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("Exact port match prevents prefix false positive", func(t *testing.T) {
+		t.Setenv("FARADAI_WIRE_PORT", "1941")
+		if !isSelfReference("custom-port", "", nil, "http://127.0.0.1:1941/mcp") {
+			t.Errorf("expected exact custom active port 1941 to be detected as self-reference")
+		}
+		if isSelfReference("other-port", "", nil, "http://127.0.0.1:19411/mcp") {
+			t.Errorf("did not expect port 19411 to match prefix 1941")
+		}
+	})
 }
 
 func TestIdempotentAdoption_RepeatedRuns(t *testing.T) {

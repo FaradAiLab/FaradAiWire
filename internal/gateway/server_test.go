@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -63,6 +64,9 @@ func TestNewServer_NilConfig(t *testing.T) {
 }
 
 func TestServer_Lifecycle_StdioMode(t *testing.T) {
+	if _, err := exec.LookPath("cat"); err != nil {
+		t.Skipf("cat executable not found in PATH: %v", err)
+	}
 	cfg := &config.Config{
 		Mode: "stdio",
 		Stdio: config.StdioConfig{
@@ -1054,6 +1058,9 @@ func TestServer_MaintenanceCoordinator_GracefulTeardown(t *testing.T) {
 }
 
 func TestServer_MaintenanceCoordinator_StdioMode(t *testing.T) {
+	if _, err := exec.LookPath("cat"); err != nil {
+		t.Skipf("cat executable not found in PATH: %v", err)
+	}
 	cfg := &config.Config{
 		Mode: "stdio",
 		Stdio: config.StdioConfig{

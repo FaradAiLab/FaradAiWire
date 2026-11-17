@@ -3,6 +3,7 @@ package protocol
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -190,15 +191,17 @@ func TestFSStoreCRUDAndPermissions(t *testing.T) {
 		t.Fatalf("Save failed: %v", err)
 	}
 
-	// 2. Verify file permissions are 0600
+	// 2. Verify file permissions are 0600 (POSIX only)
 	savedPath := filepath.Join(tempDir, "test-postgres.json")
 	info, statErr := os.Stat(savedPath)
 	if statErr != nil {
 		t.Fatalf("Stat failed on saved file: %v", statErr)
 	}
-	perm := info.Mode().Perm()
-	if perm != 0600 {
-		t.Fatalf("Expected file permissions 0600, got %o", perm)
+	if runtime.GOOS != "windows" {
+		perm := info.Mode().Perm()
+		if perm != 0600 {
+			t.Fatalf("Expected file permissions 0600, got %o", perm)
+		}
 	}
 
 	// 3. Get

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -834,14 +835,14 @@ func TestAgents_MaskSecrets_HydrateEnvOnPUT_AndArchivePerms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat archive dir: %v", err)
 	}
-	if dirInfo.Mode().Perm()&0077 != 0 {
+	if runtime.GOOS != "windows" && dirInfo.Mode().Perm()&0077 != 0 {
 		t.Fatalf("expected archive dir perms 0700 (no group/other), got %o", dirInfo.Mode().Perm())
 	}
 	cfgInfo, err := os.Stat(filepath.Join(archiveDir, "config.json"))
 	if err != nil {
 		t.Fatalf("stat archive config.json: %v", err)
 	}
-	if cfgInfo.Mode().Perm()&0077 != 0 {
+	if runtime.GOOS != "windows" && cfgInfo.Mode().Perm()&0077 != 0 {
 		t.Fatalf("expected archive config.json perms 0600 (no group/other), got %o", cfgInfo.Mode().Perm())
 	}
 }

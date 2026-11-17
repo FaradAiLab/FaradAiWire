@@ -97,14 +97,17 @@ func getFilterOrder(f NamedFilter) int {
 }
 
 func sortFilters(filters []NamedFilter) []NamedFilter {
-	if len(filters) <= 1 {
-		return filters
+	if len(filters) == 0 {
+		return nil
 	}
+	// Always copy into a fresh backing array so p.filters stays immutable for lock-free hot-path reads.
 	sorted := make([]NamedFilter, len(filters))
 	copy(sorted, filters)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		return getFilterOrder(sorted[i]) < getFilterOrder(sorted[j])
-	})
+	if len(sorted) > 1 {
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return getFilterOrder(sorted[i]) < getFilterOrder(sorted[j])
+		})
+	}
 	return sorted
 }
 
@@ -123,9 +126,11 @@ func (p *Pipeline) RegisterFilter(f SecurityFilter) {
 		}
 	}
 
-	p.filters = append(p.filters, nil)
-	copy(p.filters[insertIdx+1:], p.filters[insertIdx:])
-	p.filters[insertIdx] = f
+	next := make([]NamedFilter, len(p.filters)+1)
+	copy(next[:insertIdx], p.filters[:insertIdx])
+	next[insertIdx] = f
+	copy(next[insertIdx+1:], p.filters[insertIdx:])
+	p.filters = next
 }
 
 // SetFilters updates the active filters thread-safely, maintaining Order() sorting precedence.

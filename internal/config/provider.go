@@ -284,8 +284,13 @@ func (c *Config) GetAdminPort() int {
 
 // GetAgentsDir resolves the active agents root directory.
 func (c *Config) GetAgentsDir() string {
-	if c.AgentsDir != "" {
-		return c.AgentsDir
+	if c != nil {
+		c.mu.RLock()
+		dir := c.AgentsDir
+		c.mu.RUnlock()
+		if dir != "" {
+			return dir
+		}
 	}
 	return "/etc/faradaiwire/agents"
 }

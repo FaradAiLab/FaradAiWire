@@ -4,20 +4,22 @@ package guard
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 )
 
+const osascriptDisplayNotification = `on run argv
+display notification (item 1 of argv) with title (item 2 of argv) sound name "Ping"
+end run`
+
 var (
-	lastDarwinNotification atomic.Int64 // Unix timestamp in seconds
-	darwinNotifierMu       sync.Mutex
+	lastDarwinNotification atomic.Int64                   // Unix timestamp in seconds
+	darwinNotifySem        = make(chan struct{}, 4)       // Bound concurrent osascript subprocesses
 )
 
 // DefaultCooldownDarwinNotification is the baseline rate-limiting cooldown period for desktop alerts.
@@ -65,41 +67,39 @@ func NotifyDarwin(title, message string) bool {
 	cooldownSec := int64(cooldown / time.Second)
 
 	now := time.Now().Unix()
-	last := lastDarwinNotification.Load()
-	if cooldownSec > 0 && now-last < cooldownSec {
-		return false
-	}
-
-	darwinNotifierMu.Lock()
-	last = lastDarwinNotification.Load()
-	if cooldownSec > 0 && now-last < cooldownSec {
-		darwinNotifierMu.Unlock()
-		return false
-	}
-	lastDarwinNotification.Store(now)
-	darwinNotifierMu.Unlock()
-
-	// Sanitize inputs to avoid AppleScript escaping issues (escape backslashes first, then quotes)
-	sanitizedTitle := strings.ReplaceAll(title, `\`, `\\`)
-	sanitizedTitle = strings.ReplaceAll(sanitizedTitle, `"`, `\"`)
-	sanitizedMsg := strings.ReplaceAll(message, `\`, `\\`)
-	sanitizedMsg = strings.ReplaceAll(sanitizedMsg, `"`, `\"`)
-
-	script := fmt.Sprintf(`display notification "%s" with title "%s" sound name "Ping"`, sanitizedMsg, sanitizedTitle)
-
-	// Launch asynchronously with context timeout to prevent caller blocking
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-
-		cmd := exec.CommandContext(ctx, "osascript", "-e", script)
-		if err := cmd.Run(); err != nil {
-			slog.Debug("macOS desktop notification invocation failed",
-				slog.String("error", err.Error()),
-				slog.String("title", title),
-			)
+	for {
+		last := lastDarwinNotification.Load()
+		if cooldownSec > 0 && last > 0 && now-last < cooldownSec {
+			return false
 		}
-	}()
+		if lastDarwinNotification.CompareAndSwap(last, now) {
+			break
+		}
+	}
+
+	// Launch asynchronously with bounded concurrency and timeout to prevent caller blocking or goroutine buildup.
+	select {
+	case darwinNotifySem <- struct{}{}:
+		go func(msg, ttl string) {
+			defer func() { <-darwinNotifySem }()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+
+			// Pass message and title via argv so untrusted text cannot alter AppleScript syntax.
+			cmd := exec.CommandContext(ctx, "osascript", "-e", osascriptDisplayNotification, msg, ttl)
+			if err := cmd.Run(); err != nil {
+				slog.Debug("macOS desktop notification invocation failed",
+					slog.String("error", err.Error()),
+					slog.String("title", ttl),
+				)
+			}
+		}(message, title)
+	default:
+		slog.Debug("macOS desktop notification skipped: concurrent notification limit reached",
+			slog.String("title", title),
+		)
+	}
 
 	return true
 }

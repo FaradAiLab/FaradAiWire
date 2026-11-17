@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -185,15 +186,17 @@ func TestProtocolEndpoints_CRUD_Lifecycle(t *testing.T) {
 		t.Errorf("expected secret to be masked in response, got %v", createResp.Protocol.Env)
 	}
 
-	// Check file on disk: 0600 permissions and unmasked original token
+	// Check file on disk: 0600 permissions (POSIX) and unmasked original token
 	filePath := filepath.Join(protoDir, "github.json")
 	info, err := os.Stat(filePath)
 	if err != nil {
 		t.Fatalf("expected protocol file to exist: %v", err)
 	}
-	perm := info.Mode().Perm()
-	if perm != 0600 {
-		t.Errorf("expected 0600 file permissions, got %o", perm)
+	if runtime.GOOS != "windows" {
+		perm := info.Mode().Perm()
+		if perm != 0600 {
+			t.Errorf("expected 0600 file permissions, got %o", perm)
+		}
 	}
 	diskData, _ := os.ReadFile(filePath)
 	if !strings.Contains(string(diskData), "ghp_live_secret_token_1234567890") {
@@ -602,13 +605,13 @@ func TestAdminServer_ProtocolsCRUD_AuthTokenAndHeaders(t *testing.T) {
 		t.Errorf("non-sensitive header should not be masked, got: %s", createResp.Protocol.Headers["X-Workspace-Id"])
 	}
 
-	// 2. Verify file on disk has 0600 permissions and contains real secrets
+	// 2. Verify file on disk has 0600 permissions (POSIX) and contains real secrets
 	protoFile := filepath.Join(protocolsDir, "remote-context7.json")
 	info, err := os.Stat(protoFile)
 	if err != nil {
 		t.Fatalf("file not found on disk: %v", err)
 	}
-	if info.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Errorf("expected 0600 permissions, got: %o", info.Mode().Perm())
 	}
 	fileBytes, _ := os.ReadFile(protoFile)

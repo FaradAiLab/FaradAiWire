@@ -3,6 +3,7 @@ package mcpconfig
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -36,12 +37,12 @@ func TestBackupManager(t *testing.T) {
 		t.Errorf("expected HasBackup=true after backup")
 	}
 
-	// Verify 0600 permissions
+	// Verify 0600 permissions (POSIX only)
 	fi, err := os.Stat(backupPath)
 	if err != nil {
 		t.Fatalf("stat backup file: %v", err)
 	}
-	if fi.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0600 {
 		t.Errorf("expected 0600 permissions, got %v", fi.Mode().Perm())
 	}
 
@@ -95,11 +96,11 @@ func TestPersistAdoptedProtocols(t *testing.T) {
 		t.Fatalf("protocol file %s was not written properly: %v", expectedProto, err)
 	}
 
-	// Verify agent config exists and has 0600 permissions
+	// Verify agent config exists and has 0600 permissions (POSIX only)
 	expectedAgentCfg := filepath.Join(agentsDir, "claude-desktop", "current", "config.json")
 	if fi, err := os.Stat(expectedAgentCfg); err != nil || fi.Size() == 0 {
 		t.Fatalf("agent config file %s was not written properly: %v", expectedAgentCfg, err)
-	} else if fi.Mode().Perm() != 0600 {
+	} else if runtime.GOOS != "windows" && fi.Mode().Perm() != 0600 {
 		t.Errorf("expected agent config to have 0600 permissions, got %v", fi.Mode().Perm())
 	}
 

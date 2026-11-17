@@ -46,14 +46,16 @@ func TestFileKeyStore_GenerateAndValidate(t *testing.T) {
 		t.Fatalf("expected raw token to be preserved in keystore for local reveal: %s", string(fileBytes))
 	}
 
-	// Verify file permissions are 0600
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		t.Fatalf("failed to stat keystore file: %v", err)
-	}
-	perm := fileInfo.Mode().Perm()
-	if perm != 0600 {
-		t.Errorf("expected file permissions 0600, got %o", perm)
+	// Verify file permissions are 0600 (POSIX only; Windows ACLs do not expose 0600 mode bits)
+	if runtime.GOOS != "windows" {
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			t.Fatalf("failed to stat keystore file: %v", err)
+		}
+		perm := fileInfo.Mode().Perm()
+		if perm != 0600 {
+			t.Errorf("expected file permissions 0600, got %o", perm)
+		}
 	}
 
 	// Validate valid token

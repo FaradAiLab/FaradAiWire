@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -88,30 +89,40 @@ func isSelfReference(name string, cmd string, args []string, url string) bool {
 	}
 
 	// 4. Check URL / Ingress loopback port (active/env port, canonical 19410, and legacy 8090)
-	if url != "" {
-		lowerURL := strings.ToLower(url)
-		activePort := (&config.Config{}).GetListenPort()
-		portsToCheck := []int{activePort, config.DefaultListenPort, 8090}
-		seen := make(map[int]struct{}, len(portsToCheck))
-		for _, p := range portsToCheck {
-			if p <= 0 {
-				continue
-			}
-			if _, ok := seen[p]; ok {
-				continue
-			}
-			seen[p] = struct{}{}
-			pStr := strconv.Itoa(p)
-			if strings.Contains(lowerURL, "127.0.0.1:"+pStr) ||
-				strings.Contains(lowerURL, "localhost:"+pStr) ||
-				strings.Contains(lowerURL, ":"+pStr+"/sse") ||
-				strings.Contains(lowerURL, ":"+pStr+"/mcp") {
-				return true
-			}
-		}
+	if isSelfReferenceURL(url) {
+		return true
 	}
 
 	return false
+}
+
+func isSelfReferenceURL(rawURL string) bool {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return false
+	}
+	candidate := trimmed
+	if !strings.Contains(candidate, "://") {
+		candidate = "http://" + candidate
+	}
+	parsed, err := url.Parse(candidate)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		return false
+	}
+	portStr := parsed.Port()
+	if portStr == "" {
+		return false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return false
+	}
+	activePort := (&config.Config{}).GetListenPort()
+	return port == activePort || port == config.DefaultListenPort || port == 8090
 }
 
 const maxConfigFileBytes int64 = 10 << 20 // 10 MiB safety ceiling for client MCP configs

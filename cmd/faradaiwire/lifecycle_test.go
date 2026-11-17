@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -22,6 +23,9 @@ func TestLifecycle_SignalSupervision(t *testing.T) {
 		os.Args = []string{"faradaiwire", "run", "--config", os.Getenv("TEST_CONFIG_PATH")}
 		main()
 		os.Exit(0)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signals SIGTERM/SIGINT not supported by os.Process.Signal on Windows")
 	}
 
 	tempHome := t.TempDir()
@@ -133,6 +137,9 @@ func TestLifecycle_SignalSupervision_SIGINT(t *testing.T) {
 		main()
 		os.Exit(0)
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signals SIGTERM/SIGINT not supported by os.Process.Signal on Windows")
+	}
 
 	tempHome := t.TempDir()
 	cfgPath := filepath.Join(tempHome, "config.yaml")
@@ -216,6 +223,9 @@ func TestLifecycle_ProcessGuard_CollisionDetection(t *testing.T) {
 		os.Args = []string{"faradaiwire", "run", "--config", os.Getenv("TEST_CONFIG_PATH")}
 		main()
 		os.Exit(0)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signals SIGTERM/SIGINT not supported by os.Process.Signal on Windows")
 	}
 
 	tempHome := t.TempDir()

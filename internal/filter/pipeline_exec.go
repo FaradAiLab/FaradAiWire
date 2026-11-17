@@ -19,8 +19,7 @@ import (
 // It wraps filter execution with a top-level panic boundary to isolate failures and protect gateway sessions.
 func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalReq *mcp.Request, finalErr *mcp.Error) {
 	p.mu.RLock()
-	filters := make([]NamedFilter, len(p.filters))
-	copy(filters, p.filters)
+	filters := p.filters
 	router := p.router
 	debugRetainUnmaskedDiff := p.debugRetainUnmaskedDiff
 	logger := p.logger
@@ -117,8 +116,11 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 	auditMeta := &types.AuditMetadata{}
 	ctx = context.WithValue(ctx, types.AuditMetadataKey, auditMeta)
 
+	needBlockAudit := logger != nil
+	needAllowAudit := logger != nil && reqMethod == "tools/call"
+
 	var initialPayloadPreview string
-	if debugRetainUnmaskedDiff && req != nil && len(req.Params) > 0 {
+	if needAllowAudit && debugRetainUnmaskedDiff && req != nil && len(req.Params) > 0 {
 		initialPayloadPreview = makePayloadPreview(req.Params)
 	}
 
@@ -140,9 +142,12 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 			continue
 		}
 
-		filterStart := time.Now()
+		var filterStart time.Time
+		if needBlockAudit {
+			filterStart = time.Now()
+		}
 		var prevParams []byte
-		if current != nil && len(current.Params) > 0 {
+		if needAllowAudit && current != nil && len(current.Params) > 0 {
 			prevParams = bytes.Clone(current.Params)
 		}
 
@@ -166,12 +171,12 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 				current = nextReq
 			}
 		}
-		latency := float64(time.Since(filterStart).Microseconds()) / 1000.0
 
 		if mcpErr != nil {
 			// Log block decision with explicit redaction note / blocking rule metadata (SEC-008)
-			blockedPayload := fmt.Sprintf("[REDACTED - Blocked by %s: %s]", f.Name(), mcpErr.Message)
-			if logger != nil {
+			if needBlockAudit {
+				latency := float64(time.Since(filterStart).Microseconds()) / 1000.0
+				blockedPayload := fmt.Sprintf("[REDACTED - Blocked by %s: %s]", f.Name(), mcpErr.Message)
 				logger.LogEvent(&AuditEvent{
 					Timestamp:   time.Now(),
 					AgentName:   agentName,
@@ -194,43 +199,43 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 			return nil, mcpErr
 		}
 
-		if current != nil && !bytes.Equal(prevParams, current.Params) {
+		if needAllowAudit && current != nil && !bytes.Equal(prevParams, current.Params) {
 			modifiedFilter = f.Name()
 		}
 	}
 
-	// Capture post-filtered payload preview strictly AFTER filter chain execution (SEC-008)
-	rawPayload := ""
-	if current != nil && len(current.Params) > 0 {
-		inputBytes = len(current.Params)
-		rawPayload = makePayloadPreview(current.Params)
-	}
-
-	decision := "ALLOWED"
-	filterName := "pipeline"
-	matchedRule := ""
-	var auditedRules []string
-	if modifiedFilter != "" {
-		decision = "MASKED"
-		filterName = modifiedFilter
-		matchedRule = modifiedFilter
-	} else if len(auditMeta.AuditedRules) > 0 {
-		decision = "AUDIT"
-		filterName = auditMeta.FilterName
-		if filterName == "" {
-			filterName = "dlp"
+	if needAllowAudit {
+		// Capture post-filtered payload preview strictly AFTER filter chain execution (SEC-008)
+		rawPayload := ""
+		if current != nil && len(current.Params) > 0 {
+			inputBytes = len(current.Params)
+			rawPayload = makePayloadPreview(current.Params)
 		}
-		matchedRule = strings.Join(auditMeta.AuditedRules, ",")
-		auditedRules = auditMeta.AuditedRules
-	}
 
-	var origPayload string
-	if debugRetainUnmaskedDiff && (decision == "MASKED" || decision == "AUDIT") {
-		origPayload = initialPayloadPreview
-	}
+		decision := "ALLOWED"
+		filterName := "pipeline"
+		matchedRule := ""
+		var auditedRules []string
+		if modifiedFilter != "" {
+			decision = "MASKED"
+			filterName = modifiedFilter
+			matchedRule = modifiedFilter
+		} else if len(auditMeta.AuditedRules) > 0 {
+			decision = "AUDIT"
+			filterName = auditMeta.FilterName
+			if filterName == "" {
+				filterName = "dlp"
+			}
+			matchedRule = strings.Join(auditMeta.AuditedRules, ",")
+			auditedRules = auditMeta.AuditedRules
+		}
 
-	// Log allowed/masked/audited request if it passed all filters
-	if logger != nil && reqMethod == "tools/call" {
+		var origPayload string
+		if debugRetainUnmaskedDiff && (decision == "MASKED" || decision == "AUDIT") {
+			origPayload = initialPayloadPreview
+		}
+
+		// Log allowed/masked/audited request if it passed all filters
 		totalLatency := float64(time.Since(startTime).Microseconds()) / 1000.0
 		logger.LogEvent(&AuditEvent{
 			Timestamp:       time.Now(),
@@ -259,8 +264,7 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 // It wraps filter execution with a top-level panic boundary to isolate failures and protect gateway sessions.
 func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (finalResp *mcp.Response, finalErr *mcp.Error) {
 	p.mu.RLock()
-	filters := make([]NamedFilter, len(p.filters))
-	copy(filters, p.filters)
+	filters := p.filters
 	router := p.router
 	debugRetainUnmaskedDiff := p.debugRetainUnmaskedDiff
 	logger := p.logger
@@ -356,8 +360,10 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 	auditMeta := &types.AuditMetadata{}
 	ctx = context.WithValue(ctx, types.AuditMetadataKey, auditMeta)
 
+	needAudit := logger != nil
+
 	var initialPayloadPreview string
-	if debugRetainUnmaskedDiff && resp != nil && len(resp.Result) > 0 {
+	if needAudit && debugRetainUnmaskedDiff && resp != nil && len(resp.Result) > 0 {
 		initialPayloadPreview = makePayloadPreview(resp.Result)
 	}
 
@@ -379,9 +385,12 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 			continue
 		}
 
-		filterStart := time.Now()
+		var filterStart time.Time
+		if needAudit {
+			filterStart = time.Now()
+		}
 		var prevResult []byte
-		if current != nil && len(current.Result) > 0 {
+		if needAudit && current != nil && len(current.Result) > 0 {
 			prevResult = bytes.Clone(current.Result)
 		}
 
@@ -408,12 +417,12 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 				current = nextResp
 			}
 		}
-		latency := float64(time.Since(filterStart).Microseconds()) / 1000.0
 
 		if mcpErr != nil {
 			// Log block decision with explicit redaction note / blocking rule metadata (SEC-008)
-			blockedPayload := fmt.Sprintf("[REDACTED - Blocked by %s: %s]", f.Name(), mcpErr.Message)
-			if logger != nil {
+			if needAudit {
+				latency := float64(time.Since(filterStart).Microseconds()) / 1000.0
+				blockedPayload := fmt.Sprintf("[REDACTED - Blocked by %s: %s]", f.Name(), mcpErr.Message)
 				logger.LogEvent(&AuditEvent{
 					Timestamp:   time.Now(),
 					AgentName:   agentName,
@@ -436,43 +445,43 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 			return nil, mcpErr
 		}
 
-		if current != nil && !bytes.Equal(prevResult, current.Result) {
+		if needAudit && current != nil && !bytes.Equal(prevResult, current.Result) {
 			modifiedFilter = f.Name()
 		}
 	}
 
-	// Capture post-filtered payload preview strictly AFTER filter chain execution (SEC-008)
-	rawPayload := ""
-	if current != nil && len(current.Result) > 0 {
-		outputBytes = len(current.Result)
-		rawPayload = makePayloadPreview(current.Result)
-	}
-
-	decision := "ALLOWED"
-	filterName := "pipeline"
-	matchedRule := ""
-	var auditedRules []string
-	if modifiedFilter != "" {
-		decision = "MASKED"
-		filterName = modifiedFilter
-		matchedRule = modifiedFilter
-	} else if len(auditMeta.AuditedRules) > 0 {
-		decision = "AUDIT"
-		filterName = auditMeta.FilterName
-		if filterName == "" {
-			filterName = "dlp"
+	if needAudit {
+		// Capture post-filtered payload preview strictly AFTER filter chain execution (SEC-008)
+		rawPayload := ""
+		if current != nil && len(current.Result) > 0 {
+			outputBytes = len(current.Result)
+			rawPayload = makePayloadPreview(current.Result)
 		}
-		matchedRule = strings.Join(auditMeta.AuditedRules, ",")
-		auditedRules = auditMeta.AuditedRules
-	}
 
-	var origPayload string
-	if debugRetainUnmaskedDiff && (decision == "MASKED" || decision == "AUDIT") {
-		origPayload = initialPayloadPreview
-	}
+		decision := "ALLOWED"
+		filterName := "pipeline"
+		matchedRule := ""
+		var auditedRules []string
+		if modifiedFilter != "" {
+			decision = "MASKED"
+			filterName = modifiedFilter
+			matchedRule = modifiedFilter
+		} else if len(auditMeta.AuditedRules) > 0 {
+			decision = "AUDIT"
+			filterName = auditMeta.FilterName
+			if filterName == "" {
+				filterName = "dlp"
+			}
+			matchedRule = strings.Join(auditMeta.AuditedRules, ",")
+			auditedRules = auditMeta.AuditedRules
+		}
 
-	// Log allowed/masked/audited response
-	if logger != nil {
+		var origPayload string
+		if debugRetainUnmaskedDiff && (decision == "MASKED" || decision == "AUDIT") {
+			origPayload = initialPayloadPreview
+		}
+
+		// Log allowed/masked/audited response
 		totalLatency := float64(time.Since(startTime).Microseconds()) / 1000.0
 		logger.LogEvent(&AuditEvent{
 			Timestamp:       time.Now(),
