@@ -235,3 +235,58 @@ func TestAdapters_ReadAndMutate(t *testing.T) {
 		})
 	}
 }
+
+func TestReadConfigFile_EmptyAndMalformed(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+
+	t.Run("empty_file", func(t *testing.T) {
+		p := filepath.Join(tempDir, "empty_mcp_config.json")
+		if err := os.WriteFile(p, []byte{}, 0600); err != nil {
+			t.Fatalf("write empty file: %v", err)
+		}
+
+		adapter := NewAntigravityAdapter(p)
+		if !adapter.Detect() {
+			t.Fatalf("expected Detect() to return true for existing empty file")
+		}
+
+		servers, err := adapter.ReadServers()
+		if err != nil {
+			t.Fatalf("expected no error on empty config file, got: %v", err)
+		}
+		if len(servers) != 0 {
+			t.Fatalf("expected 0 servers, got %d", len(servers))
+		}
+	})
+
+	t.Run("bom_whitespace_and_comments_only", func(t *testing.T) {
+		p := filepath.Join(tempDir, "comments_only_mcp_config.json")
+		content := "\xEF\xBB\xBF\r\n  // Google Antigravity MCP config\r\n  /* empty */\r\n"
+		if err := os.WriteFile(p, []byte(content), 0600); err != nil {
+			t.Fatalf("write comment-only file: %v", err)
+		}
+
+		adapter := NewAntigravityAdapter(p)
+		servers, err := adapter.ReadServers()
+		if err != nil {
+			t.Fatalf("expected no error on comment-only config file, got: %v", err)
+		}
+		if len(servers) != 0 {
+			t.Fatalf("expected 0 servers, got %d", len(servers))
+		}
+	})
+
+	t.Run("truncated_json_still_errors", func(t *testing.T) {
+		p := filepath.Join(tempDir, "truncated_mcp_config.json")
+		if err := os.WriteFile(p, []byte(`{"mcpServers": {`), 0600); err != nil {
+			t.Fatalf("write truncated file: %v", err)
+		}
+
+		adapter := NewAntigravityAdapter(p)
+		if _, err := adapter.ReadServers(); err == nil {
+			t.Fatalf("expected error on truncated JSON config, got nil")
+		}
+	})
+}

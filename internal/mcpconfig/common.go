@@ -1,6 +1,7 @@
 package mcpconfig
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -106,6 +107,12 @@ func readConfigFile(path string) (map[string]interface{}, []DiscoveredServer, er
 	cleaned, err := StripCommentsAndTrailingCommas(data)
 	if err != nil {
 		return nil, nil, fmt.Errorf("strip comments in '%s': %w", path, err)
+	}
+
+	// Some clients (e.g. Google Antigravity on fresh install) leave an empty or
+	// comment-only config file before any MCP server is added; treat it as empty.
+	if len(bytes.TrimSpace(cleaned)) == 0 {
+		return map[string]interface{}{}, nil, nil
 	}
 
 	var rawMap map[string]interface{}
