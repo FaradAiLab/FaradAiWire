@@ -33,11 +33,11 @@ func TestCLI_Run_StandaloneDefaults(t *testing.T) {
 	if cfg.GetListenHost() != "127.0.0.1" {
 		t.Errorf("expected default listen host 127.0.0.1, got %s", cfg.GetListenHost())
 	}
-	if cfg.GetListenPort() != 8090 {
-		t.Errorf("expected default port 8090, got %d", cfg.GetListenPort())
+	if cfg.GetListenPort() != 19410 {
+		t.Errorf("expected default port 19410, got %d", cfg.GetListenPort())
 	}
-	if cfg.GetAdminPort() != 8095 {
-		t.Errorf("expected default admin port 8095, got %d", cfg.GetAdminPort())
+	if cfg.GetAdminPort() != 19415 {
+		t.Errorf("expected default admin port 19415, got %d", cfg.GetAdminPort())
 	}
 
 	// 2. Verify config directory structure

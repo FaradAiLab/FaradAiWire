@@ -663,7 +663,8 @@ func executeAdoptWithAdapters(opts adoptOptions, in io.Reader, out io.Writer, ad
 	fmt.Fprintln(out, "\n🎉 FaradAiWire adoption completed successfully!")
 	fmt.Fprintln(out, "All client tool calls are now shielded by FaradAiWire's Zero-Trust guardrails.")
 	fmt.Fprintln(out, "\n💡 Useful commands:")
-	fmt.Fprintln(out, "  • View live traffic and audit logs : faradaiwire run (then open http://127.0.0.1:8095)")
+	adminEndpoint := fmt.Sprintf("%s://%s", adminScheme(cfg), net.JoinHostPort(resolveAdminEndpointHost(cfg), strconv.Itoa(cfg.GetAdminPort())))
+	fmt.Fprintf(out, "  • View live traffic and audit logs : faradaiwire run (then open %s)\n", adminEndpoint)
 	fmt.Fprintln(out, "  • Revert back to original configs  : faradaiwire adopt --rollback")
 	return 0
 }

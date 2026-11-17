@@ -4,6 +4,7 @@ import { Navigation, TabId } from './components/Navigation'
 import { HITLModal } from './components/HITLModal'
 import { GatewayStatus, ThemeMode } from './types'
 import { api } from './api'
+import { getAdminConsoleHost } from './constants'
 
 // Lazy-loaded domain tabs for code-splitting and faster initial page paint
 const OverviewTab = React.lazy(() =>
@@ -254,7 +255,7 @@ export const App: React.FC = () => {
         <div>FaradAiWire Open Core · Hexagonal MCP AI Gateway</div>
         <div className="flex items-center gap-4">
           <span>Zero-Egress Guaranteed</span>
-          <span>127.0.0.1:8095</span>
+          <span>{getAdminConsoleHost()}</span>
         </div>
       </footer>
 

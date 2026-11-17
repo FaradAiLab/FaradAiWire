@@ -2,15 +2,15 @@
 # Multi-Agent Architecture
 
 # Gateway Ingress Configuration
-listen_port: 8090
+listen_port: 19410
 agents_dir: "./agents"          # Directory containing per-agent configurations (or /etc/faradaiwire/agents in prod)
 
 # Security and Access Guardrails
 security:
   cors_allowed_origins:
-    - "http://localhost:3000"
-    - "http://localhost:8090"
-    - "http://localhost:8095"
+    - "http://localhost:19418"
+    - "http://localhost:19410"
+    - "http://localhost:19415"
   trusted_proxies:
     - "127.0.0.1/32"
     - "10.0.0.0/8"
@@ -105,7 +105,7 @@ audit_log:
 hot_reload: true
 
 # Admin Server configuration (for inspection, settings, and Web Console)
-admin_port: 8095
+admin_port: 19415
 admin_tls:
   enabled: false
   cert_file: "/path/to/cert.pem"

@@ -170,7 +170,7 @@ func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fs.Usage = func() { printConnectUsage(stderr) }
 		profile := fs.String("profile", "default", "Target Security Profile name to route traffic through")
 		host := fs.String("host", "127.0.0.1", "Gateway ingress host address")
-		port := fs.Int("port", 8090, "Gateway ingress port")
+		port := fs.Int("port", 0, "Gateway ingress port (default: configured listen_port or 19410)")
 		token := fs.String("token", "", "Optional API bearer token")
 		noSpawn := fs.Bool("no-spawn", false, "Do not auto-spawn the background daemon if offline")
 		if err := fs.Parse(args[1:]); err != nil {

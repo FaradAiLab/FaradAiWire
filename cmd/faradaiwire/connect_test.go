@@ -382,3 +382,30 @@ func TestRunBridge_FiltersShutdownAndForwardsSyncJSONResponse(t *testing.T) {
 		t.Fatalf("expected compacted synchronous JSON response in stdout, got: %s", outStr)
 	}
 }
+
+func TestResolveDefaultConnectPort(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", home)
+	t.Setenv("FARADAI_WIRE_PORT", "")
+	t.Setenv("LISTEN_PORT", "")
+
+	// 1. Canonical default without config.yaml or env
+	if got := resolveDefaultConnectPort(); got != 19410 {
+		t.Fatalf("expected default connect port 19410, got %d", got)
+	}
+
+	// 2. Environment override when config.yaml absent
+	t.Setenv("FARADAI_WIRE_PORT", "29410")
+	if got := resolveDefaultConnectPort(); got != 29410 {
+		t.Fatalf("expected env connect port 29410, got %d", got)
+	}
+
+	// 3. Explicit config.yaml takes precedence over env
+	cfgPath := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("listen_port: 19555\n"), 0600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+	if got := resolveDefaultConnectPort(); got != 19555 {
+		t.Fatalf("expected config.yaml connect port 19555, got %d", got)
+	}
+}

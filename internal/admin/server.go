@@ -716,7 +716,7 @@ func (a *AdminServer) ListenAddr() string {
 	cfg := a.cfg
 	a.mu.RUnlock()
 
-	adminPort := 8095
+	adminPort := config.DefaultAdminPort
 	if cfg != nil {
 		adminPort = cfg.GetAdminPort()
 	}

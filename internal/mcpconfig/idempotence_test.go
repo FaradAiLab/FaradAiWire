@@ -45,13 +45,25 @@ func TestIsSelfReference(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "URL pointing to loopback port 8090 sse",
+			name:     "URL pointing to canonical port 19410 sse",
+			sName:    "canonical-wire",
+			url:      "http://127.0.0.1:19410/sse/claude",
+			expected: true,
+		},
+		{
+			name:     "URL pointing to localhost:19410",
+			sName:    "canonical-localhost-wire",
+			url:      "http://localhost:19410/mcp",
+			expected: true,
+		},
+		{
+			name:     "URL pointing to legacy loopback port 8090 sse",
 			sName:    "remote-wire",
 			url:      "http://127.0.0.1:8090/sse/claude",
 			expected: true,
 		},
 		{
-			name:     "URL pointing to localhost:8090",
+			name:     "URL pointing to legacy localhost:8090",
 			sName:    "localhost-wire",
 			url:      "http://localhost:8090/mcp",
 			expected: true,

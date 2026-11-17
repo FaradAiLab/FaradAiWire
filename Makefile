@@ -31,14 +31,14 @@ init-config: ## Initialize default configuration file if missing
 	fi
 
 run: build init-config ## Build and run gateway in standalone mode (Single-Command Start)
-	@echo "==> Starting FaradAiWire on Ingress (:8090) and Admin (:8095)..."
+	@echo "==> Starting FaradAiWire on Ingress (:19410) and Admin (:19415)..."
 	./$(BINARY_NAME) run --config $(CONFIG_FILE) --standalone
 
 dev: init-config ## Run directly with go run (quick developer iteration)
 	go run ./cmd/faradaiwire run --config $(CONFIG_FILE) --standalone
 
 dev-web: ## Run the Vite development server with Hot Module Reloading (HMR)
-	@echo "==> Starting Vite development server on :5173..."
+	@echo "==> Starting Vite development server on :$${FARADAI_WIRE_WEB_DEV_PORT:-19418}..."
 	@cd web && npm run dev
 
 test: ## Run all unit and integration tests across packages

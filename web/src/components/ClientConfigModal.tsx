@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { Modal } from './ui/Modal'
 import { Badge } from './ui/Badge'
+import { DEFAULT_GATEWAY_HOST, DEFAULT_INGRESS_PORT } from '../constants'
 
 export type ClientId = 'claude-desktop' | 'cursor' | 'windsurf' | 'claude-cli' | 'antigravity'
 
@@ -101,8 +102,8 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
     keyName,
     agentName,
     availableAgents = [],
-    ingressPort = 8090,
-    ingressHost = '127.0.0.1',
+    ingressPort = DEFAULT_INGRESS_PORT,
+    ingressHost = DEFAULT_GATEWAY_HOST,
   }) => {
     const [selectedClient, setSelectedClient] = useState<ClientId>('claude-desktop')
     const [isFullFile, setIsFullFile] = useState(true)

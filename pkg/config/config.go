@@ -22,6 +22,12 @@ const (
 	RuntimeModeManaged = config.RuntimeModeManaged
 	// RuntimeModeStandalone indicates offline-first, zero-egress local operation.
 	RuntimeModeStandalone = config.RuntimeModeStandalone
+	// DefaultListenPort is the canonical gateway MCP ingress port.
+	DefaultListenPort = config.DefaultListenPort
+	// DefaultAdminPort is the canonical administrative console & API port.
+	DefaultAdminPort = config.DefaultAdminPort
+	// DefaultWebDevPort is the canonical Vite dev server port for the standalone Web Studio.
+	DefaultWebDevPort = config.DefaultWebDevPort
 )
 
 // NewYAMLConfigProvider creates a YAML config provider for the given file path.

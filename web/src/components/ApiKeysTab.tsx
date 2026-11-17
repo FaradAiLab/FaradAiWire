@@ -14,6 +14,7 @@ import {
   Info,
 } from 'lucide-react'
 import { ApiKeyItem, CreatedApiKey, GatewayStatus } from '../types'
+import { DEFAULT_GATEWAY_HOST, DEFAULT_INGRESS_PORT } from '../constants'
 import { api } from '../api'
 import { Badge } from './ui/Badge'
 import { ClientConfigModal } from './ClientConfigModal'
@@ -144,8 +145,8 @@ export const ApiKeysTab: React.FC = () => {
     []
   )
 
-  const ingressPort = gatewayStatus?.ingress_port || 8090
-  const ingressHost = gatewayStatus?.ingress_host || '127.0.0.1'
+  const ingressPort = gatewayStatus?.ingress_port || DEFAULT_INGRESS_PORT
+  const ingressHost = gatewayStatus?.ingress_host || DEFAULT_GATEWAY_HOST
 
   // The unmasked token of the newly created key (fallback gracefully)
   const resolvedCreatedToken = useMemo(() => {

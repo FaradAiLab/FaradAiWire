@@ -7,14 +7,14 @@ info:
     Provides administrative controls, security telemetry queries, agent manifest management,
     API key rotation, and real-time MCP streaming inspection.
 servers:
-  - url: http://127.0.0.1:8095
+  - url: http://127.0.0.1:19415
     description: Local Administrative Console (admin_port)
-  - url: http://127.0.0.1:8090
+  - url: http://127.0.0.1:19410
     description: Agent Ingress Proxy (listen_port)
 
 paths:
   # ============================================================================
-  # Admin Console Endpoints (Port 8095)
+  # Admin Console Endpoints (Port 19415)
   # ============================================================================
   /admin/dashboard:
     get:
@@ -335,7 +335,7 @@ paths:
           description: API key not found
 
   # ============================================================================
-  # Agent Snapshots & Rollback Endpoints (Port 8095)
+  # Agent Snapshots & Rollback Endpoints (Port 19415)
   # ============================================================================
   /admin/agents/archives:
     get:
@@ -386,7 +386,7 @@ paths:
           description: Archive snapshot not found
 
   # ============================================================================
-  # Guard & SLM Management Endpoints (Port 8095)
+  # Guard & SLM Management Endpoints (Port 19415)
   # ============================================================================
   /admin/guards/status:
     get:
@@ -552,7 +552,7 @@ paths:
           description: Call ID not found or already resolved
 
   # ============================================================================
-  # Policy Packs & DLP Governance Endpoints (Port 8095)
+  # Policy Packs & DLP Governance Endpoints (Port 19415)
   # ============================================================================
   /admin/dlp/rules:
     get:
@@ -638,7 +638,7 @@ paths:
           description: Gateway reloaded successfully
 
   # ============================================================================
-  # Ingress Proxy Endpoints (Port 8090)
+  # Ingress Proxy Endpoints (Port 19410)
   # ============================================================================
   /sse:
     get:
@@ -721,8 +721,8 @@ components:
         runtime_mode: { type: string, enum: [STANDALONE, MANAGED], example: "STANDALONE" }
         transport_mode: { type: string, enum: [sse, stdio], example: "sse" }
         ingress_host: { type: string, example: "127.0.0.1" }
-        ingress_port: { type: integer, example: 8090 }
-        ingress_url: { type: string, example: "http://127.0.0.1:8090" }
+        ingress_port: { type: integer, example: 19410 }
+        ingress_url: { type: string, example: "http://127.0.0.1:19410" }
         has_local_overrides: { type: boolean }
         is_managed: { type: boolean }
         organization: { type: string, example: "Corporate Organization" }

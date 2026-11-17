@@ -22,8 +22,8 @@ graph TD
 
     subgraph FaradAiWire PEP [Single-Tenant Daemon]
         subgraph Ports
-            P1["Port 8090: Ingress Proxy (Fail-Closed Bearer Auth)"]
-            P2["Port 8095: Admin Console & Embedded UI"]
+            P1["Port 19410: Ingress Proxy (Fail-Closed Bearer Auth)"]
+            P2["Port 19415: Admin Console & Embedded UI"]
         end
 
         subgraph Core Engine
@@ -84,7 +84,7 @@ git clone https://github.com/FaradAiLab/FaradAiWire.git
 cd FaradAiWire
 make run
 ```
-*Initializes `config.yaml` if missing, compiles the binary with embedded DuckDB telemetry, and binds Ingress to `http://127.0.0.1:8090` and the Admin UI to `http://127.0.0.1:8095/admin/dashboard`.*
+*Initializes `config.yaml` if missing, compiles the binary with embedded DuckDB telemetry, and binds Ingress to `http://127.0.0.1:19410` and the Admin UI to `http://127.0.0.1:19415/admin/dashboard`.*
 
 For fast developer iterations without building the binary:
 ```bash
@@ -112,7 +112,7 @@ To elevate defense against complex zero-day indirect prompt injections and jailb
    ```bash
    faradaiwire doctor
    ```
-   *Farad Ai automatically discovers local engines on your host. You can also test and link them with one click in the Web Console at `http://localhost:8095/admin/dashboard`.*
+   *Farad Ai automatically discovers local engines on your host. You can also test and link them with one click in the Web Console at `http://localhost:19415/admin/dashboard`.*
 
 ---
 
@@ -120,8 +120,8 @@ To elevate defense against complex zero-day indirect prompt injections and jailb
 
 | Port | Service | Endpoints | Authentication |
 | :--- | :--- | :--- | :--- |
-| **8090** | **Proxy Ingress** | `/sse`, `/message`, `/mcp` | Fail-closed (`Authorization: Bearer <key>`) |
-| **8095** | **Admin Console** | `/admin/dashboard`, `/admin/status`, REST APIs | Loopback standalone or `Authorization: Bearer <token>` (`ADMIN_API_KEY` / `FARADAI_WIRE_ADMIN_TOKEN`) |
+| **19410** | **Proxy Ingress** | `/sse`, `/message`, `/mcp` | Fail-closed (`Authorization: Bearer <key>`) |
+| **19415** | **Admin Console** | `/admin/dashboard`, `/admin/status`, REST APIs | Loopback standalone or `Authorization: Bearer <token>` (`ADMIN_API_KEY` / `FARADAI_WIRE_ADMIN_TOKEN`) |
 
 ---
 

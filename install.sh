@@ -50,7 +50,7 @@ print_brew_success() {
     echo "  faradaiwire run"
     echo ""
     echo "Or open the Admin Console at:"
-    echo "  http://localhost:8095/admin/dashboard"
+    echo "  http://localhost:19415/admin/dashboard"
 }
 
 # 3. Prefer Homebrew Cask on macOS when available and no explicit version pin is requested
@@ -237,4 +237,4 @@ fi
 echo "  faradaiwire run"
 echo ""
 echo "Or open the Admin Console at:"
-echo "  http://localhost:8095/admin/dashboard"
+echo "  http://localhost:19415/admin/dashboard"

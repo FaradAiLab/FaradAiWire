@@ -30,7 +30,7 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	var (
 		activeFilters      []string
-		listenPort         = 8090
+		listenPort         = config.DefaultListenPort
 		listenHost         = "127.0.0.1"
 		runtimeMode        string
 		transportMode      string

@@ -175,11 +175,11 @@ func TestStandaloneGateway_DefaultConfigResolution(t *testing.T) {
 	if cfg.GetRuntimeMode() != config.RuntimeModeStandalone {
 		t.Errorf("expected auto-bootstrapped config to have mode STANDALONE, got %s", cfg.GetRuntimeMode())
 	}
-	if cfg.GetListenPort() != 8090 {
-		t.Errorf("expected auto-bootstrapped config port 8090, got %d", cfg.GetListenPort())
+	if cfg.GetListenPort() != 19410 {
+		t.Errorf("expected auto-bootstrapped config port 19410, got %d", cfg.GetListenPort())
 	}
-	if cfg.GetAdminPort() != 8095 {
-		t.Errorf("expected auto-bootstrapped admin port 8095, got %d", cfg.GetAdminPort())
+	if cfg.GetAdminPort() != 19415 {
+		t.Errorf("expected auto-bootstrapped admin port 19415, got %d", cfg.GetAdminPort())
 	}
 
 	srv, err := gateway.NewServer(cfg, provider)

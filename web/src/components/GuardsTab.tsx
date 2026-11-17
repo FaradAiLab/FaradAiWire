@@ -13,6 +13,7 @@ import {
   Plus,
 } from 'lucide-react'
 import { GuardModel, GuardProcessStatus, GuardThreatAction } from '../types'
+import { getAdminConsoleHost } from '../constants'
 import { api } from '../api'
 import { HostTelemetryBar } from './HostTelemetryBar'
 import { BenchmarkLeaderboard } from './BenchmarkLeaderboard'
@@ -492,7 +493,7 @@ export const GuardsTab: React.FC = () => {
 
       try {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-        const host = window.location.host || '127.0.0.1:8095'
+        const host = getAdminConsoleHost()
         const wsUrl = `${protocol}//${host}/ws`
 
         ws = new WebSocket(wsUrl)

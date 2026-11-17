@@ -10,9 +10,10 @@ import (
 func TestPrintStartupBanner_Standby(t *testing.T) {
 	cfg := &config.Config{
 		RuntimeMode: config.RuntimeModeStandalone,
-		ListenHost:  "127.0.0.1",
-		ListenPort:  8090,
-		AdminPort:   8095,
+		ListenHost:  "0.0.0.0",
+		ListenPort:  19410,
+		AdminHost:   "127.0.0.1",
+		AdminPort:   19415,
 	}
 	cfg.Filters.DLP.Enabled = true
 	cfg.Filters.LoopProtection.Enabled = true
@@ -29,11 +30,11 @@ func TestPrintStartupBanner_Standby(t *testing.T) {
 	if strings.Contains(out, "FaradAiWire vv") {
 		t.Errorf("expected single 'v' prefix in banner header, got: %s", out)
 	}
-	if !strings.Contains(out, "http://127.0.0.1:8090") {
-		t.Errorf("expected banner to contain ingress address")
+	if !strings.Contains(out, "http://0.0.0.0:19410") {
+		t.Errorf("expected banner to contain ingress address http://0.0.0.0:19410, got: %s", out)
 	}
-	if !strings.Contains(out, "http://127.0.0.1:8095") {
-		t.Errorf("expected banner to contain admin address")
+	if !strings.Contains(out, "http://127.0.0.1:19415") {
+		t.Errorf("expected banner to contain admin address http://127.0.0.1:19415, got: %s", out)
 	}
 	if !strings.Contains(out, "DLP & Secrets Redaction  : [ACTIVE]") {
 		t.Errorf("expected DLP active tag")

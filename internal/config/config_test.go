@@ -16,12 +16,12 @@ func TestConfigDefaults(t *testing.T) {
 		t.Errorf("expected default listen host '127.0.0.1', got %s", host)
 	}
 
-	if port := cfg.GetListenPort(); port != 8090 {
-		t.Errorf("expected default listen port 8090, got %d", port)
+	if port := cfg.GetListenPort(); port != 19410 {
+		t.Errorf("expected default listen port 19410, got %d", port)
 	}
 
-	if adminPort := cfg.GetAdminPort(); adminPort != 8095 {
-		t.Errorf("expected default admin port 8095, got %d", adminPort)
+	if adminPort := cfg.GetAdminPort(); adminPort != 19415 {
+		t.Errorf("expected default admin port 19415, got %d", adminPort)
 	}
 
 	if mode := cfg.GetRuntimeMode(); mode != config.RuntimeModeStandalone {
@@ -131,11 +131,11 @@ func TestEnsureDefaultRuntimeConfig(t *testing.T) {
 	if cfg.GetListenHost() != "127.0.0.1" {
 		t.Errorf("expected generated config listen host '127.0.0.1', got %s", cfg.GetListenHost())
 	}
-	if cfg.GetListenPort() != 8090 {
-		t.Errorf("expected generated config listen port 8090, got %d", cfg.GetListenPort())
+	if cfg.GetListenPort() != 19410 {
+		t.Errorf("expected generated config listen port 19410, got %d", cfg.GetListenPort())
 	}
-	if cfg.GetAdminPort() != 8095 {
-		t.Errorf("expected generated config admin port 8095, got %d", cfg.GetAdminPort())
+	if cfg.GetAdminPort() != 19415 {
+		t.Errorf("expected generated config admin port 19415, got %d", cfg.GetAdminPort())
 	}
 
 	// Verify all 7 layers of Runtime Security Envelope are active with generic defaults
@@ -402,5 +402,41 @@ func TestGetVersion(t *testing.T) {
 	config.RuntimeVersion = "   "
 	if got := config.GetVersion(); got != config.Version {
 		t.Errorf("GetVersion() blank fallback = %q, want %q", got, config.Version)
+	}
+}
+
+func TestConfig_PortEnvPrecedence(t *testing.T) {
+	t.Setenv("FARADAI_WIRE_PORT", "29410")
+	t.Setenv("LISTEN_PORT", "29411")
+	t.Setenv("FARADAI_WIRE_ADMIN_PORT", "29415")
+	t.Setenv("ADMIN_PORT", "29416")
+
+	cfg := &config.Config{}
+	if got := cfg.GetListenPort(); got != 29410 {
+		t.Errorf("expected FARADAI_WIRE_PORT 29410, got %d", got)
+	}
+	if got := cfg.GetAdminPort(); got != 29415 {
+		t.Errorf("expected FARADAI_WIRE_ADMIN_PORT 29415, got %d", got)
+	}
+
+	// Explicit config overrides environment variables
+	cfg.ListenPort = 19510
+	cfg.AdminPort = 19515
+	if got := cfg.GetListenPort(); got != 19510 {
+		t.Errorf("expected explicit ListenPort 19510 to override env, got %d", got)
+	}
+	if got := cfg.GetAdminPort(); got != 19515 {
+		t.Errorf("expected explicit AdminPort 19515 to override env, got %d", got)
+	}
+
+	// Fallback to secondary env vars and ignore invalid values
+	t.Setenv("FARADAI_WIRE_PORT", "not-a-port")
+	t.Setenv("FARADAI_WIRE_ADMIN_PORT", "99999")
+	emptyCfg := &config.Config{}
+	if got := emptyCfg.GetListenPort(); got != 29411 {
+		t.Errorf("expected fallback LISTEN_PORT 29411, got %d", got)
+	}
+	if got := emptyCfg.GetAdminPort(); got != 29416 {
+		t.Errorf("expected fallback ADMIN_PORT 29416, got %d", got)
 	}
 }

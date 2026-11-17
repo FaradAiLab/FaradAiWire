@@ -1,4 +1,4 @@
-# FaradAiWire Native Installer (Windows PowerShell)
+﻿# FaradAiWire Native Installer (Windows PowerShell)
 # Usage: irm https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/install.ps1 | iex
 
 $ErrorActionPreference = 'Stop'
@@ -238,6 +238,6 @@ Write-Host "Run the gateway with:" -ForegroundColor White
 Write-Host "  faradaiwire run" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Or open the Admin Console at:" -ForegroundColor White
-Write-Host "  http://localhost:8095/admin/dashboard" -ForegroundColor Cyan
+Write-Host "  http://localhost:19415/admin/dashboard" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "ℹ️  Note: Already-open VS Code, Cursor, or Windows Terminal apps keep their startup environment — restart them once if 'faradaiwire' is not recognized inside existing windows." -ForegroundColor DarkGray

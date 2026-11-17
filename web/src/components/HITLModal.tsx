@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, memo } from 'react'
 import { ShieldAlert, AlertTriangle, CheckCircle2, XCircle, Clock, Terminal, Cpu } from 'lucide-react'
 import { HITLApprovalRequest } from '../types'
+import { getAdminConsoleHost } from '../constants'
 import { api } from '../api'
 
 // Isolated CountdownTimer component to prevent unnecessary re-rendering of the entire modal
@@ -84,7 +85,7 @@ export const HITLModal: React.FC = () => {
 
       try {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-        const host = window.location.host || '127.0.0.1:8095'
+        const host = getAdminConsoleHost()
         const wsUrl = `${protocol}//${host}/ws`
 
         ws = new WebSocket(wsUrl)

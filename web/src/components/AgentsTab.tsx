@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { Bot, Plus, CheckCircle2, AlertTriangle, X } from 'lucide-react'
 import { AgentItem, ProtocolItem, GatewayStatus } from '../types'
+import { DEFAULT_GATEWAY_HOST, DEFAULT_INGRESS_PORT } from '../constants'
 import { api } from '../api'
 import { Button } from './ui/Button'
 import { AgentCard } from './agents/AgentCard'
@@ -153,12 +154,12 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({ status: propStatus }) => {
     }
   }, [])
 
-  const ingressPort = status?.ingress_port || 8090
+  const ingressPort = status?.ingress_port || DEFAULT_INGRESS_PORT
   const ingressHost =
     status?.ingress_host ||
     (typeof window !== 'undefined' && window.location.hostname
       ? window.location.hostname
-      : '127.0.0.1')
+      : DEFAULT_GATEWAY_HOST)
 
   return (
     <div className="space-y-8">

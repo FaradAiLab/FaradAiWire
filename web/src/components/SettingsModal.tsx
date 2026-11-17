@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { X, Key, Sliders, Settings, ChevronRight, ShieldCheck, Gauge } from 'lucide-react'
 import { GatewayStatus } from '../types'
+import { DEFAULT_GATEWAY_HOST, DEFAULT_INGRESS_PORT } from '../constants'
 import { ApiKeysTab } from './ApiKeysTab'
 import { SecurityFiltersTab } from './SecurityFiltersTab'
 import { OperationalSettingsTab } from './OperationalSettingsTab'
@@ -86,8 +87,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   if (!isOpen) return null
 
   const activeFilterCount = (status?.active_filters || []).filter((f) => KNOWN_FALLBACK_FILTERS.has(f)).length
-  const ingressPort = status?.ingress_port || 8090
-  const ingressHost = status?.ingress_host || '127.0.0.1'
+  const ingressPort = status?.ingress_port || DEFAULT_INGRESS_PORT
+  const ingressHost = status?.ingress_host || DEFAULT_GATEWAY_HOST
 
   return (
     <div

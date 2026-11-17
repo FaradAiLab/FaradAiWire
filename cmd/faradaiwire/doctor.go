@@ -71,7 +71,7 @@ func executeDoctor(configPath string, out io.Writer) int {
 		fmt.Fprintf(out, "[✓] Ingress Port :%d: Available\n", ingressPort)
 	}
 
-	inUseAdmin, errAdmin := checkPortStatus(cfg.GetListenHost(), adminPort)
+	inUseAdmin, errAdmin := checkPortStatus(cfg.GetAdminHost(), adminPort)
 	if errAdmin != nil {
 		fmt.Fprintf(out, "[!] Admin Port   :%d: Check skipped (%v)\n", adminPort, errAdmin)
 	} else if inUseAdmin {
@@ -164,7 +164,7 @@ func executeDoctor(configPath string, out io.Writer) int {
 		fmt.Fprintln(out, "        $ docker run -d -p 8000:8000 ghcr.io/faradailab/farad-ai-guard:qwen3")
 		fmt.Fprintln(out, "        Auto-detected on :8000 with zero configuration.")
 		fmt.Fprintln(out, "      • Option C (Admin Web Console):")
-		fmt.Fprintln(out, "        Visit http://localhost:8095 -> Settings -> SLM Probe")
+		fmt.Fprintf(out, "        Visit http://%s -> Settings -> SLM Probe\n", net.JoinHostPort(cfg.GetAdminHost(), strconv.Itoa(adminPort)))
 	}
 	fmt.Fprintln(out, "==========================================")
 

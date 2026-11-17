@@ -14,6 +14,7 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { AgentItem } from '../../types'
+import { DEFAULT_INGRESS_PORT } from '../../constants'
 import { Badge } from '../ui/Badge'
 
 export interface AgentCardProps {
@@ -33,7 +34,7 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(
   ({
     agent,
     ingressHost,
-    ingressPort = 8090,
+    ingressPort = DEFAULT_INGRESS_PORT,
     syncing,
     activeFilters = [],
     onEdit,
@@ -109,7 +110,7 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(
           {/* Ingress Route Copy Widget - DUAL-TONE TELEMETRY INVARIANT */}
           <div className="space-y-1.5 mb-4">
             <div className="text-[10px] font-mono text-muted uppercase tracking-wider flex items-center justify-between">
-              <span>Ingress Endpoint (:8090)</span>
+              <span>Ingress Endpoint (:{ingressPort})</span>
               {copied && (
                 <span className="text-emerald-600 dark:text-emerald-400 text-[10px] flex items-center gap-1 font-mono font-bold">
                   <Check className="w-3 h-3" /> Copied!

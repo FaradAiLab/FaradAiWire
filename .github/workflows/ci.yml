@@ -268,28 +268,28 @@ jobs:
 
           faradaiwire doctor
 
-          # Verify Host Native Daemon startup, strict port segregation (8090/8095),
+          # Verify Host Native Daemon startup, strict port segregation (19410/19415),
           # loopback Admin UI access (ADR-0028), and fail-closed Ingress auth (ADR-0021).
           faradaiwire run --standalone >"$DAEMON_LOG" 2>&1 &
           DAEMON_PID=$!
 
           HEALTH_OK=0
           for _ in $(seq 1 75); do
-            if curl -fsS "http://127.0.0.1:8090/health" >/dev/null 2>&1; then
+            if curl -fsS "http://127.0.0.1:19410/health" >/dev/null 2>&1; then
               HEALTH_OK=1
               break
             fi
             sleep 0.2
           done
           if [ "$HEALTH_OK" != "1" ]; then
-            echo "❌ Daemon did not become healthy on :8090/health"
+            echo "❌ Daemon did not become healthy on :19410/health"
             cat "$DAEMON_LOG" || true
             exit 1
           fi
 
-          curl -fsS "http://127.0.0.1:8095/admin/status" >/dev/null
-          curl -fsS "http://127.0.0.1:8095/admin/dashboard" >/dev/null
-          MCP_CODE="$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' "http://127.0.0.1:8090/mcp")"
+          curl -fsS "http://127.0.0.1:19415/admin/status" >/dev/null
+          curl -fsS "http://127.0.0.1:19415/admin/dashboard" >/dev/null
+          MCP_CODE="$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' "http://127.0.0.1:19410/mcp")"
           if [ "$MCP_CODE" != "401" ]; then
             echo "❌ Expected HTTP 401 for unauthenticated /mcp, got $MCP_CODE"
             exit 1
@@ -408,7 +408,7 @@ jobs:
             & faradaiwire doctor
             if ($LASTEXITCODE -ne 0) { throw "faradaiwire doctor failed" }
 
-            # Verify Host Native Daemon startup, strict port segregation (8090/8095),
+            # Verify Host Native Daemon startup, strict port segregation (19410/19415),
             # loopback Admin UI access (ADR-0028), and fail-closed Ingress auth (ADR-0021).
             $DaemonStdout = Join-Path $SmokeHome "daemon.out.log"
             $DaemonStderr = Join-Path $SmokeHome "daemon.err.log"
@@ -417,7 +417,7 @@ jobs:
             $Healthy = $false
             for ($i = 0; $i -lt 75; $i++) {
               try {
-                $Resp = Invoke-WebRequest -Uri "http://127.0.0.1:8090/health" -UseBasicParsing -TimeoutSec 1
+                $Resp = Invoke-WebRequest -Uri "http://127.0.0.1:19410/health" -UseBasicParsing -TimeoutSec 1
                 if ($Resp.StatusCode -eq 200) {
                   $Healthy = $true
                   break
@@ -429,17 +429,17 @@ jobs:
             if (-not $Healthy) {
               if (Test-Path $DaemonStdout) { Get-Content $DaemonStdout }
               if (Test-Path $DaemonStderr) { Get-Content $DaemonStderr }
-              throw "Daemon did not become healthy on :8090/health"
+              throw "Daemon did not become healthy on :19410/health"
             }
 
-            $StatusResp = Invoke-WebRequest -Uri "http://127.0.0.1:8095/admin/status" -UseBasicParsing
+            $StatusResp = Invoke-WebRequest -Uri "http://127.0.0.1:19415/admin/status" -UseBasicParsing
             if ($StatusResp.StatusCode -ne 200) { throw "Expected 200 on /admin/status" }
-            $DashResp = Invoke-WebRequest -Uri "http://127.0.0.1:8095/admin/dashboard" -UseBasicParsing
+            $DashResp = Invoke-WebRequest -Uri "http://127.0.0.1:19415/admin/dashboard" -UseBasicParsing
             if ($DashResp.StatusCode -ne 200) { throw "Expected 200 on /admin/dashboard" }
 
             $McpCode = $null
             try {
-              $R = Invoke-WebRequest -Uri "http://127.0.0.1:8090/mcp" -Method Post -ContentType "application/json" -Body '{"jsonrpc":"2.0","method":"tools/list","id":1}' -UseBasicParsing
+              $R = Invoke-WebRequest -Uri "http://127.0.0.1:19410/mcp" -Method Post -ContentType "application/json" -Body '{"jsonrpc":"2.0","method":"tools/list","id":1}' -UseBasicParsing
               $McpCode = [int]$R.StatusCode
             } catch {
               if ($_.Exception.Response) {

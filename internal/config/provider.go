@@ -7,9 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	// DefaultListenPort is the canonical gateway MCP ingress port (amendment to ADR-0025).
+	DefaultListenPort = 19410
+	// DefaultAdminPort is the canonical administrative console & API port (amendment to ADR-0025).
+	DefaultAdminPort = 19415
+	// DefaultWebDevPort is the canonical Vite dev server port for the standalone Web Studio.
+	DefaultWebDevPort = 19418
 )
 
 // ErrNoConfigProvider is returned when Reload is invoked without a backing config.Provider.
@@ -219,25 +229,57 @@ func (c *Config) GetAdminHost() string {
 	return "127.0.0.1"
 }
 
+func resolvePositivePortEnv(envKeys ...string) int {
+	for _, key := range envKeys {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			continue
+		}
+		if p, err := strconv.Atoi(raw); err == nil && p > 0 && p <= 65535 {
+			return p
+		}
+	}
+	return 0
+}
+
 // GetListenPort resolves the gateway ingress port with backward compatibility.
-// Defaults to 8090 per SPEC-SEC-003 and ADR-0025 strict port segregation.
+// Precedence: explicit config.ListenPort (or CLI --port) > SSE.ListenPort >
+// FARADAI_WIRE_PORT / LISTEN_PORT > DefaultListenPort (19410).
 func (c *Config) GetListenPort() int {
-	if c.ListenPort > 0 {
-		return c.ListenPort
+	if c != nil {
+		c.mu.RLock()
+		listenPort := c.ListenPort
+		ssePort := c.SSE.ListenPort
+		c.mu.RUnlock()
+		if listenPort > 0 {
+			return listenPort
+		}
+		if ssePort > 0 {
+			return ssePort
+		}
 	}
-	if c.SSE.ListenPort > 0 {
-		return c.SSE.ListenPort
+	if p := resolvePositivePortEnv("FARADAI_WIRE_PORT", "LISTEN_PORT"); p > 0 {
+		return p
 	}
-	return 8090
+	return DefaultListenPort
 }
 
 // GetAdminPort resolves the administrative console port.
-// Defaults to 8095 per SPEC-SEC-003 strict port segregation.
+// Precedence: explicit config.AdminPort (or CLI --admin-port) >
+// FARADAI_WIRE_ADMIN_PORT / ADMIN_PORT > DefaultAdminPort (19415).
 func (c *Config) GetAdminPort() int {
-	if c.AdminPort > 0 {
-		return c.AdminPort
+	if c != nil {
+		c.mu.RLock()
+		adminPort := c.AdminPort
+		c.mu.RUnlock()
+		if adminPort > 0 {
+			return adminPort
+		}
 	}
-	return 8095
+	if p := resolvePositivePortEnv("FARADAI_WIRE_ADMIN_PORT", "ADMIN_PORT"); p > 0 {
+		return p
+	}
+	return DefaultAdminPort
 }
 
 // GetAgentsDir resolves the active agents root directory.
@@ -303,11 +345,13 @@ func EnsureDefaultRuntimeConfig() (string, error) {
 		agentsDir := strings.ReplaceAll(filepath.ToSlash(filepath.Join(wireDir, "agents")), `"`, `\"`)
 		protocolsDir := strings.ReplaceAll(filepath.ToSlash(filepath.Join(wireDir, "protocols")), `"`, `\"`)
 		schemasDir := strings.ReplaceAll(filepath.ToSlash(filepath.Join(wireDir, "schemas")), `"`, `\"`)
+		listenPortStr := strconv.Itoa(DefaultListenPort)
+		adminPortStr := strconv.Itoa(DefaultAdminPort)
 		defaultYAML := `# Farad Ai Core - Offline-First Standalone Configuration
 runtime_mode: STANDALONE
 listen_host: "127.0.0.1"
-listen_port: 8090
-admin_port: 8095
+listen_port: ` + listenPortStr + `
+admin_port: ` + adminPortStr + `
 agents_dir: "` + agentsDir + `"
 protocols_dir: "` + protocolsDir + `"
 mode: "sse"
@@ -317,10 +361,10 @@ security:
     enabled: true
     block_private_ips: true
   cors_allowed_origins:
-    - "http://localhost:8090"
-    - "http://127.0.0.1:8090"
-    - "http://localhost:8095"
-    - "http://127.0.0.1:8095"
+    - "http://localhost:` + listenPortStr + `"
+    - "http://127.0.0.1:` + listenPortStr + `"
+    - "http://localhost:` + adminPortStr + `"
+    - "http://127.0.0.1:` + adminPortStr + `"
   rate_limiting:
     enabled: true
     rate: 50.0

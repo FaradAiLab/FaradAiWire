@@ -55,6 +55,16 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+func resolveDefaultConnectPort() int {
+	cfgPath := filepath.Join(config.DefaultFaradAiWireDir(), "config.yaml")
+	if _, err := os.Stat(cfgPath); err == nil {
+		if cfg, loadErr := config.NewYAMLConfigProvider(cfgPath).Load(); loadErr == nil && cfg != nil {
+			return cfg.GetListenPort()
+		}
+	}
+	return (&config.Config{}).GetListenPort()
+}
+
 // executeConnect establishes a thin stdio-to-HTTP/SSE bridge to the FaradAiWire gateway daemon.
 // It binds no ports, acquires no locks, and auto-spawns the daemon detachedly if offline.
 func executeConnect(profile string, host string, port int, token string, noSpawn bool, in io.Reader, out io.Writer) int {
@@ -63,7 +73,7 @@ func executeConnect(profile string, host string, port int, token string, noSpawn
 	}
 	host = normalizeGatewayHost(host)
 	if port <= 0 {
-		port = 8090
+		port = resolveDefaultConnectPort()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
