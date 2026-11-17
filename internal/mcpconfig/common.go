@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -97,9 +98,53 @@ func isSelfReference(name string, cmd string, args []string, url string) bool {
 	return false
 }
 
+const maxConfigFileBytes int64 = 10 << 20 // 10 MiB safety ceiling for client MCP configs
+
+// readBoundedRegularFile reads up to maxBytes from a regular file, rejecting
+// non-regular files (directories, FIFOs, devices) and oversized configs.
+func readBoundedRegularFile(path string, maxBytes int64) ([]byte, error) {
+	// Stat before open so non-regular files like FIFOs/devices cannot block on open().
+	preInfo, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !preInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file (mode %s)", preInfo.Mode().Type())
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	// Re-stat the open descriptor to prevent TOCTOU swaps and enforce size limits.
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file (mode %s)", fi.Mode().Type())
+	}
+	if fi.Size() > maxBytes {
+		return nil, fmt.Errorf("file size %d exceeds maximum allowed %d bytes", fi.Size(), maxBytes)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file size exceeds maximum allowed %d bytes", maxBytes)
+	}
+	return data, nil
+}
+
 // readConfigFile reads and deserializes a client JSON/JSONC configuration file.
 func readConfigFile(path string) (map[string]interface{}, []DiscoveredServer, error) {
-	data, err := os.ReadFile(path)
+	data, err := readBoundedRegularFile(path, maxConfigFileBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read config file '%s': %w", path, err)
 	}

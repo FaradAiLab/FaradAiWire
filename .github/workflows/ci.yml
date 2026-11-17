@@ -1,0 +1,475 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-install:
+    name: Build, Test & Smoke (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            binary_name: faradaiwire
+            run_tests: true
+            smoke_test: true
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            binary_name: faradaiwire
+            run_tests: true
+            smoke_test: true
+          - os: darwin
+            arch: arm64
+            runner: macos-latest
+            binary_name: faradaiwire
+            run_tests: true
+            smoke_test: true
+          - os: darwin
+            arch: amd64
+            runner: macos-latest
+            binary_name: faradaiwire
+            run_tests: false
+            smoke_test: false
+          - os: windows
+            arch: amd64
+            runner: windows-latest
+            binary_name: faradaiwire.exe
+            run_tests: true
+            smoke_test: true
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (Web UI build)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Build Web Console Assets
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Configure macOS Build Environment
+        if: matrix.os == 'darwin'
+        run: |
+          echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            echo "CC=clang -arch x86_64" >> "$GITHUB_ENV"
+            echo "GOARCH=amd64" >> "$GITHUB_ENV"
+          fi
+
+      - name: Validate Installer Script Syntax (Unix)
+        if: matrix.os != 'windows' && matrix.smoke_test
+        shell: bash
+        run: sh -n install.sh && sh -n uninstall.sh
+
+      - name: Validate Installer Script Syntax (Windows)
+        if: matrix.os == 'windows' && matrix.smoke_test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($script in @('install.ps1', 'uninstall.ps1')) {
+            $tokens = $null
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script).Path, [ref]$tokens, [ref]$errors)
+            if ($errors -and $errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_.ToString() }
+              exit 1
+            }
+          }
+
+      - name: Run go vet
+        if: matrix.run_tests
+        run: go vet ./...
+
+      - name: Run govulncheck (Advisory)
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        continue-on-error: true
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Run Go Tests (Unix with -race)
+        if: matrix.os != 'windows' && matrix.run_tests
+        env:
+          CGO_ENABLED: '1'
+        run: go test -race ./...
+
+      - name: Run Go Tests (Windows)
+        if: matrix.os == 'windows' && matrix.run_tests
+        env:
+          CGO_ENABLED: '1'
+        run: go test ./...
+
+      - name: Build & Package Release Artifact (Unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          go build -ldflags="-s -w -X main.version=v0.0.0-ci" -o "dist/${{ matrix.binary_name }}" ./cmd/faradaiwire
+          file "dist/${{ matrix.binary_name }}"
+          ARCHIVE="faradaiwire_0.0.0-ci_${{ matrix.os }}_${{ matrix.arch }}.tar.gz"
+          (
+            cd dist
+            tar -czf "$ARCHIVE" "${{ matrix.binary_name }}"
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$ARCHIVE" > checksums.txt
+            else
+              shasum -a 256 "$ARCHIVE" > checksums.txt
+            fi
+          )
+
+      - name: Build & Package Release Artifact (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          go build -ldflags="-s -w -X main.version=v0.0.0-ci" -o "dist\${{ matrix.binary_name }}" ./cmd/faradaiwire
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Archive = "faradaiwire_0.0.0-ci_windows_${{ matrix.arch }}.zip"
+          Push-Location dist
+          try {
+            Compress-Archive -Path "${{ matrix.binary_name }}" -DestinationPath $Archive -Force
+            $Hash = (Get-FileHash -Path $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$Hash  $Archive" | Set-Content -Path checksums.txt -Encoding ascii
+          } finally {
+            Pop-Location
+          }
+
+      - name: Run End-to-End Installer, CLI & Daemon Smoke Test (Unix)
+        if: matrix.os != 'windows' && matrix.smoke_test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SMOKE_HOME="$(mktemp -d)"
+          SERVER_LOG="$SMOKE_HOME/http.log"
+          DAEMON_LOG="$SMOKE_HOME/daemon.log"
+          PORT_FILE="$SMOKE_HOME/port.txt"
+          DAEMON_PID=""
+
+          python3 -c '
+          import functools, http.server, pathlib, sys
+          dist_dir, port_file = sys.argv[1], sys.argv[2]
+          handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=dist_dir)
+          httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+          pathlib.Path(port_file).write_text(str(httpd.server_address[1]))
+          httpd.serve_forever()
+          ' "$PWD/dist" "$PORT_FILE" >"$SERVER_LOG" 2>&1 &
+          SERVER_PID=$!
+
+          cleanup() {
+            if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
+              kill -TERM "$DAEMON_PID" 2>/dev/null || true
+              wait "$DAEMON_PID" 2>/dev/null || true
+            fi
+            kill "$SERVER_PID" 2>/dev/null || true
+            rm -rf "$SMOKE_HOME"
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 50); do
+            if [ -s "$PORT_FILE" ]; then
+              break
+            fi
+            sleep 0.1
+          done
+          [ -s "$PORT_FILE" ] || { echo "Mock release server failed to start"; cat "$SERVER_LOG"; exit 1; }
+          PORT="$(cat "$PORT_FILE")"
+
+          # Create a temporary CI-only copy of install.sh pointing at the local loopback artifact server
+          # so production install.sh remains strictly locked to GitHub Releases over HTTPS.
+          CI_INSTALLER="$SMOKE_HOME/install.ci.sh"
+          python3 -c '
+          import pathlib, sys
+          src, dst, port = sys.argv[1], sys.argv[2], sys.argv[3]
+          text = pathlib.Path(src).read_text()
+          old_dl = "https://github.com/$REPO/releases/download/$VERSION/$TARBALL_NAME"
+          old_cs = "https://github.com/$REPO/releases/download/$VERSION/checksums.txt"
+          old_curl = "curl --proto \x27=https\x27 --tlsv1.2 -fsSL"
+          assert old_dl in text and old_cs in text and old_curl in text, "install.sh structure changed"
+          text = text.replace(old_dl, f"http://127.0.0.1:{port}/$TARBALL_NAME")
+          text = text.replace(old_cs, f"http://127.0.0.1:{port}/checksums.txt")
+          text = text.replace(old_curl, "curl -fsSL")
+          pathlib.Path(dst).write_text(text)
+          ' "$PWD/install.sh" "$CI_INSTALLER" "$PORT"
+
+          export HOME="$SMOKE_HOME"
+          export PATH="$SMOKE_HOME/.local/bin:$PATH"
+          export FARADAI_WIRE_VERSION="v0.0.0-ci"
+
+          sh "$CI_INSTALLER"
+
+          BIN_PATH="$(command -v faradaiwire)"
+          echo "Installed binary: $BIN_PATH"
+          faradaiwire version
+
+          # Seed isolated client configs: empty Antigravity, comment-only Windsurf, valid Cursor
+          mkdir -p "$SMOKE_HOME/.gemini/config" "$SMOKE_HOME/.codeium/windsurf" "$SMOKE_HOME/.cursor"
+          : > "$SMOKE_HOME/.gemini/config/mcp_config.json"
+          printf '\xEF\xBB\xBF// windsurf empty config\n' > "$SMOKE_HOME/.codeium/windsurf/mcp_config.json"
+          cat > "$SMOKE_HOME/.cursor/mcp.json" <<'EOF'
+          {
+            "mcpServers": {
+              "demo-mcp": {
+                "command": "python3",
+                "args": ["-c", "pass"]
+              }
+            }
+          }
+          EOF
+
+          DRY_OUT="$(faradaiwire adopt --dry-run)"
+          echo "$DRY_OUT"
+          if echo "$DRY_OUT" | grep -q "Error reading"; then
+            echo "❌ Unexpected config read warning during adopt --dry-run"
+            exit 1
+          fi
+          echo "$DRY_OUT" | grep -q "demo-mcp"
+
+          faradaiwire adopt --yes --probe-timeout 2s
+          grep -q '"farad-ai-wire"' "$SMOKE_HOME/.cursor/mcp.json"
+
+          faradaiwire adopt --rollback
+          grep -q '"demo-mcp"' "$SMOKE_HOME/.cursor/mcp.json"
+
+          faradaiwire doctor
+
+          # Verify Host Native Daemon startup, strict port segregation (8090/8095),
+          # loopback Admin UI access (ADR-0028), and fail-closed Ingress auth (ADR-0021).
+          faradaiwire run --standalone >"$DAEMON_LOG" 2>&1 &
+          DAEMON_PID=$!
+
+          HEALTH_OK=0
+          for _ in $(seq 1 75); do
+            if curl -fsS "http://127.0.0.1:8090/health" >/dev/null 2>&1; then
+              HEALTH_OK=1
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$HEALTH_OK" != "1" ]; then
+            echo "❌ Daemon did not become healthy on :8090/health"
+            cat "$DAEMON_LOG" || true
+            exit 1
+          fi
+
+          curl -fsS "http://127.0.0.1:8095/admin/status" >/dev/null
+          curl -fsS "http://127.0.0.1:8095/admin/dashboard" >/dev/null
+          MCP_CODE="$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' "http://127.0.0.1:8090/mcp")"
+          if [ "$MCP_CODE" != "401" ]; then
+            echo "❌ Expected HTTP 401 for unauthenticated /mcp, got $MCP_CODE"
+            exit 1
+          fi
+
+          kill -TERM "$DAEMON_PID"
+          wait "$DAEMON_PID" || true
+          DAEMON_PID=""
+
+          sh ./uninstall.sh --purge
+          hash -r
+          if command -v faradaiwire >/dev/null 2>&1; then
+            echo "❌ Binary still on PATH after uninstall"
+            exit 1
+          fi
+          [ ! -d "$SMOKE_HOME/.faradaiwire" ] || { echo "❌ Data dir not purged"; exit 1; }
+
+      - name: Run End-to-End Installer, CLI & Daemon Smoke Test (Windows)
+        if: matrix.os == 'windows' && matrix.smoke_test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $SmokeHome = Join-Path ([System.IO.Path]::GetTempPath()) ("faw-smoke-" + [System.Guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $SmokeHome -Force | Out-Null
+          $PortFile = Join-Path $SmokeHome "port.txt"
+          $ServerScript = Join-Path $SmokeHome "serve.py"
+          @'
+          import functools, http.server, pathlib, sys
+          dist_dir, port_file = sys.argv[1], sys.argv[2]
+          handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=dist_dir)
+          httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+          pathlib.Path(port_file).write_text(str(httpd.server_address[1]))
+          httpd.serve_forever()
+          '@ | Set-Content -Path $ServerScript -Encoding utf8
+
+          $DistDir = (Resolve-Path "dist").Path
+          $ServerProc = Start-Process -FilePath "python" -ArgumentList @($ServerScript, $DistDir, $PortFile) -PassThru -NoNewWindow
+          $DaemonProc = $null
+
+          try {
+            for ($i = 0; $i -lt 50; $i++) {
+              if (Test-Path $PortFile) { break }
+              Start-Sleep -Milliseconds 100
+            }
+            if (-not (Test-Path $PortFile)) {
+              throw "Mock release server failed to start"
+            }
+            $Port = (Get-Content -Path $PortFile -Raw).Trim()
+
+            # Create a temporary CI-only copy of install.ps1 pointing at the local loopback artifact server
+            # so production install.ps1 remains strictly locked to GitHub Releases over HTTPS.
+            $CiInstaller = Join-Path $SmokeHome "install.ci.ps1"
+            $InstallerText = Get-Content -Path "install.ps1" -Raw
+            $OldPrefix = 'https://github.com/$Repo/releases/download/$Version/'
+            if (-not $InstallerText.Contains($OldPrefix)) {
+              throw "install.ps1 download URL template changed; update CI smoke patch"
+            }
+            $InstallerText = $InstallerText.Replace($OldPrefix, "http://127.0.0.1:${Port}/")
+            [System.IO.File]::WriteAllText($CiInstaller, $InstallerText, [System.Text.UTF8Encoding]::new($false))
+
+            $env:FARADAI_WIRE_VERSION = "v0.0.0-ci"
+            & $CiInstaller
+
+            $Cmd = Get-Command faradaiwire -ErrorAction Stop
+            Write-Host "Installed binary: $($Cmd.Source)"
+            & faradaiwire version
+            if ($LASTEXITCODE -ne 0) { throw "faradaiwire version failed" }
+
+            $env:USERPROFILE = $SmokeHome
+            $env:APPDATA = Join-Path $SmokeHome "AppData\Roaming"
+            $env:FARADAI_WIRE_HOME = Join-Path $SmokeHome ".faradaiwire"
+
+            # Seed isolated client configs: empty Antigravity, comment-only Windsurf, valid Cursor
+            New-Item -ItemType Directory -Path (Join-Path $SmokeHome ".gemini\config") -Force | Out-Null
+            New-Item -ItemType Directory -Path (Join-Path $SmokeHome ".codeium\windsurf") -Force | Out-Null
+            New-Item -ItemType Directory -Path (Join-Path $SmokeHome ".cursor") -Force | Out-Null
+
+            [System.IO.File]::WriteAllBytes((Join-Path $SmokeHome ".gemini\config\mcp_config.json"), [byte[]]@())
+            [System.IO.File]::WriteAllText((Join-Path $SmokeHome ".codeium\windsurf\mcp_config.json"), "// windsurf empty config`r`n", [System.Text.UTF8Encoding]::new($true))
+
+            $CursorCfg = @{
+              mcpServers = @{
+                "demo-mcp" = @{
+                  command = "python"
+                  args = @("-c", "pass")
+                }
+              }
+            } | ConvertTo-Json -Depth 4
+            [System.IO.File]::WriteAllText((Join-Path $SmokeHome ".cursor\mcp.json"), $CursorCfg, [System.Text.UTF8Encoding]::new($false))
+
+            $DryOut = (& faradaiwire adopt --dry-run) | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "adopt --dry-run failed" }
+            Write-Host $DryOut
+            if ($DryOut -match "Error reading") {
+              throw "Unexpected config read warning during adopt --dry-run"
+            }
+            if ($DryOut -notmatch "demo-mcp") {
+              throw "Expected demo-mcp to be discovered"
+            }
+
+            & faradaiwire adopt --yes --probe-timeout 2s
+            if ($LASTEXITCODE -ne 0) { throw "adopt --yes failed" }
+            $Mutated = Get-Content (Join-Path $SmokeHome ".cursor\mcp.json") -Raw
+            if ($Mutated -notmatch '"farad-ai-wire"') {
+              throw "Expected farad-ai-wire in mutated Cursor config"
+            }
+
+            & faradaiwire adopt --rollback
+            if ($LASTEXITCODE -ne 0) { throw "adopt --rollback failed" }
+            $Restored = Get-Content (Join-Path $SmokeHome ".cursor\mcp.json") -Raw
+            if ($Restored -notmatch '"demo-mcp"') {
+              throw "Expected demo-mcp restored after rollback"
+            }
+
+            & faradaiwire doctor
+            if ($LASTEXITCODE -ne 0) { throw "faradaiwire doctor failed" }
+
+            # Verify Host Native Daemon startup, strict port segregation (8090/8095),
+            # loopback Admin UI access (ADR-0028), and fail-closed Ingress auth (ADR-0021).
+            $DaemonStdout = Join-Path $SmokeHome "daemon.out.log"
+            $DaemonStderr = Join-Path $SmokeHome "daemon.err.log"
+            $DaemonProc = Start-Process -FilePath $Cmd.Source -ArgumentList @("run", "--standalone") -RedirectStandardOutput $DaemonStdout -RedirectStandardError $DaemonStderr -PassThru -NoNewWindow
+
+            $Healthy = $false
+            for ($i = 0; $i -lt 75; $i++) {
+              try {
+                $Resp = Invoke-WebRequest -Uri "http://127.0.0.1:8090/health" -UseBasicParsing -TimeoutSec 1
+                if ($Resp.StatusCode -eq 200) {
+                  $Healthy = $true
+                  break
+                }
+              } catch {
+                Start-Sleep -Milliseconds 200
+              }
+            }
+            if (-not $Healthy) {
+              if (Test-Path $DaemonStdout) { Get-Content $DaemonStdout }
+              if (Test-Path $DaemonStderr) { Get-Content $DaemonStderr }
+              throw "Daemon did not become healthy on :8090/health"
+            }
+
+            $StatusResp = Invoke-WebRequest -Uri "http://127.0.0.1:8095/admin/status" -UseBasicParsing
+            if ($StatusResp.StatusCode -ne 200) { throw "Expected 200 on /admin/status" }
+            $DashResp = Invoke-WebRequest -Uri "http://127.0.0.1:8095/admin/dashboard" -UseBasicParsing
+            if ($DashResp.StatusCode -ne 200) { throw "Expected 200 on /admin/dashboard" }
+
+            $McpCode = $null
+            try {
+              $R = Invoke-WebRequest -Uri "http://127.0.0.1:8090/mcp" -Method Post -ContentType "application/json" -Body '{"jsonrpc":"2.0","method":"tools/list","id":1}' -UseBasicParsing
+              $McpCode = [int]$R.StatusCode
+            } catch {
+              if ($_.Exception.Response) {
+                $McpCode = [int]$_.Exception.Response.StatusCode
+              } else {
+                throw
+              }
+            }
+            if ($McpCode -ne 401) {
+              throw "Expected HTTP 401 on unauthenticated /mcp, got $McpCode"
+            }
+
+            Stop-Process -Id $DaemonProc.Id -ErrorAction SilentlyContinue
+            $null = $DaemonProc.WaitForExit(10000)
+            $DaemonProc = $null
+
+            & .\uninstall.ps1 -Purge
+            $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\faradaiwire"
+            if (Test-Path $InstallDir) {
+              throw "Install directory still exists after uninstall: $InstallDir"
+            }
+            if (Test-Path $env:FARADAI_WIRE_HOME) {
+              throw "Data directory still exists after purge: $($env:FARADAI_WIRE_HOME)"
+            }
+          } finally {
+            if ($DaemonProc -and -not $DaemonProc.HasExited) {
+              Stop-Process -Id $DaemonProc.Id -Force -ErrorAction SilentlyContinue
+            }
+            if ($ServerProc -and -not $ServerProc.HasExited) {
+              Stop-Process -Id $ServerProc.Id -Force -ErrorAction SilentlyContinue
+            }
+            Remove-Item -Path $SmokeHome -Recurse -Force -ErrorAction SilentlyContinue
+          }

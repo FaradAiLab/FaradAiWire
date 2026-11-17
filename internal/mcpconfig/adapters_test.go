@@ -239,54 +239,118 @@ func TestAdapters_ReadAndMutate(t *testing.T) {
 func TestReadConfigFile_EmptyAndMalformed(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
+	cases := []struct {
+		name    string
+		content []byte
+		isDir   bool
+		wantErr bool
+	}{
+		{
+			name:    "empty_file",
+			content: []byte{},
+			wantErr: false,
+		},
+		{
+			name:    "whitespace_only",
+			content: []byte("   \r\n\t  "),
+			wantErr: false,
+		},
+		{
+			name:    "bom_whitespace_and_comments_only",
+			content: []byte("\xEF\xBB\xBF\r\n  // Google Antigravity MCP config\r\n  /* empty */\r\n"),
+			wantErr: false,
+		},
+		{
+			name:    "truncated_json_still_errors",
+			content: []byte(`{"mcpServers": {`),
+			wantErr: true,
+		},
+		{
+			name:    "non_object_json_still_errors",
+			content: []byte(`[]`),
+			wantErr: true,
+		},
+		{
+			name:    "non_regular_file_rejected",
+			isDir:   true,
+			wantErr: true,
+		},
+	}
 
-	t.Run("empty_file", func(t *testing.T) {
-		p := filepath.Join(tempDir, "empty_mcp_config.json")
-		if err := os.WriteFile(p, []byte{}, 0600); err != nil {
-			t.Fatalf("write empty file: %v", err)
-		}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-		adapter := NewAntigravityAdapter(p)
-		if !adapter.Detect() {
-			t.Fatalf("expected Detect() to return true for existing empty file")
-		}
+			tempDir := t.TempDir()
+			p := filepath.Join(tempDir, "mcp_config.json")
+			if tc.isDir {
+				if err := os.Mkdir(p, 0700); err != nil {
+					t.Fatalf("mkdir fixture: %v", err)
+				}
+			} else {
+				if err := os.WriteFile(p, tc.content, 0600); err != nil {
+					t.Fatalf("write fixture: %v", err)
+				}
+			}
 
-		servers, err := adapter.ReadServers()
-		if err != nil {
-			t.Fatalf("expected no error on empty config file, got: %v", err)
-		}
-		if len(servers) != 0 {
-			t.Fatalf("expected 0 servers, got %d", len(servers))
-		}
-	})
+			adapter := NewAntigravityAdapter(p)
+			servers, err := adapter.ReadServers()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %s, got nil", tc.name)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected no error for %s, got: %v", tc.name, err)
+			}
+			if len(servers) != 0 {
+				t.Fatalf("expected 0 servers for %s, got %d", tc.name, len(servers))
+			}
+		})
+	}
+}
 
-	t.Run("bom_whitespace_and_comments_only", func(t *testing.T) {
-		p := filepath.Join(tempDir, "comments_only_mcp_config.json")
-		content := "\xEF\xBB\xBF\r\n  // Google Antigravity MCP config\r\n  /* empty */\r\n"
-		if err := os.WriteFile(p, []byte(content), 0600); err != nil {
-			t.Fatalf("write comment-only file: %v", err)
-		}
+func TestApplyGatewayConfig_EmptyFile(t *testing.T) {
+	t.Parallel()
 
-		adapter := NewAntigravityAdapter(p)
-		servers, err := adapter.ReadServers()
-		if err != nil {
-			t.Fatalf("expected no error on comment-only config file, got: %v", err)
-		}
-		if len(servers) != 0 {
-			t.Fatalf("expected 0 servers, got %d", len(servers))
-		}
-	})
+	p := filepath.Join(t.TempDir(), "empty_mcp_config.json")
+	if err := os.WriteFile(p, []byte{}, 0600); err != nil {
+		t.Fatalf("write empty file: %v", err)
+	}
 
-	t.Run("truncated_json_still_errors", func(t *testing.T) {
-		p := filepath.Join(tempDir, "truncated_mcp_config.json")
-		if err := os.WriteFile(p, []byte(`{"mcpServers": {`), 0600); err != nil {
-			t.Fatalf("write truncated file: %v", err)
-		}
+	adapter := NewAntigravityAdapter(p)
+	if err := adapter.ApplyGatewayConfig("antigravity", nil); err != nil {
+		t.Fatalf("ApplyGatewayConfig on empty file failed: %v", err)
+	}
 
-		adapter := NewAntigravityAdapter(p)
-		if _, err := adapter.ReadServers(); err == nil {
-			t.Fatalf("expected error on truncated JSON config, got nil")
-		}
-	})
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read mutated file: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal mutated file: %v", err)
+	}
+	mcpServers, ok := parsed["mcpServers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected mcpServers map in mutated config")
+	}
+	if _, exists := mcpServers["farad-ai-wire"]; !exists {
+		t.Fatalf("expected farad-ai-wire entry in mutated config")
+	}
+}
+
+func TestReadBoundedRegularFile_ExceedsLimit(t *testing.T) {
+	t.Parallel()
+
+	p := filepath.Join(t.TempDir(), "oversized.json")
+	if err := os.WriteFile(p, []byte(`{"mcpServers": {"a": {}}}`), 0600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	if _, err := readBoundedRegularFile(p, 8); err == nil {
+		t.Fatalf("expected error when file exceeds byte limit, got nil")
+	}
 }
