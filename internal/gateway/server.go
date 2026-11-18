@@ -359,6 +359,10 @@ func (s *Server) startMaintenanceCoordinator(ctx context.Context) {
 // It blocks until ctx is canceled or a fatal runtime error occurs.
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
+	if s.isDraining.Load() {
+		s.mu.Unlock()
+		return nil
+	}
 	serverCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 	s.runningWg.Add(1)
@@ -390,7 +394,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Start Admin Console HTTP listener on admin_port
 	if s.adminServer != nil {
+		s.runningWg.Add(1)
 		go func() {
+			defer s.runningWg.Done()
 			if err := s.adminServer.Start(serverCtx); err != nil && err != context.Canceled && err != http.ErrServerClosed {
 				slog.Error("Admin server encountered an error", slog.String("error", err.Error()))
 			}
@@ -426,6 +432,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) doShutdown(ctx context.Context) error {
 	s.mu.Lock()
+	s.isDraining.Store(true)
 	cancel := s.cancel
 	sseProxy := s.sseProxy
 	adminServer := s.adminServer

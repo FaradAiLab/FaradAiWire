@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -379,6 +380,12 @@ func executeRun(opts runOptions) {
 
 func runGatewayDaemon(opts runOptions) int {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	// Buffer capacity 1 ensures signals received during initialization trigger graceful
+	// DuckDB CHECKPOINT and lock cleanup rather than queuing a premature forced exit.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
 	provider := config.NewYAMLConfigProvider(opts.configPath)
 	cfg, err := provider.Load()
 	if err != nil {
@@ -420,51 +427,127 @@ func runGatewayDaemon(opts runOptions) int {
 		}
 	}()
 
+	// If a termination signal arrived before database initialization, exit cleanly without opening DuckDB.
+	select {
+	case sig := <-sigCh:
+		slog.Info("Termination signal received, initiating graceful shutdown...", slog.String("signal", sig.String()))
+		slog.Info("FaradAiWire stopped cleanly.")
+		return 0
+	default:
+	}
+
 	server, err := gateway.NewServer(cfg, provider)
 	if err != nil {
 		slog.Error("Server initialization failed", slog.String("error", err.Error()))
 		return 1
 	}
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
 
-	serverCtx, serverCancel := context.WithCancel(context.Background())
-	defer serverCancel()
+	var (
+		sig          os.Signal
+		serverCtx    context.Context
+		serverCancel context.CancelFunc
+		serverErrCh  chan error
+	)
 
-	serverErrCh := make(chan error, 1)
-	go func() {
-		if err := server.Start(serverCtx); err != nil && err != http.ErrServerClosed && err != context.Canceled {
-			serverErrCh <- err
-		}
-		close(serverErrCh)
-	}()
-
+	// Only launch runtime listeners and child subprocesses if no signal arrived during NewServer.
 	select {
-	case sig := <-sigCh:
-		slog.Info("Termination signal received, initiating graceful shutdown...", slog.String("signal", sig.String()))
+	case sig = <-sigCh:
+	default:
+		serverCtx, serverCancel = context.WithCancel(context.Background())
+		defer serverCancel()
 
-		// Set up secondary signal trap for immediate forced termination
+		serverErrCh = make(chan error, 1)
 		go func() {
-			if s, ok := <-sigCh; ok {
-				slog.Warn("Second termination signal received, forcing immediate exit", slog.String("signal", s.String()))
-				_ = guard.Release()
-				os.Exit(1)
+			if err := server.Start(serverCtx); err != nil && err != http.ErrServerClosed && err != context.Canceled {
+				serverErrCh <- err
 			}
+			close(serverErrCh)
 		}()
 
-		shutdownCtx, sCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer sCancel()
+		select {
+		case sig = <-sigCh:
+		case err := <-serverErrCh:
+			shutdownCtx, sCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			shutdownErr := server.Shutdown(shutdownCtx)
+			sCancel()
+			if err != nil {
+				slog.Error("Gateway server terminated with error", slog.String("error", err.Error()))
+				if shutdownErr != nil {
+					slog.Error("Server shutdown completed with error", slog.String("error", shutdownErr.Error()))
+				}
+				return 1
+			}
+			if shutdownErr != nil {
+				slog.Error("Server shutdown completed with error", slog.String("error", shutdownErr.Error()))
+				return 1
+			}
+			slog.Info("FaradAiWire stopped cleanly.")
+			return 0
+		}
+	}
 
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			slog.Error("Server shutdown completed with error", slog.String("error", err.Error()))
-			return 1
+	slog.Info("Termination signal received, initiating graceful shutdown...", slog.String("signal", sig.String()))
+
+	// Set up secondary signal trap for immediate forced termination during shutdown drain
+	stopSecondTrap := make(chan struct{})
+	var secondTrapWg sync.WaitGroup
+	secondTrapWg.Add(1)
+	go func() {
+		defer secondTrapWg.Done()
+		select {
+		case <-stopSecondTrap:
+			return
+		case s, ok := <-sigCh:
+			select {
+			case <-stopSecondTrap:
+				return
+			default:
+			}
+			if ok {
+				slog.Warn("Second termination signal received, forcing immediate exit", slog.String("signal", s.String()))
+				if relErr := guard.Release(); relErr != nil {
+					slog.Warn("Failed to release process lock before forced exit", slog.String("error", relErr.Error()))
+				}
+				os.Exit(1)
+			}
 		}
-	case err := <-serverErrCh:
-		if err != nil {
-			slog.Error("Gateway server terminated with error", slog.String("error", err.Error()))
-			return 1
+	}()
+
+	stopTrap := func() {
+		signal.Stop(sigCh)
+		close(stopSecondTrap)
+		secondTrapWg.Wait()
+	}
+
+	shutdownCtx, sCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer sCancel()
+
+	shutdownErr := server.Shutdown(shutdownCtx)
+	if shutdownErr == nil {
+		// Data stores and runningWg have already drained cleanly; disarm forced-exit trap before joining Start.
+		stopTrap()
+		if serverCancel != nil {
+			serverCancel()
 		}
+		if serverErrCh != nil {
+			<-serverErrCh
+		}
+	} else {
+		if serverCancel != nil {
+			serverCancel()
+		}
+		if serverErrCh != nil {
+			waitTimer := time.NewTimer(1 * time.Second)
+			select {
+			case <-serverErrCh:
+			case <-waitTimer.C:
+				slog.Warn("Timed out waiting for server start goroutine to exit after shutdown error")
+			}
+			waitTimer.Stop()
+		}
+		stopTrap()
+		slog.Error("Server shutdown completed with error", slog.String("error", shutdownErr.Error()))
+		return 1
 	}
 
 	slog.Info("FaradAiWire stopped cleanly.")

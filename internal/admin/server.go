@@ -75,6 +75,7 @@ type AdminServer struct {
 	wsHub                *WSHub
 	activeSessionChecker func(agentName string) bool
 	shutdownOnce         sync.Once
+	closed               bool
 }
 
 // NewAdminServer creates a new AdminServer instance.
@@ -747,6 +748,10 @@ func (a *AdminServer) Start(ctx context.Context) error {
 
 	handler := a.Handler()
 	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return nil
+	}
 	a.server = &http.Server{
 		Addr:              addr,
 		Handler:           handler,
@@ -791,18 +796,17 @@ func (a *AdminServer) Start(ctx context.Context) error {
 
 // Shutdown initiates graceful termination of the admin server.
 func (a *AdminServer) Shutdown(ctx context.Context) error {
-	a.mu.RLock()
-	server := a.server
-	a.mu.RUnlock()
-
-	if server == nil {
-		return nil
-	}
-
 	var shutdownErr error
 	a.shutdownOnce.Do(func() {
-		slog.Info("Shutting down admin server")
-		shutdownErr = server.Shutdown(ctx)
+		a.mu.Lock()
+		a.closed = true
+		server := a.server
+		a.mu.Unlock()
+
+		if server != nil {
+			slog.Info("Shutting down admin server")
+			shutdownErr = server.Shutdown(ctx)
+		}
 	})
 	return shutdownErr
 }

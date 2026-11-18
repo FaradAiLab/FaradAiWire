@@ -39,6 +39,10 @@ func (s *SSEProxy) Start(ctx context.Context) error {
 	handler := s.Handler()
 
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
 	host := s.host
 	if host == "" {
 		host = "127.0.0.1"

@@ -29,10 +29,10 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/schema"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/internal/gateway"
-	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 	"github.com/FaradAiLab/FaradAiWire/internal/proxy"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
+	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
 type mockConfigProvider struct {
@@ -231,14 +231,14 @@ func TestServer_Reload_InvalidConfigPreservesState(t *testing.T) {
 
 func TestServer_AtomicReload_ConcurrentRequests(t *testing.T) {
 	cfg1 := &config.Config{
-		Mode: "stdio",
+		Mode:  "stdio",
 		Stdio: config.StdioConfig{Command: "cat"},
 		Filters: config.FiltersConfig{
 			PrefillBlock: config.PrefillBlockConfig{Enabled: false},
 		},
 	}
 	cfg2 := &config.Config{
-		Mode: "stdio",
+		Mode:  "stdio",
 		Stdio: config.StdioConfig{Command: "cat"},
 		Filters: config.FiltersConfig{
 			PrefillBlock: config.PrefillBlockConfig{Enabled: true},
@@ -1873,13 +1873,13 @@ func TestServer_Shutdown_KeystoreDirtyFlush(t *testing.T) {
 
 	listenPort, adminPort := getFreePort(t), getFreePort(t)
 	cfg := &config.Config{
-		Mode:        "stdio",
-		Stdio:       config.StdioConfig{Command: "cat"},
-		Security:    config.SecurityConfig{APIKeysPath: keyStorePath},
-		ListenHost:  "127.0.0.1",
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		AgentsDir:   agentDir,
+		Mode:       "stdio",
+		Stdio:      config.StdioConfig{Command: "cat"},
+		Security:   config.SecurityConfig{APIKeysPath: keyStorePath},
+		ListenHost: "127.0.0.1",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		AgentsDir:  agentDir,
 	}
 
 	provider := &mockConfigProvider{cfg: cfg}
@@ -2061,5 +2061,58 @@ filters:
 	assertFilters("after reset filters.dlp", adminH2, srv2, true, true)
 }
 
+func TestServer_StartAndImmediateShutdown_RaceFree(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "wire.duckdb")
+	agentDir := setupTestAgentDir(t, "test-start-shutdown-race")
 
+	for i := 0; i < 5; i++ {
+		listenPort := getFreePort(t)
+		adminPort := getFreePort(t)
 
+		cfg := &config.Config{
+			RuntimeMode: config.RuntimeModeStandalone,
+			Mode:        "sse",
+			ListenPort:  listenPort,
+			AdminPort:   adminPort,
+			AgentsDir:   agentDir,
+			Telemetry: config.TelemetryConfig{
+				DBPath: dbPath,
+			},
+			SSE: config.SSEConfig{
+				TargetURL: "http://localhost:8080",
+			},
+		}
+
+		provider := &mockConfigProvider{cfg: cfg}
+		srv, err := gateway.NewServer(cfg, provider)
+		if err != nil {
+			t.Fatalf("iteration %d: failed to create gateway server: %v", i, err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		startErrCh := make(chan error, 1)
+		go func() {
+			startErrCh <- srv.Start(ctx)
+		}()
+
+		// Trigger Shutdown immediately without sleeping to exercise the Start/Shutdown window
+		shutdownCtx, sCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			sCancel()
+			cancel()
+			t.Fatalf("iteration %d: Shutdown failed: %v", i, err)
+		}
+		sCancel()
+		cancel()
+
+		select {
+		case err := <-startErrCh:
+			if err != nil && err != context.Canceled {
+				t.Fatalf("iteration %d: unexpected Start error: %v", i, err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("iteration %d: Start goroutine did not exit after Shutdown", i)
+		}
+	}
+}
