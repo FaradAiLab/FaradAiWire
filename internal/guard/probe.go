@@ -126,7 +126,7 @@ func ProbeAndVerify(ctx context.Context, targetURL string, runtimeType string, e
 		break
 	}
 
-	latencyMS := float64(time.Since(start).Microseconds()) / 1000.0
+	latencyMS := elapsedMS(start)
 
 	if !succeeded {
 		if lastErr == nil {

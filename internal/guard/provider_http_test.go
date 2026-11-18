@@ -85,6 +85,8 @@ func TestHTTPProvider_CallInspect_AllowVerdict(t *testing.T) {
 				Body:       io.NopCloser(stringsReader("method not allowed")),
 			}, nil
 		}
+		// Ensure measurable non-zero elapsed time even on coarse OS monotonic clocks (e.g. Windows VMs).
+		time.Sleep(5 * time.Millisecond)
 		resp := map[string]interface{}{
 			"choices": []map[string]interface{}{
 				{
@@ -130,6 +132,15 @@ func TestHTTPProvider_CallInspect_AllowVerdict(t *testing.T) {
 	}
 	if result.LatencyMS <= 0 {
 		t.Errorf("expected positive LatencyMS, got %f", result.LatencyMS)
+	}
+}
+
+func TestElapsedMS(t *testing.T) {
+	if got := elapsedMS(time.Now().Add(10 * time.Millisecond)); got != 0 {
+		t.Errorf("expected negative elapsed duration to clamp to 0, got %f", got)
+	}
+	if got := elapsedMS(time.Now().Add(-5 * time.Millisecond)); got < 5.0 {
+		t.Errorf("expected elapsed duration >= 5ms, got %f", got)
 	}
 }
 

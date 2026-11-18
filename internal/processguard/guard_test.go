@@ -2,8 +2,11 @@ package processguard
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -15,6 +18,7 @@ func TestProcessGuard_AcquireAndRelease(t *testing.T) {
 	if err := guard.Acquire(); err != nil {
 		t.Fatalf("expected acquire to succeed, got: %v", err)
 	}
+	defer func() { _ = guard.Release() }()
 
 	if guard.PID() != os.Getpid() {
 		t.Errorf("expected PID %d, got %d", os.Getpid(), guard.PID())
@@ -123,4 +127,59 @@ func TestProcessGuard_BypassEnvVar(t *testing.T) {
 		t.Fatalf("guard2 acquire with bypass failed: %v", err)
 	}
 	defer guard2.Release()
+}
+
+func TestProcessGuard_StaleLockFileTruncated(t *testing.T) {
+	tempDir := t.TempDir()
+	lockPath := filepath.Join(tempDir, ".faradaiwire.lock")
+
+	// Simulate an unlocked stale lock file left behind by a crashed process with a longer PID string.
+	if err := os.WriteFile(lockPath, []byte("999999999999\n"), 0600); err != nil {
+		t.Fatalf("failed to seed stale lock file: %v", err)
+	}
+
+	guard := New(lockPath)
+	if err := guard.Acquire(); err != nil {
+		t.Fatalf("expected acquire on stale lock file to succeed, got: %v", err)
+	}
+	defer func() { _ = guard.Release() }()
+
+	content, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("failed to read lock file: %v", err)
+	}
+	expected := fmt.Sprintf("%d", os.Getpid())
+	if got := strings.TrimSpace(string(content)); got != expected {
+		t.Errorf("expected lock file PID %q, got %q", expected, got)
+	}
+}
+
+func TestProcessGuard_ConcurrentAcquireRelease(t *testing.T) {
+	tempDir := t.TempDir()
+	lockPath := filepath.Join(tempDir, ".faradaiwire.lock")
+	guard := New(lockPath)
+	defer func() { _ = guard.Release() }()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 16)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := guard.Acquire(); err != nil {
+				errs <- err
+				return
+			}
+			_ = guard.PID()
+			if err := guard.Release(); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("unexpected concurrent Acquire/Release error: %v", err)
+	}
 }

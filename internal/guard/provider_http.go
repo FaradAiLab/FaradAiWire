@@ -336,6 +336,15 @@ func (p *HTTPProvider) selectGenerativeEngine(baseURL string, curMode string, us
 	return &OpenAIChatEngine{}
 }
 
+// elapsedMS returns elapsed time since start in milliseconds with sub-microsecond precision.
+func elapsedMS(start time.Time) float64 {
+	d := time.Since(start)
+	if d <= 0 {
+		return 0
+	}
+	return float64(d.Nanoseconds()) / 1e6
+}
+
 // executeSystemOneInference evaluates tool invocation parameters against Ollama's /v1/systemone
 // decision endpoint using FaradAiBenchmark's calibrated Dual-Check questions and tiered thresholds.
 func (p *HTTPProvider) executeSystemOneInference(
@@ -364,7 +373,7 @@ func (p *HTTPProvider) executeSystemOneInference(
 		return nil, fmt.Errorf("systemone returned status %d: %s", statusCode, string(bodyBytes))
 	}
 
-	latencyMS := float64(time.Since(start).Microseconds()) / 1000.0
+	latencyMS := elapsedMS(start)
 	return engine.ParseResponse(bodyBytes, latencyMS, modelName)
 }
 
@@ -419,7 +428,7 @@ func (p *HTTPProvider) handleOllamaChatFallback(
 		p.mu.Lock()
 		p.inferenceMode = "generate"
 		p.mu.Unlock()
-		latencyMS := float64(time.Since(start).Microseconds()) / 1000.0
+		latencyMS := elapsedMS(start)
 		return genEngine.ParseResponse(genBody, latencyMS, modelName)
 	}
 
@@ -545,7 +554,7 @@ func (p *HTTPProvider) CallInspect(ctx context.Context, req *InspectionRequest) 
 		return nil, fmt.Errorf("http inference returned status %d: %s", statusCode, string(bodyBytes))
 	}
 
-	latencyMS := float64(time.Since(start).Microseconds()) / 1000.0
+	latencyMS := elapsedMS(start)
 	return engine.ParseResponse(bodyBytes, latencyMS, modelName)
 }
 

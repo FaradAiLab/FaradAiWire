@@ -97,8 +97,9 @@ func (p *ProcessGuard) Acquire() error {
 	// Attempt non-blocking exclusive OS lock
 	if lockErr := acquireOSLock(f.Fd()); lockErr != nil {
 		if isLockConflict(lockErr) {
-			// Read conflicting PID from lock file
-			data, _ := io.ReadAll(f)
+			// Read conflicting PID from lock file (bounded to prevent unbounded allocation)
+			_, _ = f.Seek(0, io.SeekStart)
+			data, _ := io.ReadAll(io.LimitReader(f, 64))
 			_ = f.Close()
 			conflictingPID, _ := strconv.Atoi(strings.TrimSpace(string(data)))
 			return &ErrAlreadyRunning{
@@ -130,31 +131,15 @@ func (p *ProcessGuard) Release() error {
 
 	if !p.isLocked || p.bypassed {
 		p.isLocked = false
+		p.bypassed = false
+		p.pid = 0
 		return nil
 	}
 
-	var releaseErrs []error
-
-	// Remove file before releasing OS lock to avoid race conditions with next acquire
-	if err := os.Remove(p.lockPath); err != nil && !os.IsNotExist(err) {
-		releaseErrs = append(releaseErrs, err)
-	}
-
-	if p.file != nil {
-		if err := releaseOSLock(p.file.Fd()); err != nil {
-			releaseErrs = append(releaseErrs, err)
-		}
-		if err := p.file.Close(); err != nil {
-			releaseErrs = append(releaseErrs, err)
-		}
-		p.file = nil
-	}
-
+	err := releaseLockFile(p.file, p.lockPath)
+	p.file = nil
 	p.isLocked = false
 	p.pid = 0
 
-	if len(releaseErrs) > 0 {
-		return releaseErrs[0]
-	}
-	return nil
+	return err
 }
