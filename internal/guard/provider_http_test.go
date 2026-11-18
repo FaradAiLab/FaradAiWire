@@ -27,6 +27,15 @@ func newMockClient(fn roundTripFunc) *http.Client {
 	}
 }
 
+func waitProbe(p *HTTPProvider) {
+	p.mu.RLock()
+	done := p.probeDone
+	p.mu.RUnlock()
+	if done != nil {
+		<-done
+	}
+}
+
 func TestHTTPProvider_Lifecycle(t *testing.T) {
 	cfg := DefaultHTTPProviderConfig()
 	cfg.BaseURL = "http://127.0.0.1:11434"
@@ -607,8 +616,8 @@ func TestHTTPProvider_DualModeOllamaFallback(t *testing.T) {
 		ExecutionContext: "Workstation inline PEP",
 	}
 
-	// Allow background pre-flight probe to settle if running
-	time.Sleep(20 * time.Millisecond)
+	// Allow background pre-flight probe to settle deterministically
+	waitProbe(provider)
 
 	// Calls should succeed via generate mode (either pre-configured by probe or via fallback)
 	result, err := provider.CallInspect(ctx, inspReq)
@@ -907,7 +916,7 @@ func TestHTTPProvider_SystemOne_AutonomousDiscovery(t *testing.T) {
 		RuntimeType:  "ollama",
 	})
 
-	time.Sleep(20 * time.Millisecond)
+	waitProbe(provider)
 
 	req := &InspectionRequest{
 		ToolName: "read_file",
@@ -1257,7 +1266,155 @@ func TestHTTPProvider_DecisionModel_SystemOne404_FallsThroughToGenerate(t *testi
 	mu.Unlock()
 }
 
+func TestHTTPProvider_ProbeLifecycleAndIsolation(t *testing.T) {
+	t.Run("DecisionModel_DoesNotProbeChat", func(t *testing.T) {
+		var chatCalls atomic.Int32
+		provider := NewHTTPProvider(DefaultHTTPProviderConfig(), newMockClient(func(r *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(r.URL.Path, "/api/chat") {
+				chatCalls.Add(1)
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader([]byte(`{}`)))}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader([]byte(`{"model":"mica-v0.5","answers":{"misalignment":{"noul":0.1},"exploit":{"noul":0.05}}}`))),
+			}, nil
+		}))
 
+		ctx := context.Background()
+		defer provider.Stop(ctx)
+		_ = provider.Start(ctx, &Model{ID: "mica-v0.5", RuntimeType: "ollama", Paradigm: ModelParadigmDecisionModel})
 
+		res, err := provider.CallInspect(ctx, &InspectionRequest{ToolName: "git_status"})
+		if err != nil || res.Verdict != "BENIGN" {
+			t.Fatalf("expected BENIGN verdict, got res=%+v err=%v", res, err)
+		}
+		if chatCalls.Load() != 0 {
+			t.Errorf("expected 0 /api/chat calls for DecisionModel, got %d", chatCalls.Load())
+		}
+	})
 
+	t.Run("InFlightProbe_DoesNotClobberCachedOrRestartedMode", func(t *testing.T) {
+		probeEntered := make(chan struct{})
+		releaseProbe := make(chan struct{})
+		var probeOnce sync.Once
+		var generateCalls atomic.Int32
 
+		provider := NewHTTPProvider(DefaultHTTPProviderConfig(), newMockClient(func(r *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(r.URL.Path, "/api/chat") {
+				var payload map[string]interface{}
+				bodyBytes, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(bodyBytes, &payload)
+				if _, hasFormat := payload["format"]; !hasFormat {
+					probeOnce.Do(func() { close(probeEntered) })
+					<-releaseProbe
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(bytes.NewReader([]byte(`{"message":{"role":"assistant","content":"pong"}}`))),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Body:       io.NopCloser(bytes.NewReader([]byte(`{"error":"does not support chat"}`))),
+				}, nil
+			}
+			if strings.HasSuffix(r.URL.Path, "/api/generate") {
+				generateCalls.Add(1)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewReader([]byte(`{"response":"{\"verdict\":\"ALLOW\",\"risk_score\":0.05,\"reason\":\"ok\"}"}`))),
+				}, nil
+			}
+			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		}))
+
+		ctx := context.Background()
+		defer provider.Stop(ctx)
+		_ = provider.Start(ctx, &Model{ID: "untemplated-llm", RuntimeType: "ollama"})
+		<-probeEntered
+
+		if _, err := provider.CallInspect(ctx, &InspectionRequest{ToolName: "list_files"}); err != nil {
+			t.Fatalf("CallInspect #1 failed: %v", err)
+		}
+
+		// Late 200 /api/chat from in-flight probe must not overwrite cached "generate" mode.
+		close(releaseProbe)
+		waitProbe(provider)
+
+		if _, err := provider.CallInspect(ctx, &InspectionRequest{ToolName: "list_files"}); err != nil {
+			t.Fatalf("CallInspect #2 failed: %v", err)
+		}
+		if generateCalls.Load() != 2 {
+			t.Errorf("expected 2 /api/generate calls, got %d", generateCalls.Load())
+		}
+	})
+
+	t.Run("Stop_CancelsActiveProbe", func(t *testing.T) {
+		probeCancelled := make(chan struct{})
+		probeStarted := make(chan struct{})
+
+		provider := NewHTTPProvider(DefaultHTTPProviderConfig(), newMockClient(func(r *http.Request) (*http.Response, error) {
+			close(probeStarted)
+			<-r.Context().Done()
+			close(probeCancelled)
+			return nil, r.Context().Err()
+		}))
+
+		ctx := context.Background()
+		_ = provider.Start(ctx, &Model{ID: "model-a", RuntimeType: "ollama"})
+		<-probeStarted
+		_ = provider.Stop(ctx)
+
+		select {
+		case <-probeCancelled:
+		case <-time.After(1 * time.Second):
+			t.Fatalf("expected active probe to be cancelled on Stop")
+		}
+	})
+
+	t.Run("StaleCallInspect_DoesNotOverwriteRestartedModel", func(t *testing.T) {
+		sysEntered := make(chan struct{})
+		releaseOldSys := make(chan struct{})
+		var oldSysOnce sync.Once
+		var sysCalls atomic.Int32
+
+		provider := NewHTTPProvider(DefaultHTTPProviderConfig(), newMockClient(func(r *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(r.URL.Path, "/v1/systemone") {
+				if sysCalls.Add(1) == 1 {
+					oldSysOnce.Do(func() { close(sysEntered) })
+					<-releaseOldSys
+					return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(bytes.NewReader([]byte(`{}`)))}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewReader([]byte(`{"model":"laya","answers":{"misalignment":{"noul":0.1},"exploit":{"noul":0.1}}}`))),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader([]byte(`{"response":"{\"verdict\":\"ALLOW\",\"risk_score\":0.1,\"reason\":\"ok\"}"}`))),
+			}, nil
+		}))
+
+		ctx := context.Background()
+		defer provider.Stop(ctx)
+		_ = provider.Start(ctx, &Model{ID: "old-model", RuntimeType: "ollama", Paradigm: ModelParadigmDecisionModel})
+
+		oldDone := make(chan error, 1)
+		go func() {
+			_, err := provider.CallInspect(ctx, &InspectionRequest{ToolName: "test"})
+			oldDone <- err
+		}()
+		<-sysEntered
+
+		_ = provider.Start(ctx, &Model{ID: "new-model", RuntimeType: "ollama", Paradigm: ModelParadigmDecisionModel})
+		close(releaseOldSys)
+		if err := <-oldDone; err != nil {
+			t.Fatalf("old CallInspect failed: %v", err)
+		}
+
+		res, err := provider.CallInspect(ctx, &InspectionRequest{ToolName: "test"})
+		if err != nil || !strings.Contains(res.DecisionEngine, "L2_DECISION_SYSTEMONE") {
+			t.Fatalf("expected new model to use SystemOne without stale fallback mode, got res=%+v err=%v", res, err)
+		}
+	})
+}

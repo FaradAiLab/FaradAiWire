@@ -58,6 +58,9 @@ type HTTPProvider struct {
 	lastSuccessAt time.Time
 	healthStat    string
 	inferenceMode string // "chat", "generate", "systemone", or "" (auto-detect)
+	probeEpoch    uint64
+	probeCancel   context.CancelFunc
+	probeDone     chan struct{}
 }
 
 // NewHTTPProvider constructs a thread-safe, connection-pooled HTTP provider.
@@ -112,10 +115,21 @@ func NewHTTPProvider(cfg HTTPProviderConfig, httpClient ...*http.Client) *HTTPPr
 	}
 }
 
+func (p *HTTPProvider) cancelActiveProbeLocked() {
+	if p.probeCancel != nil {
+		p.probeCancel()
+		p.probeCancel = nil
+	}
+	p.probeDone = nil
+	p.probeEpoch++
+}
+
 // Start binds an active Model and transitions the provider to running status.
 func (p *HTTPProvider) Start(ctx context.Context, model *Model) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	p.cancelActiveProbeLocked()
 
 	p.model = model
 	if model != nil {
@@ -141,8 +155,17 @@ func (p *HTTPProvider) Start(ctx context.Context, model *Model) error {
 	p.startedAt = time.Now()
 	p.healthStat = "HEALTHY"
 
-	// Pre-Flight Capability Probe (ADR-0046) in background
-	go p.probeCapability(context.Background())
+	// Pre-Flight Capability Probe (ADR-0046) in background for generative/unknown-paradigm Ollama models.
+	// Decision models route directly to /v1/systemone and handle fallback deterministically in CallInspect.
+	useOllama := p.cfg.UseOllamaAPI || strings.Contains(p.cfg.BaseURL, "11434")
+	isDecisionModel := model != nil && model.Paradigm == ModelParadigmDecisionModel
+	if useOllama && p.cfg.ModelName != "" && !isDecisionModel {
+		probeCtx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		p.probeCancel = cancel
+		p.probeDone = done
+		go p.probeCapability(probeCtx, p.probeEpoch, done)
+	}
 	return nil
 }
 
@@ -150,6 +173,8 @@ func (p *HTTPProvider) Start(ctx context.Context, model *Model) error {
 func (p *HTTPProvider) StartScript(ctx context.Context, scriptPath string, modelID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	p.cancelActiveProbeLocked()
 
 	p.running = true
 	p.startedAt = time.Now()
@@ -166,6 +191,7 @@ func (p *HTTPProvider) Stop(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.cancelActiveProbeLocked()
 	p.running = false
 	p.healthStat = "STOPPED"
 	return nil
@@ -238,16 +264,19 @@ func (p *HTTPProvider) postJSON(ctx context.Context, targetURL string, payload a
 	return resp.StatusCode, bodyBytes, nil
 }
 
-// endpointURL resolves the full URL for a target path, respecting pre-configured endpoint overrides.
-func (p *HTTPProvider) endpointURL(path string) string {
-	baseURL := strings.TrimRight(p.cfg.BaseURL, "/")
+var endpointSuffixes = [...]string{"/api/chat", "/api/generate", "/v1/chat/completions", "/chat/completions", "/v1/systemone"}
+
+// resolveEndpointURL resolves the full URL for a target path against rawBaseURL,
+// respecting pre-configured endpoint overrides.
+func resolveEndpointURL(rawBaseURL, path string) string {
+	baseURL := strings.TrimRight(rawBaseURL, "/")
 	if strings.HasSuffix(baseURL, path) {
 		return baseURL
 	}
 	if path == "/v1/chat/completions" && strings.Contains(baseURL, "/chat/completions") {
 		return baseURL
 	}
-	for _, suffix := range []string{"/api/chat", "/api/generate", "/v1/chat/completions", "/chat/completions", "/v1/systemone"} {
+	for _, suffix := range endpointSuffixes {
 		if strings.HasSuffix(baseURL, suffix) {
 			baseURL = strings.TrimSuffix(baseURL, suffix)
 			break
@@ -390,21 +419,37 @@ func isChatTemplateError(body []byte) bool {
 		bytes.Contains(lower, []byte("prompt template"))
 }
 
+func (p *HTTPProvider) setInferenceModeForEpoch(epoch uint64, mode string) {
+	p.mu.Lock()
+	if p.running && p.probeEpoch == epoch {
+		p.inferenceMode = mode
+	}
+	p.mu.Unlock()
+}
+
+func (p *HTTPProvider) recordSuccessForEpoch(epoch uint64) {
+	p.mu.Lock()
+	if p.running && p.probeEpoch == epoch {
+		p.lastSuccessAt = time.Now()
+	}
+	p.mu.Unlock()
+}
+
 // handleOllamaChatFallback handles Ollama models lacking chat templates (ADR-0046 & ADR-0047).
 // It tests SystemOne first for ModernBERT models, then falls back to /api/generate.
 func (p *HTTPProvider) handleOllamaChatFallback(
 	ctx context.Context,
+	epoch uint64,
+	baseURL string,
 	modelName string,
 	req *InspectionRequest,
 	start time.Time,
 	contextWindow int,
 ) (*InspectionResult, error) {
 	// 1. First probe /v1/systemone (for ModernBERT Decision Models like Laya).
-	sysURL := p.endpointURL("/v1/systemone")
+	sysURL := resolveEndpointURL(baseURL, "/v1/systemone")
 	if sysRes, sErr := p.executeSystemOneInference(ctx, sysURL, modelName, req, start, contextWindow); sErr == nil {
-		p.mu.Lock()
-		p.inferenceMode = "systemone"
-		p.mu.Unlock()
+		p.setInferenceModeForEpoch(epoch, "systemone")
 		slog.InfoContext(ctx, "Ollama model identified as SystemOne Decision Model; pre-configured systemone adapter",
 			slog.String("model", modelName),
 		)
@@ -417,7 +462,7 @@ func (p *HTTPProvider) handleOllamaChatFallback(
 	)
 
 	genEngine := &OllamaGenerateEngine{ContextWindow: contextWindow}
-	genURL := p.endpointURL(genEngine.EndpointPath())
+	genURL := resolveEndpointURL(baseURL, genEngine.EndpointPath())
 	genPayload, err := genEngine.BuildPayload(modelName, req)
 	if err != nil {
 		return nil, err
@@ -425,9 +470,7 @@ func (p *HTTPProvider) handleOllamaChatFallback(
 
 	genStatus, genBody, genErr := p.postJSON(ctx, genURL, genPayload)
 	if genErr == nil && genStatus >= 200 && genStatus < 300 {
-		p.mu.Lock()
-		p.inferenceMode = "generate"
-		p.mu.Unlock()
+		p.setInferenceModeForEpoch(epoch, "generate")
 		latencyMS := elapsedMS(start)
 		return genEngine.ParseResponse(genBody, latencyMS, modelName)
 	}
@@ -440,20 +483,13 @@ func (p *HTTPProvider) handleOllamaChatFallback(
 
 // CallInspect evaluates an MCP tool call request against the remote SLM inference provider.
 func (p *HTTPProvider) CallInspect(ctx context.Context, req *InspectionRequest) (res *InspectionResult, err error) {
-	defer func() {
-		if err == nil && res != nil {
-			p.mu.Lock()
-			p.lastSuccessAt = time.Now()
-			p.mu.Unlock()
-		}
-	}()
-
 	// 1. Thread-safe state snapshot
 	p.mu.RLock()
 	if !p.running {
 		p.mu.RUnlock()
 		return nil, ErrProcessNotRunning
 	}
+	epoch := p.probeEpoch
 	baseURL := p.cfg.BaseURL
 	modelName := p.cfg.ModelName
 	var paradigm ModelParadigm = ModelParadigmGenerativeLLM
@@ -483,6 +519,12 @@ func (p *HTTPProvider) CallInspect(ctx context.Context, req *InspectionRequest) 
 	curMode := p.inferenceMode
 	p.mu.RUnlock()
 
+	defer func() {
+		if err == nil && res != nil {
+			p.recordSuccessForEpoch(epoch)
+		}
+	}()
+
 	// 2. Validate URL (prevent SSRF and unsupported schemes)
 	if err := validateURL(baseURL); err != nil {
 		return nil, err
@@ -507,7 +549,7 @@ func (p *HTTPProvider) CallInspect(ctx context.Context, req *InspectionRequest) 
 
 	// 5. Direct Paradigm Routing: Decision Models route straight to SystemOne
 	if (paradigm == ModelParadigmDecisionModel && curMode != "generate" && curMode != "chat") || curMode == "systemone" {
-		targetURL := p.endpointURL("/v1/systemone")
+		targetURL := resolveEndpointURL(baseURL, "/v1/systemone")
 		res, err := p.executeSystemOneInference(ctx, targetURL, modelName, req, start, contextWindow)
 		if err == nil {
 			return res, nil
@@ -522,15 +564,13 @@ func (p *HTTPProvider) CallInspect(ctx context.Context, req *InspectionRequest) 
 			slog.String("degraded_mode", "GENERATIVE_FALLBACK"),
 			slog.String("error", err.Error()),
 		)
-		p.mu.Lock()
-		p.inferenceMode = "generate"
-		p.mu.Unlock()
+		p.setInferenceModeForEpoch(epoch, "generate")
 		curMode = "generate"
 	}
 
 	// 6. Select generative engine strategy
 	engine := p.selectGenerativeEngine(baseURL, curMode, useOllama, contextWindow)
-	targetURL := p.endpointURL(engine.EndpointPath())
+	targetURL := resolveEndpointURL(baseURL, engine.EndpointPath())
 	payload, err := engine.BuildPayload(modelName, req)
 	if err != nil {
 		return nil, err
@@ -544,10 +584,8 @@ func (p *HTTPProvider) CallInspect(ctx context.Context, req *InspectionRequest) 
 	// 7. Dual-Mode Guard Fallback (ADR-0046 & ADR-0047):
 	// If Ollama returned status 400 because the model lacks chat template:
 	if statusCode == http.StatusBadRequest && useOllama && isChatTemplateError(bodyBytes) {
-		p.mu.Lock()
-		p.inferenceMode = "generate"
-		p.mu.Unlock()
-		return p.handleOllamaChatFallback(ctx, modelName, req, start, contextWindow)
+		p.setInferenceModeForEpoch(epoch, "generate")
+		return p.handleOllamaChatFallback(ctx, epoch, baseURL, modelName, req, start, contextWindow)
 	}
 
 	if statusCode < 200 || statusCode >= 300 {
@@ -558,16 +596,44 @@ func (p *HTTPProvider) CallInspect(ctx context.Context, req *InspectionRequest) 
 	return engine.ParseResponse(bodyBytes, latencyMS, modelName)
 }
 
+func (p *HTTPProvider) canCommitProbeResult(epoch uint64) bool {
+	return p.running && p.probeEpoch == epoch && p.inferenceMode == "" &&
+		(p.model == nil || p.model.Paradigm != ModelParadigmDecisionModel)
+}
+
+func (p *HTTPProvider) snapshotProbeTarget(epoch uint64) (baseURL, modelName string, ok bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if !p.canCommitProbeResult(epoch) {
+		return "", "", false
+	}
+	baseURL = p.cfg.BaseURL
+	modelName = p.cfg.ModelName
+	useOllama := p.cfg.UseOllamaAPI || strings.Contains(baseURL, "11434")
+	if !useOllama || modelName == "" || validateURL(baseURL) != nil {
+		return "", "", false
+	}
+	return baseURL, modelName, true
+}
+
+func (p *HTTPProvider) commitProbeMode(epoch uint64, mode string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.canCommitProbeResult(epoch) {
+		return false
+	}
+	p.inferenceMode = mode
+	p.lastSuccessAt = time.Now()
+	return true
+}
+
 // probeCapability performs an asynchronous pre-flight probe against an Ollama endpoint
 // to detect if the active model supports /api/chat or requires /api/generate fallback (ADR-0046).
-func (p *HTTPProvider) probeCapability(ctx context.Context) {
-	p.mu.RLock()
-	baseURL := p.cfg.BaseURL
-	modelName := p.cfg.ModelName
-	useOllama := p.cfg.UseOllamaAPI || strings.Contains(baseURL, "11434")
-	p.mu.RUnlock()
+func (p *HTTPProvider) probeCapability(ctx context.Context, epoch uint64, done chan struct{}) {
+	defer close(done)
 
-	if !useOllama || modelName == "" {
+	baseURL, modelName, ok := p.snapshotProbeTarget(epoch)
+	if !ok {
 		return
 	}
 
@@ -582,44 +648,40 @@ func (p *HTTPProvider) probeCapability(ctx context.Context) {
 		"stream": false,
 	}
 
-	status, body, err := p.postJSON(probeCtx, p.endpointURL("/api/chat"), chatPayload)
+	status, body, err := p.postJSON(probeCtx, resolveEndpointURL(baseURL, "/api/chat"), chatPayload)
 	if err != nil {
 		return
 	}
 
 	if status == http.StatusBadRequest && isChatTemplateError(body) {
+		if _, _, stillValid := p.snapshotProbeTarget(epoch); !stillValid {
+			return
+		}
 		// Probe SystemOne first for ModernBERT decision models
 		testSysReq := systemOneRequest{
 			Model:     modelName,
 			State:     "PRIMARY_USER_GOAL: Ping\nTOOL_NAME: ping\nCALL_ARGUMENTS: {}",
 			Questions: dualCheckQuestions,
 		}
-		sysStatus, _, sysErr := p.postJSON(probeCtx, p.endpointURL("/v1/systemone"), testSysReq)
+		sysStatus, _, sysErr := p.postJSON(probeCtx, resolveEndpointURL(baseURL, "/v1/systemone"), testSysReq)
 		if sysErr == nil && sysStatus >= 200 && sysStatus < 300 {
-			p.mu.Lock()
-			p.inferenceMode = "systemone"
-			p.lastSuccessAt = time.Now()
-			p.mu.Unlock()
-			slog.Info("Pre-flight probe detected Ollama SystemOne Decision Model; pre-configured systemone adapter",
-				slog.String("model", modelName),
-			)
+			if p.commitProbeMode(epoch, "systemone") {
+				slog.Info("Pre-flight probe detected Ollama SystemOne Decision Model; pre-configured systemone adapter",
+					slog.String("model", modelName),
+				)
+			}
 			return
 		}
 
-		p.mu.Lock()
-		p.inferenceMode = "generate"
-		p.lastSuccessAt = time.Now()
-		p.mu.Unlock()
-		slog.Info("Pre-flight probe detected Ollama completion-only model; pre-configured Dual-Mode generate adapter",
-			slog.String("model", modelName),
-		)
+		if p.commitProbeMode(epoch, "generate") {
+			slog.Info("Pre-flight probe detected Ollama completion-only model; pre-configured Dual-Mode generate adapter",
+				slog.String("model", modelName),
+			)
+		}
 		return
 	}
 
 	if status >= 200 && status < 300 {
-		p.mu.Lock()
-		p.inferenceMode = "chat"
-		p.lastSuccessAt = time.Now()
-		p.mu.Unlock()
+		p.commitProbeMode(epoch, "chat")
 	}
 }
