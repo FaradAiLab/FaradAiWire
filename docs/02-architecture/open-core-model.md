@@ -5,16 +5,16 @@ description: "Understanding the clean architectural boundary between FaradAiWire
 
 # Open Core Model & Enterprise Boundaries 🏢
 
-FaradAiWire adheres strictly to the **Open Core Purity** model ([ADR-0022](../adr/0022-open-core-purity-uniform-plugin-pipeline-and-agent-handover.md) & [ADR-0050](../adr/0050-absolute-opa-purge-and-open-core-policy-decoupling.md)). We draw a distinct architectural boundary between the single-tenant open-source engine and the multi-tenant enterprise control plane.
+FaradAiWire adheres strictly to the **Open Core Purity** model. We draw a distinct architectural boundary between the single-tenant open-source engine and the multi-tenant enterprise control plane.
 
 ```mermaid
 graph TD
     subgraph OpenCore ["FaradAiWire Core (Apache 2.0)"]
         direction TB
         C1["Single-Tenant Local Daemon"]
-        C2["Physical Port Segregation (8090 / 8095)"]
+        C2["Physical Port Segregation (19410 / 19415)"]
         C3["Deterministic Fast-Path (DLP, Prefill, Schema, RateLimit)"]
-        C4["Host SLM Classifier (Ollama / Local Sidecar)"]
+        C4["Host AI Guard Engine (Ollama / FaradAiGuard Sidecar)"]
         C5["Offline-First DuckDB & JSONL Audit Trails"]
     end
 
@@ -41,7 +41,7 @@ graph TD
 | **Target Users** | Individual developers, AI researchers, teams | Enterprise security teams, CISOs, compliance officers |
 | **Network Egress** | **Zero Egress:** 100% offline-first | Synchronizes policies with fleet control plane |
 | **Authentication** | Bearer token / Local loopback auth | Enterprise SSO (SAML 2.0, OIDC, Okta, Azure AD) |
-| **Authorization** | Regex DLP, schema pinning, HITL, SLM guard | **Open Policy Agent (OPA) & Rego** ABAC engine |
+| **Authorization** | Regex DLP, schema pinning, HITL, AI Guard | **Open Policy Agent (OPA) & Rego** ABAC engine |
 | **Policy Distribution**| Local `config.yaml` with fsnotify hot-reload | Centralized bundle compilation & instant fleet push |
 | **Key Management** | Local keys in config / environment variables | **KMS BYOK** (AWS KMS, GCP KMS, HashiCorp Vault) |
 | **Crypto-Shredding** | Not applicable (Local files) | Instant cryptographic key destruction for GDPR/KVKK |
@@ -50,9 +50,9 @@ graph TD
 
 ---
 
-## ADR-0050: Absolute OPA Purge from Open Core
+## Open Core Policy Decoupling (OPA Purge)
 
-On October 29, 2026, [ADR-0050](../adr/0050-absolute-opa-purge-and-open-core-policy-decoupling.md) completed the formal decoupling of Open Policy Agent (OPA) from FaradAiWire Core:
+FaradAiWire Core formally decouples Open Policy Agent (OPA) and enterprise SaaS governance from the open-source gateway:
 
 1. **Protocol Generalization:** The JSON-RPC error code `-32003` was generalized from `ErrOPAPolicyDenied` to `mcp.ErrPolicyDenied` ("Policy authorization denied").
 2. **Clean Pipeline Extension Point:** The constant `OrderOPA = 20` was replaced with `OrderPolicy = 20`. This reserves a vendor-neutral hook where enterprise distributions or custom policy engines can inject authorization logic without polluting the open-source codebase.

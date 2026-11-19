@@ -34,7 +34,7 @@ The codes below are the constants defined in `pkg/mcp/protocol.go`. The detail p
 | **`-32000`** | `ErrHITLDenied` | Human approval was denied, timed out, or no approval channel was available | [HITL](/docs/wire/03-security-filters/hitl/), [DLP](/docs/wire/03-security-filters/dlp/) (`hitl` action), [Guard](/docs/wire/03-security-filters/prompt-guard/) |
 | **`-32001`** | `ErrPrefillInjection` | Assistant prefill injection (sockpuppeting) detected | [Prefill Guard](/docs/wire/03-security-filters/prefill/) |
 | **`-32002`** | `ErrSchemaValidation` | Tool arguments violate the tool's JSON Schema | [Schema Validation](/docs/wire/03-security-filters/schema-validation/) |
-| **`-32003`** | `ErrPolicyDenied` | Policy authorization denied ([ADR-0050](../adr/0050-absolute-opa-purge-and-open-core-policy-decoupling.md)) | Policy hook |
+| **`-32003`** | `ErrPolicyDenied` | Policy authorization denied | Policy hook |
 | **`-32004`** | `ErrDLPViolation` | Sensitive data pattern or guard rule blocked the call | [DLP](/docs/wire/03-security-filters/dlp/), [Guard](/docs/wire/03-security-filters/prompt-guard/) |
 | **`-32006`** | `ErrIndirectInjection` | Indirect prompt injection detected in a tool response | [Guard](/docs/wire/03-security-filters/prompt-guard/) (response path) |
 | **`-32007`** | `ErrToolSchemaDrift` | Defined for tool schema poisoning. The Schema Validation filter currently logs drift and does not return this code. | Reserved |

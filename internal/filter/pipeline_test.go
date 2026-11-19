@@ -948,7 +948,7 @@ func TestPipeline_FastPath_DLPResponseRedaction(t *testing.T) {
 		t.Errorf("Expected [REDACTED] in sanitized fast-path response, got: %s", string(processedResp.Result))
 	}
 
-	// Verify heavy SLM and HITL filters remain strictly bypassed on Fast-Path
+	// Verify heavy AI Guard and HITL filters remain strictly bypassed on Fast-Path
 	if atomic.LoadInt32(&injMock.execCount) != 0 {
 		t.Errorf("Expected injection_scanner to remain bypassed on Fast-Path, got %d calls", injMock.execCount)
 	}

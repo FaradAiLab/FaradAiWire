@@ -106,7 +106,7 @@ func TestAdaptiveRouter_DisabledFallback(t *testing.T) {
 func TestAdaptiveRouter_FilterExecutionSelection(t *testing.T) {
 	router := adaptive.NewRouter(true, "deep", nil, nil)
 
-	// Fast-path should skip heavy SLM injection scanner and HITL, but execute in-memory dlp (SEC-017 / DEC-05)
+	// Fast-path should skip heavy AI Guard injection scanner and HITL, but execute in-memory dlp (SEC-017 / DEC-05)
 	if router.ShouldExecuteFilter("injection_scanner", adaptive.PathFast) {
 		t.Errorf("Expected injection_scanner to be skipped in Fast-Path")
 	}

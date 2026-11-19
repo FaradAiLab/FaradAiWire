@@ -5,7 +5,7 @@ description: "Start the FaradAiWire PEP gateway daemon with optional CLI overrid
 
 # `faradaiwire run` 🚀
 
-The `run` command boots the FaradAiWire Policy Enforcement Point daemon, binding the physical Proxy Ingress listener (Port 8090) and Admin Console listener (Port 8095).
+The `run` command boots the FaradAiWire Policy Enforcement Point daemon, binding the physical Proxy Ingress listener (Port 19410) and Admin Console listener (Port 19415).
 
 ---
 
@@ -24,15 +24,15 @@ faradaiwire run [flags]
 | **`--config`** | `string` | *(Auto-discovered)* | Explicit path to a YAML configuration file. |
 | **`--standalone`**| `bool` | `false` | Force offline-first standalone mode (zero-egress, disables any cloud telemetry). |
 | **`--host`** | `string` | `127.0.0.1` | Network interface address to bind the proxy ingress listener (`0.0.0.0` in containers). |
-| **`--port`** | `int` | `8090` | Ingress proxy port for agent tool traffic (`/sse`, `/message`, `/mcp`). |
+| **`--port`** | `int` | `19410` | Ingress proxy port for agent tool traffic (`/sse`, `/message`, `/mcp`). |
 | **`--admin-host`**| `string` | `127.0.0.1` | Network interface address to bind the Admin Console listener. Non-loopback bindings require `ADMIN_API_KEY` or `FARADAI_WIRE_ADMIN_TOKEN`. |
-| **`--admin-port`**| `int` | `8095` | Admin Console port for web UI, metrics, and REST management APIs. |
+| **`--admin-port`**| `int` | `19415` | Admin Console port for web UI, metrics, and REST management APIs. |
 
 ---
 
 ## Single-Instance Guard
 
-To prevent multiple rogue processes from corrupting DuckDB database files or clashing on network ports, FaradAiWire acquires an exclusive advisory file lock on startup ([ADR-0020](../adr/0020-single-tenant-edge-hardening-and-mcp-guardrails.md)):
+To prevent multiple rogue processes from corrupting DuckDB database files or clashing on network ports, FaradAiWire acquires an exclusive advisory file lock on startup:
 - Location: `~/.faradaiwire/.faradaiwire.lock` (or local working directory).
 - If another instance is already running, the new process exits immediately with an error:
   ```text
@@ -44,8 +44,8 @@ To prevent multiple rogue processes from corrupting DuckDB database files or cla
 
 ## Graceful Shutdown Lifecycle
 
-FaradAiWire captures `SIGINT` (Ctrl+C) and `SIGTERM` signals ([ADR-0016](../adr/0016-phased-synchronous-teardown-and-telemetry-integrity.md)):
-1. Stops accepting new inbound TCP connections on Ports 8090 and 8095.
+FaradAiWire captures `SIGINT` (Ctrl+C) and `SIGTERM` signals:
+1. Stops accepting new inbound TCP connections on Ports 19410 and 19415.
 2. Allows in-flight tool requests up to 10 seconds to complete.
 3. Flushes in-memory audit buffers to `logs/faradai_audit.jsonl`.
 4. Closes the embedded DuckDB database connection cleanly to prevent database corruption.
@@ -62,7 +62,7 @@ faradaiwire run
 
 ### 2. Custom Ingress Port:
 ```bash
-faradaiwire run --port 9090 --admin-port 9095
+faradaiwire run --port 19420 --admin-port 19425
 ```
 
 ### 3. Container Mode (Bind All Interfaces):

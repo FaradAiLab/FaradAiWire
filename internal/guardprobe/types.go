@@ -1,6 +1,6 @@
-package slmprobe
+package guardprobe
 
-// ProviderType represents the class of SLM inference provider detected or configured.
+// ProviderType represents the class of AI Guard inference provider detected or configured.
 type ProviderType string
 
 const (
@@ -11,7 +11,7 @@ const (
 	ProviderNone        ProviderType = "none"
 )
 
-// ProbeResult captures the discovery and health status of local and configured SLMs.
+// ProbeResult captures the discovery and health status of local and configured AI Guard instances.
 type ProbeResult struct {
 	ConfiguredActive bool         `json:"configured_active"`
 	ConfiguredURL    string       `json:"configured_url"`

@@ -142,4 +142,4 @@ jobs:
 ---
 
 > [!NOTE]
-> **Static Heuristic Analysis Disclaimer:** `faradaiwire audit` scans source code and manifests against known high-risk threat signatures and opaque binaries. It does not execute dynamic code or provide a guarantee against novel zero-day exploits. To defend against in-flight attacks at runtime, use FaradAiWire Gateway's zero-trust PEP and SLM Semantic Guard.
+> **Static Heuristic Analysis Disclaimer:** `faradaiwire audit` scans source code and manifests against known high-risk threat signatures and opaque binaries. It does not execute dynamic code or provide a guarantee against novel zero-day exploits. To defend against in-flight attacks at runtime, use FaradAiWire Gateway's zero-trust PEP and AI Guard.

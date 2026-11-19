@@ -1,6 +1,6 @@
 import React from 'react'
 import { Shield, Radio, Cpu, RefreshCw, Settings } from 'lucide-react'
-import { GatewayStatus, ThemeMode } from '../types'
+import { GatewayStatus, ThemeMode, isGuardActive } from '../types'
 import { ThemeToggle } from './ui/ThemeToggle'
 
 interface HeaderProps {
@@ -22,7 +22,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const isOnline = status?.status === 'active' || status?.status === 'healthy' || status?.status?.toLowerCase() === 'ready'
   const isManaged = status?.runtime_mode === 'MANAGED'
-  const slmActive = status?.slm_tier === 'neural_active' || status?.slm_status === 'active'
+  const guardActive = isGuardActive(status)
   const versionBadge = status?.version
     ? `${status.version.startsWith('v') ? status.version : `v${status.version}`} Core`
     : 'Core'
@@ -58,17 +58,17 @@ export const Header: React.FC<HeaderProps> = ({
           {isManaged ? 'Enterprise Managed' : 'Standalone Core (Zero-Egress)'}
         </div>
 
-        {/* Semantic Security Guard Badge */}
+        {/* AI Guard Badge */}
         <div
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border ${
-            slmActive
+            guardActive
               ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:border-emerald-500/30 dark:text-emerald-400'
               : 'bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:border-amber-500/30 dark:text-amber-300'
           }`}
-          title={status?.slm_endpoint || 'Local Semantic Security Guard'}
+          title={status?.guard_endpoint || 'Local AI Guard'}
         >
           <Cpu className="w-3.5 h-3.5" />
-          <span>{slmActive ? 'Semantic Guard Active' : 'Semantic Guard Standby'}</span>
+          <span>{guardActive ? 'AI Guard Active' : 'AI Guard Standby'}</span>
         </div>
 
         {/* Hot Reload Trigger */}

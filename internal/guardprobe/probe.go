@@ -1,9 +1,10 @@
-package slmprobe
+package guardprobe
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -16,10 +17,13 @@ const (
 	// DefaultMaxProbeTimeout is the strict upper bound for all probe operations.
 	DefaultMaxProbeTimeout = 300 * time.Millisecond
 
-	// DefaultPromptGuardHealthURL is the standard health endpoint for the Farad Ai prompt-guard sidecar.
+	// maxProbeResponseBytes bounds probe JSON decoding to prevent oversized payloads.
+	maxProbeResponseBytes = 1 << 20
+
+	// DefaultPromptGuardHealthURL is the standard health endpoint for the FaradAiGuard sidecar.
 	DefaultPromptGuardHealthURL = "http://127.0.0.1:8088/health"
 
-	// DefaultPromptGuardPredictURL is the standard predict endpoint for prompt-guard.
+	// DefaultPromptGuardPredictURL is the standard predict endpoint for FaradAiGuard.
 	DefaultPromptGuardPredictURL = "http://127.0.0.1:8088/predict"
 
 	// DefaultOllamaTagsURL is the standard tags endpoint for local Ollama.
@@ -29,14 +33,17 @@ const (
 	DefaultOllamaBaseURL = "http://127.0.0.1:11434"
 )
 
-// Prober orchestrates non-blocking discovery of local and configured SLM instances.
+// Pre-encoded ping payload avoids per-probe map + JSON marshaling allocations.
+var pingPayload = []byte(`{"text":"ping"}`)
+
+// Prober orchestrates non-blocking discovery of local and configured AI Guard instances.
 type Prober struct {
-	client              *http.Client
-	timeout             time.Duration
-	promptGuardHealthURL string
+	client                *http.Client
+	timeout               time.Duration
+	promptGuardHealthURL  string
 	promptGuardPredictURL string
-	ollamaTagsURL       string
-	ollamaBaseURL       string
+	ollamaTagsURL         string
+	ollamaBaseURL         string
 }
 
 // Option allows customizing Prober parameters (e.g. for testing with mock servers).
@@ -116,7 +123,7 @@ func Probe(ctx context.Context, configuredURL string) *ProbeResult {
 	return DefaultProber.Probe(ctx, configuredURL)
 }
 
-// Probe asynchronously inspects candidate local SLMs and the configured URL within a bounded deadline.
+// Probe asynchronously inspects candidate local AI Guard engines and the configured URL within a bounded deadline.
 func (p *Prober) Probe(ctx context.Context, configuredURL string) *ProbeResult {
 	probeCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
@@ -245,7 +252,7 @@ func (p *Prober) probePromptGuard(ctx context.Context, healthURL string) (bool, 
 	}
 
 	var health promptGuardHealthResponse
-	if err := json.NewDecoder(resp.Body).Decode(&health); err == nil && (health.Status == "healthy" || health.Status == "ok") {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxProbeResponseBytes)).Decode(&health); err == nil && (health.Status == "healthy" || health.Status == "ok") {
 		elapsed := time.Since(start).Milliseconds()
 		model := health.Model
 		if model == "" {
@@ -275,7 +282,7 @@ func (p *Prober) probeOllama(ctx context.Context, tagsURL string) (bool, int64, 
 	}
 
 	var tags ollamaTagsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tags); err == nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxProbeResponseBytes)).Decode(&tags); err == nil {
 		elapsed := time.Since(start).Milliseconds()
 		var modelName string
 		if len(tags.Models) > 0 {
@@ -298,8 +305,7 @@ func (p *Prober) probeConfigured(ctx context.Context, targetURL string) (bool, i
 
 	// Fallback: Perform minimal POST request to the configured classifier endpoint
 	start := time.Now()
-	reqBody, _ := json.Marshal(map[string]string{"text": "ping"})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewBuffer(reqBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(pingPayload))
 	if err != nil {
 		return false, 0, ""
 	}

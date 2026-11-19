@@ -46,7 +46,7 @@ func DefaultHTTPProviderConfig() HTTPProviderConfig {
 }
 
 // HTTPProvider implements the Manager interface communicating with an external
-// SLM inference provider (Ollama or llama-server container) over HTTP REST.
+// AI Guard inference provider (Ollama or llama-server container) over HTTP REST.
 type HTTPProvider struct {
 	cfg           HTTPProviderConfig
 	client        *http.Client
@@ -481,7 +481,7 @@ func (p *HTTPProvider) handleOllamaChatFallback(
 	return nil, fmt.Errorf("http inference returned status %d: %s", genStatus, string(genBody))
 }
 
-// CallInspect evaluates an MCP tool call request against the remote SLM inference provider.
+// CallInspect evaluates an MCP tool call request against the remote AI Guard inference provider.
 func (p *HTTPProvider) CallInspect(ctx context.Context, req *InspectionRequest) (res *InspectionResult, err error) {
 	// 1. Thread-safe state snapshot
 	p.mu.RLock()

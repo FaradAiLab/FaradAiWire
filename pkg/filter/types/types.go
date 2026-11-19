@@ -17,7 +17,7 @@ const (
 	// AgentNameContextKey stores the resolved agent name for per-agent policy evaluation.
 	AgentNameContextKey ContextKey = "agent_name"
 	// HumanApprovedContextKey flags that a tool call was explicitly approved by a human operator,
-	// establishing Human Supremacy over downstream SLM guards.
+	// establishing Human Supremacy over downstream AI Guard filters.
 	HumanApprovedContextKey ContextKey = "human_approved"
 )
 
@@ -58,4 +58,3 @@ func GetToolName(ctx context.Context) string {
 	}
 	return ""
 }
-

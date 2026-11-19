@@ -14,9 +14,9 @@ FaradAiWire uses YAML for its primary configuration file (`config.yaml`). The fi
 
 # Network Port Bindings
 listen_host: "127.0.0.1"           # Ingress listener host (default 127.0.0.1)
-listen_port: 8090                  # Ingress Proxy port (Fail-Closed Bearer Auth)
+listen_port: 19410                 # Ingress Proxy port (Fail-Closed Bearer Auth)
 admin_host: "127.0.0.1"            # Admin Console host (default 127.0.0.1; non-loopback requires ADMIN_API_KEY/FARADAI_WIRE_ADMIN_TOKEN)
-admin_port: 8095                   # Admin Console & REST API port (Loopback by default)
+admin_port: 19415                  # Admin Console & REST API port (Loopback by default)
 agents_dir: "./agents"             # Directory containing per-agent configurations
 
 # Security & Access Guardrails
@@ -24,9 +24,9 @@ security:
   # Explicit browser origins allowed for CORS, Admin CSRF checks, and WebSocket upgrades.
   # Note: "*" does NOT bypass CSRF / Sec-Fetch-Site or WebSocket CSWSH origin validation.
   cors_allowed_origins:
-    - "http://localhost:3000"
-    - "http://localhost:8090"
-    - "http://localhost:8095"
+    - "http://localhost:19418"
+    - "http://localhost:19410"
+    - "http://localhost:19415"
   trusted_proxies:
     - "127.0.0.1/32"
     - "10.0.0.0/8"
@@ -83,7 +83,7 @@ filters:
         regex: '\b\d{11}\b'
         action: "mask"
 
-  # Semantic SLM Security Guard Engine
+  # AI Guard Engine (Qwen3Guard, Mica, Granite Guardian)
   guard:
     enabled: true
     discovery:

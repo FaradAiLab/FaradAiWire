@@ -5,7 +5,7 @@ description: "Update DLP patterns, rate limits, and agent profiles at runtime wi
 
 # Runtime Configuration Hot-Reload 🔄
 
-In an agentic workflow, dropping long-running Server-Sent Events (SSE) connections to reload a configuration file would break active agent reasoning sessions. FaradAiWire provides **Atomic Runtime Hot-Reloading** ([ADR-0015](../adr/0015-unified-hot-reload-and-multi-agent-domain-isolation.md) & [ADR-0044](../adr/0044-atomic-pipeline-swapping-and-killswitch-hierarchy.md)) powered by Go's `fsnotify` library and atomic pointer swapping.
+In an agentic workflow, dropping long-running Server-Sent Events (SSE) connections to reload a configuration file would break active agent reasoning sessions. FaradAiWire provides **Atomic Runtime Hot-Reloading** powered by Go's `fsnotify` library and atomic pointer swapping.
 
 ---
 
@@ -29,8 +29,8 @@ In an agentic workflow, dropping long-running Server-Sent Events (SSE) connectio
 | **Agent Profiles (`agents/*.yaml`)** | ✅ Yes | In-memory agent catalog refreshes instantly. |
 | **Rate Limiter & Loop Limits** | ✅ Yes | Adjusts token bucket capacity and window without clearing current counts. |
 | **HITL Destructive Tools** | ✅ Yes | Updates the list of tools that require operator prompt. |
-| **SLM Guard Thresholds** | ✅ Yes | Updates confidence thresholds and provider URLs. |
-| **Port Bindings (8090, 8095)** | ❌ No | Requires daemon restart to rebind operating system TCP sockets. |
+| **AI Guard Thresholds** | ✅ Yes | Updates confidence thresholds and provider URLs. |
+| **Port Bindings (19410, 19415)** | ❌ No | Requires daemon restart to rebind operating system TCP sockets. |
 | **DuckDB Database Path** | ❌ No | Requires restart to cleanly close and reopen DuckDB locks. |
 
 ---
@@ -40,7 +40,7 @@ In an agentic workflow, dropping long-running Server-Sent Events (SSE) connectio
 In addition to automated filesystem monitoring, you can trigger a configuration reload via the Admin REST API:
 
 ```bash
-curl -X POST http://127.0.0.1:8095/api/reload \
+curl -X POST http://127.0.0.1:19415/api/reload \
   -H "Authorization: Bearer dev-local-key"
 ```
 

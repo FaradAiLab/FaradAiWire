@@ -254,8 +254,8 @@ func TestCLI_DoctorCommand(t *testing.T) {
 	if !strings.Contains(out, "Configuration:") {
 		t.Errorf("expected configuration check in doctor output")
 	}
-	if !strings.Contains(out, "Neural SLM") {
-		t.Errorf("expected neural SLM check in doctor output")
+	if !strings.Contains(out, "AI Guard") {
+		t.Errorf("expected AI Guard check in doctor output")
 	}
 }
 

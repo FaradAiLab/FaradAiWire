@@ -15,7 +15,7 @@ const (
 )
 
 // FastPathFilterNames lists filter names that are executed in the Fast-Path pipeline.
-// In-memory regex DLP executes here to protect sensitive tool responses without SLM overhead (DEC-05 / SEC-017).
+// In-memory regex DLP executes here to protect sensitive tool responses without AI Guard overhead (DEC-05 / SEC-017).
 var FastPathFilterNames = map[string]bool{
 	"prefill_block":     true,
 	"rate_limiting":     true,

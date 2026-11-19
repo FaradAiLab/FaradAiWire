@@ -177,7 +177,7 @@ func (d *DLPFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.R
 		}
 
 		// The Human Supremacy Principle:
-		// Mark human approval in the context so downstream SLM guards cannot veto.
+		// Mark human approval in the context so downstream AI Guard filters cannot veto.
 		types.SetHumanApproved(ctx, true)
 	}
 

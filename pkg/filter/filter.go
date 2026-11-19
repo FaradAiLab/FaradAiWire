@@ -23,7 +23,7 @@ const (
 	OrderSchemaValidation = 30
 	// OrderDLP defines the pipeline precedence for data loss prevention and sensitive PII redaction.
 	OrderDLP = 50
-	// OrderGuard defines the pipeline precedence for SLM extensible security guard (GUARD-004).
+	// OrderGuard defines the pipeline precedence for the extensible AI Guard security engine (GUARD-004).
 	OrderGuard = 55
 	// OrderInjectionScanner defines the pipeline precedence for prompt injection scanning.
 	OrderInjectionScanner = 60

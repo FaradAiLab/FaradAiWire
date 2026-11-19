@@ -7,8 +7,8 @@ description: "Contract specifications for Admin REST APIs, JSON-RPC 2.0 Ingress 
 
 FaradAiWire exposes two distinct networking interfaces governed by physical port segregation:
 
-1. **Proxy Ingress API (Port 8090):** Streamed JSON-RPC 2.0 interface for AI agents (Claude Code, Cursor, Windsurf, custom SDKs).
-2. **Admin REST API (Port 8095):** Administrative control plane for configuration management, schema inspection, live telemetry, and Web Console UI.
+1. **Proxy Ingress API (Port 19410):** Streamed JSON-RPC 2.0 interface for AI agents (Claude Code, Cursor, Windsurf, custom SDKs).
+2. **Admin REST API (Port 19415):** Administrative control plane for configuration management, schema inspection, live telemetry, and Web Console UI.
 
 ---
 
@@ -16,13 +16,13 @@ FaradAiWire exposes two distinct networking interfaces governed by physical port
 
 ```mermaid
 graph TD
-    subgraph Agent Port [Port 8090: Ingress]
+    subgraph Agent Port [Port 19410: Ingress]
         A["AI Agent Request"] -->|"Header: Authorization: Bearer <API_KEY>"| V1{"Verify Key"}
         V1 -->|"Valid"| Pipeline["Security Pipeline"]
         V1 -->|"Invalid or Missing"| E401["HTTP 401 Unauthorized"]
     end
 
-    subgraph Admin Port [Port 8095: Admin Console]
+    subgraph Admin Port [Port 19415: Admin Console]
         Admin["Browser / Admin Client"] -->|"Loopback or Authorization: Bearer"| V2{"Loopback / CSRF / Auth"}
         V2 -->|"Allowed"| AdminAPI["Admin REST Handlers"]
         V2 -->|"Denied"| E403["HTTP 403 Forbidden"]

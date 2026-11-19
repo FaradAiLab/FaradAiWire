@@ -120,7 +120,7 @@ func TestGuardFilter_L1_FastBlock_TerminatesZeroGPU(t *testing.T) {
 		t.Errorf("expected L1 block message, got: %s", mcpErr.Message)
 	}
 	if mgr.inspectCallCount.Load() != 0 {
-		t.Fatalf("CRITICAL: L2 SLM was invoked despite L1 match! GPU overhead should be zero")
+		t.Fatalf("CRITICAL: L2 AI Guard was invoked despite L1 match! GPU overhead should be zero")
 	}
 	if duration > 2*time.Millisecond {
 		t.Errorf("L1 fast block took %v, expected < 0.2ms", duration)
@@ -137,7 +137,7 @@ func TestGuardFilter_L1_FastBlock_TerminatesZeroGPU(t *testing.T) {
 		t.Fatalf("expected -32004 block on sensitive file, got: %v", mcpErr2)
 	}
 	if mgr.inspectCallCount.Load() != 0 {
-		t.Fatalf("CRITICAL: L2 SLM was invoked on sensitive file block")
+		t.Fatalf("CRITICAL: L2 AI Guard was invoked on sensitive file block")
 	}
 }
 
@@ -195,7 +195,7 @@ func TestGuardFilter_FastPath_Under128Chars_BypassesL2(t *testing.T) {
 		t.Fatal("expected request passed through")
 	}
 	if mgr.inspectCallCount.Load() != 0 {
-		t.Fatalf("CRITICAL: Fast-path tool under 128 chars invoked L2 SLM! Must bypass completely")
+		t.Fatalf("CRITICAL: Fast-path tool under 128 chars invoked L2 AI Guard! Must bypass completely")
 	}
 	if duration > 1*time.Millisecond {
 		t.Errorf("Fast-path bypass latency %v exceeded nominal budget", duration)
@@ -738,7 +738,7 @@ func TestGuardFilter_AgentToolGovernance_Modes(t *testing.T) {
 
 	ctx := context.WithValue(context.Background(), types.AgentNameContextKey, "agent-sec")
 
-	// 1. ModeAutonomous: Bypasses L2 SLM even when payload is long and SLM is running
+	// 1. ModeAutonomous: Bypasses L2 AI Guard even when payload is long and AI Guard is running
 	t.Run("ModeAutonomous_BypassesL2", func(t *testing.T) {
 		mgr := &mockGuardManager{}
 		mgr.running.Store(true)
@@ -763,10 +763,10 @@ func TestGuardFilter_AgentToolGovernance_Modes(t *testing.T) {
 		}
 	})
 
-	// 2. ModeStrictAlwaysHITL: Prompts HITL even if SLM is offline
+	// 2. ModeStrictAlwaysHITL: Prompts HITL even if AI Guard is offline
 	t.Run("ModeStrictAlwaysHITL_PromptsEvenWhenOffline", func(t *testing.T) {
 		mgr := &mockGuardManager{}
-		mgr.running.Store(false) // SLM stopped!
+		mgr.running.Store(false) // AI Guard stopped!
 
 		hitl := NewHITLDispatcher(HITLDispatcherConfig{
 			Timeout:       2 * time.Second,
@@ -821,7 +821,7 @@ func TestGuardFilter_AgentToolGovernance_Modes(t *testing.T) {
 		}
 	})
 
-	// 3. ModeGuardedBlock: Blocks on threat, passes when safe, degrades gracefully when SLM is offline
+	// 3. ModeGuardedBlock: Blocks on threat, passes when safe, degrades gracefully when AI Guard is offline
 	t.Run("ModeGuardedBlock_ThreatAndDegradation", func(t *testing.T) {
 		mgr := &mockGuardManager{
 			callInspectFn: func(ctx context.Context, req *InspectionRequest) (*InspectionResult, error) {
@@ -851,15 +851,15 @@ func TestGuardFilter_AgentToolGovernance_Modes(t *testing.T) {
 			t.Errorf("expected 'Hard-Block' in message, got: %s", mcpErr.Message)
 		}
 
-		// SLM offline -> graceful degradation to L1-Only (passes through)
+		// AI Guard offline -> graceful degradation to L1-Only (passes through)
 		mgr.running.Store(false)
 		_, mcpErr = gf.FilterRequest(ctx, req)
 		if mcpErr != nil {
-			t.Errorf("expected graceful L1 fallback when SLM is offline, got: %v", mcpErr)
+			t.Errorf("expected graceful L1 fallback when AI Guard is offline, got: %v", mcpErr)
 		}
 	})
 
-	// 4. ModeGuardedHITL: Escalates on threat, degrades gracefully when SLM is offline
+	// 4. ModeGuardedHITL: Escalates on threat, degrades gracefully when AI Guard is offline
 	t.Run("ModeGuardedHITL_ThreatEscalationAndDegradation", func(t *testing.T) {
 		mgr := &mockGuardManager{
 			callInspectFn: func(ctx context.Context, req *InspectionRequest) (*InspectionResult, error) {
@@ -900,14 +900,14 @@ func TestGuardFilter_AgentToolGovernance_Modes(t *testing.T) {
 			t.Fatalf("expected operator approval to succeed, got: %v", mcpErr)
 		}
 
-		// SLM offline -> graceful degradation without prompting
+		// AI Guard offline -> graceful degradation without prompting
 		mgr.running.Store(false)
 		_, mcpErr = gf.FilterRequest(ctx, req)
 		if mcpErr != nil {
-			t.Errorf("expected graceful fallback when SLM offline, got: %v", mcpErr)
+			t.Errorf("expected graceful fallback when AI Guard offline, got: %v", mcpErr)
 		}
 		if len(hitl.ListPending()) != 0 {
-			t.Errorf("expected no pending HITL requests when SLM was offline, got %d", len(hitl.ListPending()))
+			t.Errorf("expected no pending HITL requests when AI Guard was offline, got %d", len(hitl.ListPending()))
 		}
 	})
 
@@ -935,7 +935,7 @@ func TestGuardFilter_AgentToolGovernance_Modes(t *testing.T) {
 }
 
 func TestGuardFilter_HumanSupremacy(t *testing.T) {
-	// L2 Threat simulation: SLM always flags tool execution as THREAT
+	// L2 Threat simulation: AI Guard always flags tool execution as THREAT
 	threatMgr := &mockGuardManager{
 		callInspectFn: func(ctx context.Context, req *InspectionRequest) (*InspectionResult, error) {
 			return &InspectionResult{
@@ -943,7 +943,7 @@ func TestGuardFilter_HumanSupremacy(t *testing.T) {
 				MaliciousProbability: 0.99,
 				ThreatDomain:         "COMMAND_INJECTION",
 				CWE:                  "CWE-78",
-				DecisionEngine:       "L2_SLM_TEST",
+				DecisionEngine:       "L2_AI_GUARD_TEST",
 			}, nil
 		},
 	}
@@ -992,7 +992,7 @@ func TestGuardFilter_HumanSupremacy(t *testing.T) {
 		if len(auditMeta.AuditedRules) == 0 {
 			t.Fatal("expected shadow audit telemetry to be recorded in audit metadata")
 		}
-		expectedOverride := "human_supremacy_override:L2_SLM_TEST:CWE-78"
+		expectedOverride := "human_supremacy_override:L2_AI_GUARD_TEST:CWE-78"
 		found := false
 		for _, r := range auditMeta.AuditedRules {
 			if r == expectedOverride {

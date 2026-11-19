@@ -128,11 +128,11 @@ func (p *ProtocolConfig) UnmarshalJSON(data []byte) error {
 type ToolGovernanceMode string
 
 const (
-	// ModeAutonomous bypasses L2 SLM neural inspection and HITL gates (<0.2ms fast path).
+	// ModeAutonomous bypasses L2 AI Guard neural inspection and HITL gates (<0.2ms fast path).
 	ModeAutonomous ToolGovernanceMode = "autonomous"
-	// ModeGuardedBlock inspects via L2 SLM; auto-blocks threat verdicts with -32004 without human prompting.
+	// ModeGuardedBlock inspects via L2 AI Guard; auto-blocks threat verdicts with -32004 without human prompting.
 	ModeGuardedBlock ToolGovernanceMode = "guarded_block"
-	// ModeGuardedHITL inspects via L2 SLM; safe executions pass, while threats escalate to dual-channel HITL approval.
+	// ModeGuardedHITL inspects via L2 AI Guard; safe executions pass, while threats escalate to dual-channel HITL approval.
 	ModeGuardedHITL ToolGovernanceMode = "guarded_hitl"
 	// ModeStrictAlwaysHITL unconditionally pauses execution and requests dual-channel human approval before every call.
 	ModeStrictAlwaysHITL ToolGovernanceMode = "strict_always_hitl"

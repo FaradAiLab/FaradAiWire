@@ -58,7 +58,7 @@ func (a *AdminServer) handleHostResources(w http.ResponseWriter, r *http.Request
 	_ = json.NewEncoder(w).Encode(res)
 }
 
-// collectHostResources samples cgroup/OS memory, swap, CPU load, and SLM engine RSS.
+// collectHostResources samples cgroup/OS memory, swap, CPU load, and AI Guard engine RSS.
 func collectHostResources(cgroupRoot string, activeModel *guard.Model) HostResources {
 	total, avail, used, isCgroup := resolveMemory(cgroupRoot)
 	swapTotal, swapUsed := resolveSwap()

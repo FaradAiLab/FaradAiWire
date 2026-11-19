@@ -8,13 +8,22 @@ export interface GatewayStatus {
   ingress_port?: number
   ingress_host?: string
   ingress_url?: string
-  slm_tier?: string
-  slm_status?: string
-  slm_model?: string
-  slm_endpoint?: string
-  slm_latency_ms?: number
+  guard_tier?: string
+  guard_status?: {
+    tier?: string
+    classifier_url?: string
+    model?: string
+    active?: boolean
+  }
+  guard_model?: string
+  guard_endpoint?: string
+  guard_latency_ms?: number
   auto_sync_mcp?: boolean
   hot_reload?: boolean
+}
+
+export function isGuardActive(status?: GatewayStatus | null): boolean {
+  return status?.guard_tier === 'neural_active' || Boolean(status?.guard_status?.active)
 }
 
 export interface SettingMeta {

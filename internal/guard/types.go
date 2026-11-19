@@ -31,7 +31,7 @@ type InspectionRequest struct {
 	EnableL1Cascade  bool                   `json:"enable_l1_cascade,omitempty"`
 }
 
-// InspectionResult represents the threat verdict and telemetry scoring returned by the guard SLM.
+// InspectionResult represents the threat verdict and telemetry scoring returned by AI Guard.
 type InspectionResult struct {
 	Verdict              string  `json:"verdict"` // "BENIGN", "BLOCKED", "SUSPICIOUS"
 	MaliciousProbability float64 `json:"malicious_probability"`
@@ -53,7 +53,7 @@ type ProcessStatus struct {
 	StartedAt    *time.Time `json:"started_at,omitempty"`
 }
 
-// Manager defines the operational lifecycle and execution contract for SLM guards.
+// Manager defines the operational lifecycle and execution contract for AI Guard engines.
 type Manager interface {
 	Start(ctx context.Context, model *Model) error
 	StartScript(ctx context.Context, scriptPath string, modelID string) error

@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import {
   X,
   RefreshCw,
@@ -12,7 +12,7 @@ import {
 } from 'lucide-react'
 import { api } from '../api'
 
-interface SLMConnectionModalProps {
+interface GuardConnectionModalProps {
   isOpen: boolean
   onClose: () => void
   onSuccess: (msg: string) => void
@@ -29,7 +29,7 @@ interface ProbeResultState {
   error?: string
 }
 
-export const SLMConnectionModal: React.FC<SLMConnectionModalProps> = ({
+export const GuardConnectionModal: React.FC<GuardConnectionModalProps> = ({
   isOpen,
   onClose,
   onSuccess,
@@ -42,6 +42,19 @@ export const SLMConnectionModal: React.FC<SLMConnectionModalProps> = ({
   const [probeResult, setProbeResult] = useState<ProbeResultState | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!isOpen) return
+    closeButtonRef.current?.focus()
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isOpen, onClose])
 
   if (!isOpen) return null
 
@@ -50,7 +63,7 @@ export const SLMConnectionModal: React.FC<SLMConnectionModalProps> = ({
       setIsProbing(true)
       setErrorMsg(null)
       setProbeResult(null)
-      const res = await api.probeSLM()
+      const res = await api.probeGuard()
       const data = res as Record<string, unknown>
       setProbeResult({
         detected: Boolean(data.detected),
@@ -90,7 +103,7 @@ export const SLMConnectionModal: React.FC<SLMConnectionModalProps> = ({
         effectiveClassifierURL = dockerURL.trim()
       }
 
-      await api.configureSLM({
+      await api.configureGuard({
         mode,
         ollama_url: ollamaURL.trim(),
         docker_url: dockerURL.trim(),
@@ -113,7 +126,7 @@ export const SLMConnectionModal: React.FC<SLMConnectionModalProps> = ({
       <div
         role="dialog"
         aria-modal="true"
-        aria-labelledby="slm-modal-title"
+        aria-labelledby="guard-modal-title"
         className="bg-surface border border-subtle rounded-2xl max-w-xl w-full p-6 shadow-2xl relative overflow-hidden flex flex-col gap-5 text-primary"
       >
         {/* Header */}
@@ -123,8 +136,8 @@ export const SLMConnectionModal: React.FC<SLMConnectionModalProps> = ({
               <Sliders className="w-5 h-5" />
             </div>
             <div>
-              <h2 id="slm-modal-title" className="text-base font-bold text-primary">
-                Semantic Security Guard Connection
+              <h2 id="guard-modal-title" className="text-base font-bold text-primary">
+                AI Guard Connection
               </h2>
               <p className="text-xs text-muted">
                 Configure decoupled Ollama, Docker container, or remote OpenAI-compatible provider
@@ -132,7 +145,9 @@ export const SLMConnectionModal: React.FC<SLMConnectionModalProps> = ({
             </div>
           </div>
           <button
+            ref={closeButtonRef}
             type="button"
+            aria-label="Close AI Guard dialog"
             onClick={onClose}
             className="p-1.5 rounded-lg text-muted hover:text-primary hover:bg-subtle transition-colors"
           >

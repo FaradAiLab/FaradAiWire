@@ -1,6 +1,6 @@
 ---
 title: "Common Issues & Troubleshooting"
-description: "Resolving port conflicts, SSE connection drops, SLM timeouts, and SSRF loopback blocking."
+description: "Resolving port conflicts, SSE connection drops, AI Guard timeouts, and SSRF loopback blocking."
 ---
 
 # Common Issues & Troubleshooting 🩺
@@ -9,21 +9,21 @@ This guide provides immediate diagnostic steps and solutions for frequent operat
 
 ---
 
-## 1. Port Conflict (`EADDRINUSE` on Port 8090 or 8095)
+## 1. Port Conflict (`EADDRINUSE` on Port 19410 or 19415)
 
 **Symptom:**
 ```text
-Error: listen tcp 127.0.0.1:8090: bind: address already in use
+Error: listen tcp 127.0.0.1:19410: bind: address already in use
 ```
 
 **Diagnosis & Fix:**
-Another instance of FaradAiWire or another application is using Port 8090 or 8095.
+Another instance of FaradAiWire or another application is using Port 19410 or 19415.
 1. Identify the blocking process:
-   - **macOS / Linux:** `lsof -i :8090` or `lsof -i :8095`
-   - **Windows:** `netstat -ano | findstr :8090`
+   - **macOS / Linux:** `lsof -i :19410` or `lsof -i :19415`
+   - **Windows:** `netstat -ano | findstr :19410`
 2. Terminate the stale process, or start FaradAiWire on alternative ports:
    ```bash
-   faradaiwire run --port 9090 --admin-port 9095
+   faradaiwire run --port 19420 --admin-port 19425
    ```
 
 ---
@@ -60,7 +60,7 @@ FaradAiWire blocks private IP ranges by default to prevent attackers from target
 
 ---
 
-## 4. SLM Guard Latency Timeout
+## 4. AI Guard Latency Timeout
 
 **Symptom:**
 ```text
@@ -73,7 +73,7 @@ FaradAiWire blocks private IP ranges by default to prevent attackers from target
    ```bash
    ollama ps
    ```
-3. In `config.yaml`, increase `timeout_ms` under `filters.guard` (e.g. `timeout_ms: 3000`).
+3. In the Web Console (**Settings → Guard**) or via `POST /admin/settings`, increase `guard.timeout_ms` (warm SLA, default `1000` ms) or `guard.cold_timeout_ms` (initial model load SLA, default `3000` ms).
 
 ---
 

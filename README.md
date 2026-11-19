@@ -42,7 +42,7 @@ graph TD
     Operator[Admin / Browser] -->|Dashboard / REST API| P2
     P1 --> Router
     Router -->|Fast Path: Prefill, RateLimit, LoopProtection, Schema, DLP| Pipeline
-    Router -->|Deep Path: + SLM Injection Scanner, Guard, HITL| Pipeline
+    Router -->|Deep Path: + AI Guard Injection Scanner, HITL| Pipeline
     Pipeline -->|Tamper-evident log| Telemetry
     Pipeline -->|SSRF-Safe Dial| RemoteMCP
     Pipeline -->|Process Group Isolation| StdioMCP
@@ -93,19 +93,19 @@ make dev
 
 ---
 
-## 🛡️ Neural Prompt Injection Guard (Optional SLM Boost)
+## 🛡️ AI Guard (Deep-Path Prompt Injection Protection)
 
 Out of the box, FaradAiWire inspects tool traffic with **sub-millisecond static heuristics & regex (<1ms)**. 
-To elevate defense against complex zero-day indirect prompt injections and jailbreaks using a local Small Language Model (SLM):
+To elevate defense against complex zero-day indirect prompt injections and jailbreaks using a local **AI Guard** model (via FaradAiGuard):
 
 1. **Start your preferred local inference engine:**
-   - **Docker Sidecar:**
+   - **Docker Sidecar (FaradAiGuard):**
      ```bash
-     docker run -d -p 8088:8088 ghcr.io/faradailab/prompt-guard:latest
+     docker run -d -p 8088:8088 ghcr.io/faradailab/farad-ai-guard:qwen3guard
      ```
    - **Local Ollama:**
      ```bash
-     ollama run llama-guard3:1b
+     ollama run hf.co/faradailab/guard-qwen3guard
      ```
 
 2. **Diagnose and link in one command:**

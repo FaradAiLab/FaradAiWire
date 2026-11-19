@@ -109,7 +109,7 @@ func TestPipeline_GuardFilter_EndToEndCascade(t *testing.T) {
 		t.Errorf("expected 0 inspect calls for non-tools/call, got %d", mgr.inspectCount.Load())
 	}
 
-	// 2. Fast-Path tool under 128 chars -> Bypasses L2 SLM
+	// 2. Fast-Path tool under 128 chars -> Bypasses L2 AI Guard
 	reqFastPath := &mcp.Request{
 		JSONRPC: "2.0",
 		Method:  "tools/call",
@@ -155,7 +155,7 @@ func TestPipeline_GuardFilter_EndToEndCascade(t *testing.T) {
 		t.Errorf("expected error code -32004, got %d", errL1.Code)
 	}
 	if mgr.inspectCount.Load() != 0 {
-		t.Errorf("CRITICAL: L2 SLM was invoked on L1 fast block! Zero GPU overhead violated")
+		t.Errorf("CRITICAL: L2 AI Guard was invoked on L1 fast block! Zero GPU overhead violated")
 	}
 
 	// 5. Language-Agnostic Adaptive Path Promotion -> Promotes Fast-Path with >128 chars & >5 words to L2
@@ -172,7 +172,7 @@ func TestPipeline_GuardFilter_EndToEndCascade(t *testing.T) {
 		t.Fatalf("expected promoted clean request to pass, got: %v", errPromoted)
 	}
 	if mgr.inspectCount.Load() != 1 {
-		t.Errorf("expected exactly 1 L2 SLM inspection call for promoted request, got %d", mgr.inspectCount.Load())
+		t.Errorf("expected exactly 1 L2 AI Guard inspection call for promoted request, got %d", mgr.inspectCount.Load())
 	}
 
 	// 6. L2 Semantic Block -> Intercepts threat and terminates with -32004
@@ -197,7 +197,7 @@ func TestPipeline_GuardFilter_EndToEndCascade(t *testing.T) {
 		t.Errorf("expected threat domain and CWE in error message: %s", errL2.Message)
 	}
 	if mgr.inspectCount.Load() != 1 {
-		t.Errorf("expected exactly 1 L2 SLM inspection for deep-path call, got %d", mgr.inspectCount.Load())
+		t.Errorf("expected exactly 1 L2 AI Guard inspection for deep-path call, got %d", mgr.inspectCount.Load())
 	}
 
 	// 7. Non-Critical Tool Triggers Dual-Channel HITL Escalation -> Operator Approves -> Forwards to upstream target

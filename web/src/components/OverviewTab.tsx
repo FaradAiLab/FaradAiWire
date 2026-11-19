@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { ShieldCheck, Sliders, Server, Cpu, Trash2, RefreshCw, CheckCircle2, AlertTriangle, Zap, Settings, Network } from 'lucide-react'
-import { GatewayStatus, ProtocolItem } from '../types'
+import { GatewayStatus, ProtocolItem, isGuardActive } from '../types'
 import { api } from '../api'
-import { SLMConnectionModal } from './SLMConnectionModal'
+import { GuardConnectionModal } from './GuardConnectionModal'
 
 interface OverviewTabProps {
   status: GatewayStatus | null
@@ -13,9 +13,9 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
   const [clearingSchemas, setClearingSchemas] = useState(false)
   const [reloading, setReloading] = useState(false)
   const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
-  const [probingSLM, setProbingSLM] = useState(false)
-  const [slmProbeResult, setSlmProbeResult] = useState<string | null>(null)
-  const [isSLMModalOpen, setIsSLMModalOpen] = useState(false)
+  const [probingGuard, setProbingGuard] = useState(false)
+  const [guardProbeResult, setGuardProbeResult] = useState<string | null>(null)
+  const [isGuardModalOpen, setIsGuardModalOpen] = useState(false)
 
   // Connected Tool Sources (Protocols) live health state
   const [protocols, setProtocols] = useState<ProtocolItem[]>([])
@@ -98,22 +98,22 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
     }
   }
 
-  const handleProbeSLM = async () => {
+  const handleProbeGuard = async () => {
     try {
-      setProbingSLM(true)
-      setSlmProbeResult(null)
-      const res = await api.probeSLM()
-      setSlmProbeResult(JSON.stringify(res, null, 2))
+      setProbingGuard(true)
+      setGuardProbeResult(null)
+      const res = await api.probeGuard()
+      setGuardProbeResult(JSON.stringify(res, null, 2))
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
-      setSlmProbeResult(`Probe failed: ${msg}`)
+      setGuardProbeResult(`Probe failed: ${msg}`)
     } finally {
-      setProbingSLM(false)
+      setProbingGuard(false)
     }
   }
 
   const activeFilters = status?.active_filters || []
-  const slmActive = status?.slm_tier === 'neural_active' || status?.slm_status === 'active'
+  const guardActive = isGuardActive(status)
 
   return (
     <div className="space-y-6">
@@ -193,19 +193,19 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
             </div>
             <div>
               <h3 className="font-bold text-base text-gray-900 dark:text-gray-100 flex items-center gap-2">
-                Semantic Security Guard (Active Engine)
+                AI Guard (Active Engine)
                 <span
                   className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full ${
-                    slmActive
+                    guardActive
                       ? 'bg-emerald-50 text-emerald-800 border border-emerald-200 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-500/30'
                       : 'bg-amber-50 text-amber-800 border border-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-500/30'
                   }`}
                 >
-                  {slmActive ? 'ACTIVE' : 'STANDBY'}
+                  {guardActive ? 'ACTIVE' : 'STANDBY'}
                 </span>
               </h3>
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                Zero-egress offline neural guard with full-duplex L1 cascade and Root Intent Isolation
+                Zero-egress offline AI Guard with full-duplex L1 cascade and Root Intent Isolation
               </p>
             </div>
           </div>
@@ -213,7 +213,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => setIsSLMModalOpen(true)}
+              onClick={() => setIsGuardModalOpen(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-gray-100 hover:bg-gray-200 text-gray-800 border border-gray-300 dark:bg-gray-800 dark:hover:bg-gray-700 dark:text-gray-200 dark:border-white/10 transition-all shadow-xs"
             >
               <Settings className="w-3.5 h-3.5 text-accent" />
@@ -222,12 +222,12 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
 
             <button
               type="button"
-              onClick={handleProbeSLM}
-              disabled={probingSLM}
+              onClick={handleProbeGuard}
+              disabled={probingGuard}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-600/20 dark:hover:bg-emerald-600/30 dark:text-emerald-300 dark:border-emerald-500/30 transition-all disabled:opacity-50 shadow-xs"
             >
-              <Zap className={`w-3.5 h-3.5 ${probingSLM ? 'animate-pulse text-emerald-600 dark:text-emerald-400' : ''}`} />
-              <span>{probingSLM ? 'Probing...' : 'Live Probe Guard'}</span>
+              <Zap className={`w-3.5 h-3.5 ${probingGuard ? 'animate-pulse text-emerald-600 dark:text-emerald-400' : ''}`} />
+              <span>{probingGuard ? 'Probing...' : 'Live Probe Guard'}</span>
             </button>
           </div>
         </div>
@@ -235,21 +235,21 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono bg-gray-50 dark:bg-dark-bg/50 p-4 rounded-xl border border-gray-200 dark:border-white/5">
           <div>
             <span className="text-gray-500 dark:text-gray-400">Model: </span>
-            <span className="text-gray-900 dark:text-gray-200 font-semibold">{status?.slm_model || 'Qwen3Guard-0.6B (Local)'}</span>
+            <span className="text-gray-900 dark:text-gray-200 font-semibold">{status?.guard_model || 'Qwen3Guard-0.6B (Local)'}</span>
           </div>
           <div>
             <span className="text-gray-500 dark:text-gray-400">Engine Mode: </span>
-            <span className="text-gray-900 dark:text-gray-200 font-semibold">{status?.slm_endpoint || 'In-Process / Zero-Egress'}</span>
+            <span className="text-gray-900 dark:text-gray-200 font-semibold">{status?.guard_endpoint || 'In-Process / Zero-Egress'}</span>
           </div>
           <div>
             <span className="text-gray-500 dark:text-gray-400">Latency: </span>
-            <span className="text-emerald-700 dark:text-emerald-400 font-semibold">{status?.slm_latency_ms ? `${status.slm_latency_ms} ms` : '< 25 ms (Local)'}</span>
+            <span className="text-emerald-700 dark:text-emerald-400 font-semibold">{status?.guard_latency_ms ? `${status.guard_latency_ms} ms` : '< 25 ms (Local)'}</span>
           </div>
         </div>
 
-        {slmProbeResult && (
+        {guardProbeResult && (
           <div className="mt-3 p-3.5 rounded-xl bg-[#0F172A] border border-gray-800 text-xs font-mono text-emerald-400 max-h-40 overflow-y-auto">
-            <pre>{slmProbeResult}</pre>
+            <pre>{guardProbeResult}</pre>
           </div>
         )}
       </div>
@@ -368,9 +368,9 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
         </div>
       </div>
 
-      <SLMConnectionModal
-        isOpen={isSLMModalOpen}
-        onClose={() => setIsSLMModalOpen(false)}
+      <GuardConnectionModal
+        isOpen={isGuardModalOpen}
+        onClose={() => setIsGuardModalOpen(false)}
         onSuccess={(msg) => {
           setActionMessage({ type: 'success', text: msg })
           onRefresh()

@@ -9,8 +9,6 @@ description: "Halt destructive or irreversible tool executions for real-time int
 
 Autonomous agents can call tools that are destructive or irreversible (dropping records, sending email, moving money). The `hitl` filter pauses a `tools/call` request for any tool listed in `destructive_tools` and waits for a human decision before the call is forwarded upstream. It fails closed: a denial, a timeout, or the absence of any operator channel all reject the call.
 
-Related decisions: [ADR-0036](../adr/0036-unified-agent-tool-governance-and-hitl-action-matrix.md), [ADR-0040](../adr/0040-flb-rule-ingestion-first-class-hitl-action-and-canonicalization.md), [ADR-0054](../adr/0054-cross-platform-generic-filter-persistence-and-hitl-resolution.md).
-
 ## How it works
 
 1. The filter only acts on `tools/call` requests. Every other method passes through untouched.
@@ -82,7 +80,7 @@ The request is held open until the receiver answers. The response must be HTTP `
 
 - Order constant: `OrderHITL = 70` in `pkg/filter/filter.go`. It runs after rate limiting (10), loop protection (15), schema validation (30), DLP (50) and Guard (55), so only requests that survived those checks reach a human.
 - Request path only. `ExecuteResponse` and `FilterResponse` are pass-throughs.
-- The filter is built only when `filters.hitl.enabled` is true. It can also be toggled at runtime from the Admin Web Console; the toggle is stored as a sparse overlay in DuckDB `system_settings` and `config.yaml` is not rewritten (ADR-0053/0054).
+- The filter is built only when `filters.hitl.enabled` is true. It can also be toggled at runtime from the Admin Web Console; the toggle is stored as a sparse overlay in DuckDB `system_settings` and `config.yaml` is not rewritten.
 
 ## Configuration
 

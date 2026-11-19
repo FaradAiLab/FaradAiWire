@@ -5,7 +5,7 @@ description: "How FaradAiWire executes in-memory filters, assigns precedence, an
 
 # Security Filter Pipeline Overview 🛡️
 
-At the heart of FaradAiWire is an encapsulated, extensible security filter pipeline ([ADR-0014](../adr/0014-encapsulated-filter-pipeline-builder.md)). Every message received at the Proxy Ingress port (`8090`) traverses a deterministic chain of filters before tool execution is permitted.
+At the heart of FaradAiWire is an encapsulated, extensible security filter pipeline. Every message received at the Proxy Ingress port (`19410`) traverses a deterministic chain of filters before tool execution is permitted.
 
 ```mermaid
 graph LR
@@ -41,7 +41,7 @@ Each control has its own page with the exact behavior, every configurable value 
 | Loop Protection | `loop_protection` | [Loop Protection](/docs/wire/03-security-filters/loop-protection/) |
 | Schema Validation | `schema_validation` | [Schema Validation](/docs/wire/03-security-filters/schema-validation/) |
 | Data Loss Prevention | `dlp` | [DLP](/docs/wire/03-security-filters/dlp/) |
-| Semantic Guard | `guard` | [Neural Prompt Guard](/docs/wire/03-security-filters/prompt-guard/) |
+| AI Guard | `guard` | [AI Guard](/docs/wire/03-security-filters/prompt-guard/) |
 | Human-In-The-Loop | `hitl` | [HITL](/docs/wire/03-security-filters/hitl/) |
 
 ---
@@ -55,10 +55,10 @@ Filters execute in strict ascending numerical order. If a lower-numbered filter 
 | `OrderPrefill` | `5` | `prefill_block` | Blocks requests whose message history ends with an assistant message (sockpuppeting) |
 | `OrderRateLimit` | `10` | `rate_limiting` | Token-bucket limiter for tool calls |
 | `OrderLoopProtection` | `15` | `loop_protection` | Detects repeated identical tool calls inside a sliding window |
-| `OrderPolicy` | `20` | `policy` | Enterprise ABAC or custom policy hook ([ADR-0050](../adr/0050-absolute-opa-purge-and-open-core-policy-decoupling.md)) |
+| `OrderPolicy` | `20` | `policy` | Enterprise ABAC or custom policy hook |
 | `OrderSchemaValidation` | `30` | `schema_validation` | JSON schema validation of tool arguments and schema baseline tracking |
 | `OrderDLP` | `50` | `dlp` | Regex scanner for credentials, private keys and PII |
-| `OrderGuard` | `55` | `guard` | Regex tier plus local SLM classifier for prompt injection |
+| `OrderGuard` | `55` | `guard` | Regex tier plus local AI Guard model for prompt injection |
 | `OrderInjectionScanner` | `60` | reserved | Constant for prompt injection scanning |
 | `OrderHITL` | `70` | `hitl` | Interactive operator confirmation for destructive tools |
 

@@ -31,7 +31,7 @@ func (a *AdminServer) getGuardInstaller() guard.ModelInstaller {
 	return a.guardInstaller
 }
 
-// handleGuardStatus reports the runtime status of the child SLM Stdio guard subprocess.
+// handleGuardStatus reports the runtime status of the child AI Guard stdio subprocess.
 // Endpoint:
 //   GET /admin/guards/status
 func (a *AdminServer) handleGuardStatus(w http.ResponseWriter, r *http.Request) {

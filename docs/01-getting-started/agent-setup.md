@@ -11,7 +11,7 @@ FaradAiWire sits as an inline Policy Enforcement Point (PEP) between your AI age
 sequenceDiagram
     autonumber
     participant Agent as AI Agent (Claude / Cursor)
-    participant PEP as FaradAiWire PEP (:8090)
+    participant PEP as FaradAiWire PEP (:19410)
     participant Tool as Upstream MCP Server
     
     Agent->>PEP: POST /message (tools/call payload + Bearer Auth)
@@ -30,13 +30,13 @@ sequenceDiagram
 
 ## Connection Endpoints & Authentication
 
-All agent tool traffic must target FaradAiWire's **Proxy Ingress Port (8090)**:
+All agent tool traffic must target FaradAiWire's **Proxy Ingress Port (19410)**:
 
 | Parameter | Value | Notes |
 | :--- | :--- | :--- |
-| **Ingress Base URL** | `http://127.0.0.1:8090` | Never connect agents to Admin Port `8095` |
-| **SSE Endpoint** | `http://127.0.0.1:8090/sse` | For persistent Server-Sent Events transports |
-| **Message Endpoint** | `http://127.0.0.1:8090/message` | For standard HTTP POST JSON-RPC 2.0 frames |
+| **Ingress Base URL** | `http://127.0.0.1:19410` | Never connect agents to Admin Port `19415` |
+| **SSE Endpoint** | `http://127.0.0.1:19410/sse` | For persistent Server-Sent Events transports |
+| **Message Endpoint** | `http://127.0.0.1:19410/message` | For standard HTTP POST JSON-RPC 2.0 frames |
 | **Authorization Header** | `Authorization: Bearer <API_KEY>` | Matches `api_keys` in `config.yaml` or default dev key |
 
 ---
@@ -51,7 +51,7 @@ Edit `~/.claude.json` (or project-level `.claude.json`):
 {
   "mcpServers": {
     "faradaiwire-gateway": {
-      "url": "http://127.0.0.1:8090/sse",
+      "url": "http://127.0.0.1:19410/sse",
       "headers": {
         "Authorization": "Bearer dev-local-key",
         "X-Farad-Agent": "claude-code"
@@ -79,7 +79,7 @@ Open **Cursor Settings** $\to$ **Features** $\to$ **MCP Servers**, or edit `.cur
 {
   "mcpServers": {
     "faradaiwire": {
-      "url": "http://127.0.0.1:8090/sse",
+      "url": "http://127.0.0.1:19410/sse",
       "headers": {
         "Authorization": "Bearer dev-local-key",
         "X-Farad-Agent": "cursor-agent"
@@ -89,7 +89,7 @@ Open **Cursor Settings** $\to$ **Features** $\to$ **MCP Servers**, or edit `.cur
 }
 ```
 
-Reload Cursor's MCP panel; a green indicator will confirm the connection to port 8090.
+Reload Cursor's MCP panel; a green indicator will confirm the connection to port 19410.
 
 ---
 
@@ -107,7 +107,7 @@ Add the gateway entry:
 {
   "mcpServers": {
     "faradaiwire-pep": {
-      "url": "http://127.0.0.1:8090/sse",
+      "url": "http://127.0.0.1:19410/sse",
       "headers": {
         "Authorization": "Bearer dev-local-key",
         "X-Farad-Agent": "claude-desktop"
@@ -129,7 +129,7 @@ In Windsurf, open `~/.codeium/windsurf/mcp_config.json` and configure:
 {
   "mcpServers": {
     "faradaiwire": {
-      "serverUrl": "http://127.0.0.1:8090/sse",
+      "serverUrl": "http://127.0.0.1:19410/sse",
       "headers": {
         "Authorization": "Bearer dev-local-key",
         "X-Farad-Agent": "windsurf"
@@ -148,7 +148,7 @@ If you are building custom autonomous agents or LLM runners in Python, invoke MC
 ```python
 import requests
 
-GATEWAY_URL = "http://127.0.0.1:8090/message"
+GATEWAY_URL = "http://127.0.0.1:19410/message"
 API_KEY = "dev-local-key"
 
 headers = {
@@ -191,7 +191,7 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 
 async function runSecureAgent() {
   const transport = new SSEClientTransport(
-    new URL("http://127.0.0.1:8090/sse"),
+    new URL("http://127.0.0.1:19410/sse"),
     {
       eventSourceInit: {
         headers: {
@@ -237,7 +237,7 @@ When managing multiple agent roles on the same workstation or team cluster, Fara
 ## Verifying in the Web Console
 
 Once your agent is configured and executes its first tool call:
-1. Open **`http://localhost:8095/admin/dashboard`**.
+1. Open **`http://localhost:19415/admin/dashboard`**.
 2. Navigate to **Agent Studio** or **Live Audit Stream**.
 3. Confirm that the incoming session is identified with the agent name (`claude-code`, `cursor-agent`, etc.), showing active tool schemas and security inspection verdicts in real-time.
 

@@ -5,7 +5,7 @@ description: "Command-line interface commands, global flags, and exit codes for 
 
 # CLI Command Reference Overview 💻
 
-The `faradaiwire` binary provides a comprehensive command-line interface for daemon execution, environment health diagnostics, static skill security auditing, and local SLM guard management.
+The `faradaiwire` binary provides a comprehensive command-line interface for daemon execution, environment health diagnostics, static skill security auditing, and local AI Guard management.
 
 ---
 
@@ -18,9 +18,9 @@ Commands:
   run       Start the FaradAiWire PEP gateway daemon
   connect   Register a downstream stdio or SSE MCP server in faradaiwire.yaml
   adopt     Discover and securely wrap local MCP clients to route through FaradAiWire
-  doctor    Diagnose system health, port bindings, and discover local SLM inference engines
+  doctor    Diagnose system health, port bindings, and discover local AI Guard inference engines
   audit     Perform static security analysis on agent skill directories or MCP packages
-  guard     Inspect and manage local Small Language Models (list, status, install, uninstall)
+  guard     Inspect and manage local AI Guard models (list, status, install, uninstall)
   version   Display version, git commit hash, and build architecture
 ```
 

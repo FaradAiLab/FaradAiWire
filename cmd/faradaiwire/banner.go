@@ -12,7 +12,7 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
-	"github.com/FaradAiLab/FaradAiWire/internal/slmprobe"
+	"github.com/FaradAiLab/FaradAiWire/internal/guardprobe"
 )
 
 // isInteractiveTerminal returns true if stdout is an interactive character device and not a CI pipeline.
@@ -35,7 +35,7 @@ func statusTag(enabled bool) string {
 	return "[DISABLED]"
 }
 
-// printStartupBanner renders a developer-friendly status summary and contextual SLM hints.
+// printStartupBanner renders a developer-friendly status summary and contextual AI Guard hints.
 func printStartupBanner(cfg *config.Config, out io.Writer) {
 	adminScheme := "http"
 	if cfg != nil && cfg.AdminTLS.Enabled {
@@ -54,9 +54,9 @@ func printStartupBanner(cfg *config.Config, out io.Writer) {
 	loopOrRate := cfg.Filters.LoopProtection.Enabled || cfg.Filters.RateLimiting.Enabled
 	fmt.Fprintf(out, "    ├── Loop & Rate Protection   : %s\n", statusTag(loopOrRate))
 
-	// Prompt Injection Scanner & SLM Discovery Hint
+	// AI Guard Discovery Hint
 	if !cfg.Filters.InjectionScanner.Enabled {
-		fmt.Fprintln(out, "    └── Prompt Injection Scanner : [DISABLED]")
+		fmt.Fprintln(out, "    └── AI Guard                 : [DISABLED]")
 		fmt.Fprintln(out)
 		return
 	}
@@ -65,11 +65,13 @@ func printStartupBanner(cfg *config.Config, out io.Writer) {
 	probeCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	probeRes := slmprobe.Probe(probeCtx, classifierURL)
+	probeRes := guardprobe.Probe(probeCtx, classifierURL)
 
 	// Check local DuckDB Model Catalog (GUARD-001 / DEC-01)
 	dbPath := cfg.GetTelemetryDBPath()
-	models, _ := fetchModelsFromDuckDB(context.Background(), dbPath)
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer dbCancel()
+	models, _ := fetchModelsFromDuckDB(dbCtx, dbPath)
 	var activeGuardModel *guard.Model
 	for _, m := range models {
 		if m.IsActive {
@@ -79,23 +81,23 @@ func printStartupBanner(cfg *config.Config, out io.Writer) {
 	}
 
 	if activeGuardModel != nil {
-		fmt.Fprintf(out, "    └── SLM Security Guard       : [ACTIVE - NEURAL] (%s, %.1f%%)\n", activeGuardModel.Name, activeGuardModel.BenchmarkAccuracy*100)
+		fmt.Fprintf(out, "    └── AI Guard                 : [ACTIVE - NEURAL] (%s, %.1f%%)\n", activeGuardModel.Name, activeGuardModel.BenchmarkAccuracy*100)
 	} else if probeRes.ConfiguredActive {
 		modelStr := ""
 		if probeRes.ModelName != "" {
 			modelStr = fmt.Sprintf(" (%s, %dms)", probeRes.ModelName, probeRes.LatencyMs)
 		}
-		fmt.Fprintf(out, "    └── Prompt Injection Scanner : [ACTIVE - NEURAL]%s\n", modelStr)
+		fmt.Fprintf(out, "    └── AI Guard                 : [ACTIVE - NEURAL]%s\n", modelStr)
 	} else {
-		fmt.Fprintln(out, "    └── Prompt Injection Scanner : [STANDBY - REGEX]")
+		fmt.Fprintln(out, "    └── AI Guard                 : [STANDBY - REGEX]")
 		if probeRes.Detected {
 			providerName := "Ollama"
-			if probeRes.DetectedProvider == slmprobe.ProviderPromptGuard {
-				providerName = "Docker Prompt-Guard"
+			if probeRes.DetectedProvider == guardprobe.ProviderPromptGuard {
+				providerName = "Docker FaradAiGuard"
 			}
-			fmt.Fprintf(out, "        ↳ 💡 Hint: Detected local %s on %s. Run 'faradai doctor' to activate neural guard.\n", providerName, probeRes.DetectedURL)
+			fmt.Fprintf(out, "        ↳ 💡 Hint: Detected local %s on %s. Run 'faradaiwire doctor' to activate AI Guard.\n", providerName, probeRes.DetectedURL)
 		} else {
-			fmt.Fprintln(out, "        ↳ 💡 Hint: Running with fast regex guard. Connect local SLM models ('faradai guard list') or Docker ('faradai doctor').")
+			fmt.Fprintln(out, "        ↳ 💡 Hint: Running with fast regex guard. Connect local AI Guard models ('faradaiwire guard list') or Docker ('faradaiwire doctor').")
 		}
 	}
 	fmt.Fprintln(out)

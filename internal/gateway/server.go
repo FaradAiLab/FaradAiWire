@@ -535,7 +535,7 @@ func (s *Server) doShutdown(ctx context.Context) error {
 		s.stdioProxy.Stop()
 	}
 
-	// Terminate active SLM Stdio guard subprocess if running
+	// Terminate active AI Guard Stdio subprocess if running
 	if s.guardManager != nil {
 		if err := s.guardManager.Stop(ctx); err != nil {
 			shutdownErrs = append(shutdownErrs, fmt.Errorf("guard manager stop: %w", err))
@@ -748,21 +748,21 @@ func (s *Server) IsStarted() bool {
 	return s.isStarted.Load()
 }
 
-// GuardCatalog returns the persistent SLM guard model catalog.
+// GuardCatalog returns the persistent AI Guard model catalog.
 func (s *Server) GuardCatalog() guard.CatalogStore {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.guardCatalog
 }
 
-// GuardManager returns the active SLM Stdio subprocess manager.
+// GuardManager returns the active AI Guard Stdio subprocess manager.
 func (s *Server) GuardManager() guard.Manager {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.guardManager
 }
 
-// GuardInstaller returns the active SLM guard model installer.
+// GuardInstaller returns the active AI Guard model installer.
 func (s *Server) GuardInstaller() guard.ModelInstaller {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

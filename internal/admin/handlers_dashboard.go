@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,9 +14,16 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
-	"github.com/FaradAiLab/FaradAiWire/internal/slmprobe"
+	"github.com/FaradAiLab/FaradAiWire/internal/guardprobe"
 	"github.com/FaradAiLab/FaradAiWire/web"
 )
+
+func writeDashboardJSON(w http.ResponseWriter, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		slog.Warn("Failed to encode admin JSON response", "error", err)
+	}
+}
 
 func (a *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	web.Handler().ServeHTTP(w, r)
@@ -98,41 +106,41 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	gatewayID := strings.TrimSpace(os.Getenv("GATEWAY_ID"))
 
 	classifierURL := ""
-	slmTier := "disabled"
-	slmStatus := "standby"
-	slmModel := "L1 Static Rules (Fallback)"
-	slmEndpoint := "In-Memory Precompiled Regex"
-	var slmLatencyMS float64 = 0.2
+	guardTier := "disabled"
+	guardStatus := "standby"
+	guardModel := "L1 Static Rules (Fallback)"
+	guardEndpoint := "In-Memory Precompiled Regex"
+	var guardLatencyMS float64 = 0.2
 
-	// Priority 1: Check active running SLM Guard (Laya MLX, Qwen3Guard, Granite Guardian)
+	// Priority 1: Check active running AI Guard (Qwen3Guard, Mica, Granite Guardian)
 	if mgr != nil && mgr.IsRunning() {
 		procStatus := mgr.Status()
-		slmTier = "neural_active"
-		slmStatus = "active"
-		slmModel = procStatus.ModelID
-		slmEndpoint = fmt.Sprintf("stdio:%s (PID %d)", procStatus.ModelID, procStatus.PID)
-		slmLatencyMS = 24.2
+		guardTier = "neural_active"
+		guardStatus = "active"
+		guardModel = procStatus.ModelID
+		guardEndpoint = fmt.Sprintf("stdio:%s (PID %d)", procStatus.ModelID, procStatus.PID)
+		guardLatencyMS = 24.2
 		if catalog != nil && r != nil {
 			if m, err := catalog.Get(r.Context(), procStatus.ModelID); err == nil && m != nil {
-				slmModel = m.Name
+				guardModel = m.Name
 				if m.BenchmarkAvgLatencyMS > 0 {
-					slmLatencyMS = m.BenchmarkAvgLatencyMS
+					guardLatencyMS = m.BenchmarkAvgLatencyMS
 				}
 			}
 		}
-		classifierURL = slmEndpoint
+		classifierURL = guardEndpoint
 	} else if injScannerEnabled {
-		// Priority 2: Check legacy/external HTTP classifier URL
+		// Priority 2: Check external HTTP classifier URL
 		classifierURL = strings.TrimSpace(injClassifierURL)
 		if classifierURL != "" {
-			slmTier = "neural_active"
-			slmStatus = "active"
-			slmModel = "External HTTP Classifier"
-			slmEndpoint = redactURLCredentials(classifierURL)
-			slmLatencyMS = 15.0
+			guardTier = "neural_active"
+			guardStatus = "active"
+			guardModel = "External HTTP Classifier"
+			guardEndpoint = redactURLCredentials(classifierURL)
+			guardLatencyMS = 15.0
 		} else {
-			slmTier = "regex_standby"
-			slmStatus = "standby"
+			guardTier = "regex_standby"
+			guardStatus = "standby"
 		}
 	}
 
@@ -153,15 +161,15 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"is_managed":          isManaged,
 		"organization":        "Corporate Organization",
 		"locked_editing":      isManaged,
-		"slm_tier":            slmTier,
-		"slm_model":           slmModel,
-		"slm_endpoint":        slmEndpoint,
-		"slm_latency_ms":      slmLatencyMS,
-		"slm_status": map[string]interface{}{
-			"tier":           slmTier,
+		"guard_tier":          guardTier,
+		"guard_model":         guardModel,
+		"guard_endpoint":      guardEndpoint,
+		"guard_latency_ms":    guardLatencyMS,
+		"guard_status": map[string]interface{}{
+			"tier":           guardTier,
 			"classifier_url": redactURLCredentials(classifierURL),
-			"model":          slmModel,
-			"active":         slmStatus == "active",
+			"model":          guardModel,
+			"active":         guardStatus == "active",
 		},
 
 		"config": map[string]interface{}{
@@ -179,17 +187,16 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	writeDashboardJSON(w, resp)
 }
 
-// validateSLMURL enforces pragmatic standalone security guardrails (ADR 0027):
+// validateGuardURL enforces pragmatic standalone security guardrails:
 // - Length <= 2048 chars
 // - Valid HTTP or HTTPS scheme
 // - Non-empty host
 // - Strict rejection of link-local cloud metadata (169.254.169.254 / fe80::/10)
 // - Permits loopback (127.0.0.1, ::1) and local LAN RFC1918 IPs for local developer tooling
-func validateSLMURL(rawURL string) error {
+func validateGuardURL(rawURL string) error {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return nil
@@ -241,7 +248,7 @@ func redactURLCredentials(rawURL string) string {
 	return u.Redacted()
 }
 
-func (a *AdminServer) handleSLMProbe(w http.ResponseWriter, r *http.Request) {
+func (a *AdminServer) handleGuardProbe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -251,12 +258,12 @@ func (a *AdminServer) handleSLMProbe(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	}
 
-	a.mu.Lock()
+	a.mu.RLock()
 	classifierURL := ""
 	if a.cfg != nil {
 		classifierURL = a.cfg.Filters.InjectionScanner.ClassifierURL
 	}
-	a.mu.Unlock()
+	a.mu.RUnlock()
 
 	// If query param or body overrides target URL (e.g. Test Connection)
 	if target := strings.TrimSpace(r.URL.Query().Get("url")); target != "" {
@@ -271,7 +278,7 @@ func (a *AdminServer) handleSLMProbe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if classifierURL != "" {
-		if err := validateSLMURL(classifierURL); err != nil {
+		if err := validateGuardURL(classifierURL); err != nil {
 			http.Error(w, "Invalid probe target: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -290,17 +297,16 @@ func (a *AdminServer) handleSLMProbe(w http.ResponseWriter, r *http.Request) {
 			if status.PID > 0 {
 				configuredURL = fmt.Sprintf("stdio:%s (PID %d)", status.ModelID, status.PID)
 			}
-			probeRes := slmprobe.ProbeResult{
+			probeRes := guardprobe.ProbeResult{
 				ConfiguredActive: true,
 				ConfiguredURL:    configuredURL,
 				Detected:         true,
-				DetectedProvider: slmprobe.ProviderCustom,
+				DetectedProvider: guardprobe.ProviderCustom,
 				DetectedURL:      fmt.Sprintf("http:%s", status.ModelID),
 				LatencyMs:        5,
 				ModelName:        modelName,
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(probeRes)
+			writeDashboardJSON(w, probeRes)
 			return
 		}
 	}
@@ -308,14 +314,13 @@ func (a *AdminServer) handleSLMProbe(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 400*time.Millisecond)
 	defer cancel()
 
-	probeRes := slmprobe.Probe(ctx, classifierURL)
+	probeRes := guardprobe.Probe(ctx, classifierURL)
 	probeRes.ConfiguredURL = redactURLCredentials(probeRes.ConfiguredURL)
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(probeRes)
+	writeDashboardJSON(w, probeRes)
 }
 
-func (a *AdminServer) handleSLMConfigure(w http.ResponseWriter, r *http.Request) {
+func (a *AdminServer) handleGuardConfigure(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -350,7 +355,7 @@ func (a *AdminServer) handleSLMConfigure(w http.ResponseWriter, r *http.Request)
 		{"custom URL", strings.TrimSpace(req.CustomURL)},
 	} {
 		if field.raw != "" {
-			if err := validateSLMURL(field.raw); err != nil {
+			if err := validateGuardURL(field.raw); err != nil {
 				http.Error(w, "Invalid "+field.label+": "+err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -360,7 +365,7 @@ func (a *AdminServer) handleSLMConfigure(w http.ResponseWriter, r *http.Request)
 	a.configMutMu.Lock()
 	defer a.configMutMu.Unlock()
 
-	applySLMMutation := func(cfg *config.Config) {
+	applyGuardMutation := func(cfg *config.Config) {
 		if req.Mode != "" {
 			cfg.Filters.Guard.Discovery.Mode = req.Mode
 		}
@@ -397,7 +402,7 @@ func (a *AdminServer) handleSLMConfigure(w http.ResponseWriter, r *http.Request)
 	a.mu.RUnlock()
 
 	if nextCfg != nil {
-		applySLMMutation(nextCfg)
+		applyGuardMutation(nextCfg)
 	}
 
 	if reloadCfgFn == nil && reloadFn != nil && nextCfg != nil && cfgProvider != nil {
@@ -426,11 +431,10 @@ func (a *AdminServer) handleSLMConfigure(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	writeDashboardJSON(w, map[string]interface{}{
 		"status":         "success",
 		"classifier_url": redactURLCredentials(targetURL),
 		"mode":           req.Mode,
-		"message":        "SLM configuration successfully updated",
+		"message":        "AI Guard configuration successfully updated",
 	})
 }

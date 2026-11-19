@@ -11,7 +11,7 @@ This document traces the complete execution lifecycle of an MCP tool call (`tool
 sequenceDiagram
     autonumber
     participant Agent as AI Agent (Client)
-    participant Ingress as Ingress Listener (:8090)
+    participant Ingress as Ingress Listener (:19410)
     participant Pipeline as Filter Pipeline Engine
     participant Target as Upstream MCP Tool
     participant Telemetry as Telemetry Queue (DuckDB)
@@ -28,7 +28,7 @@ sequenceDiagram
         Pipeline-)Telemetry: Enqueue BLOCKED Audit Event
     else Payload Cleared
         opt High-Risk Tool / Untrusted Input
-            Note over Pipeline: Phase 3: Deep-Path (15-40ms)<br/>- Neural SLM Prompt Guard<br/>- Human-in-the-Loop Intercept
+            Note over Pipeline: Phase 3: Deep-Path (15-40ms)<br/>- AI Guard Prompt Inspection<br/>- Human-in-the-Loop Intercept
         end
 
         Pipeline->>Target: Phase 4: Upstream Execution<br/>(Stdio Subprocess or SSRF-Safe HTTP)
@@ -46,7 +46,7 @@ sequenceDiagram
 
 ## Phase 1: Ingress Authentication & Envelope Validation
 
-1. **Physical Listener:** The frame is received on Port 8090 via `POST /message`, `POST /mcp`, or streamed over `GET /sse`.
+1. **Physical Listener:** The frame is received on Port 19410 via `POST /message`, `POST /mcp`, or streamed over `GET /sse`.
 2. **Bearer Token Validation:** The HTTP `Authorization` header is verified against the gateway's authorized keys. If missing or invalid, the connection is rejected immediately with HTTP 401 Unauthorized.
 3. **JSON-RPC 2.0 Syntax Validation:** The body is parsed using Go's streaming decoder into a canonical `pkg/mcp.Message`:
    - Validates that `"jsonrpc": "2.0"` is present.
@@ -83,7 +83,7 @@ The message travels through the ordered in-memory filter chain:
 ## Phase 4: Deep-Path Adaptive Branching (15–40 ms)
 
 If the tool is categorized as high-risk or external input inspection is required:
-- **[Neural SLM Prompt Guard](/docs/wire/03-security-filters/prompt-guard/) (`Order: 55`):** Runs regex rules, then sends the tool name and arguments to a local inference engine (for example Ollama or a Docker sidecar) depending on the tool's governance mode. A threat verdict (or a malicious probability at or above the configurable threshold score, default 0.50) blocks the call with `-32004` or escalates it to human approval. If the engine is unavailable, only the regex rules apply.
+- **[AI Guard Prompt Inspection](/docs/wire/03-security-filters/prompt-guard/) (`Order: 55`):** Runs regex rules, then sends the tool name and arguments to a local AI Guard inference engine (for example Ollama or a FaradAiGuard Docker sidecar) depending on the tool's governance mode. A threat verdict (or a malicious probability at or above the configurable threshold score, default 0.50) blocks the call with `-32004` or escalates it to human approval. If the engine is unavailable, only the regex rules apply.
 - **[Human-In-The-Loop (HITL)](/docs/wire/03-security-filters/hitl/) Interceptor (`Order: 70`):** If the tool is listed under `destructive_tools` (e.g. `write_to_db`, `send_email`), FaradAiWire pauses the request and asks an operator for approval (CLI prompt or webhook). If denied or timed out, returns `-32000`.
 
 ---

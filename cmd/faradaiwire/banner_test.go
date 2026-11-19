@@ -39,8 +39,8 @@ func TestPrintStartupBanner_Standby(t *testing.T) {
 	if !strings.Contains(out, "DLP & Secrets Redaction  : [ACTIVE]") {
 		t.Errorf("expected DLP active tag")
 	}
-	if !strings.Contains(out, "Prompt Injection Scanner : [STANDBY - REGEX]") {
-		t.Errorf("expected prompt injection scanner standby tag")
+	if !strings.Contains(out, "AI Guard                 : [STANDBY - REGEX]") {
+		t.Errorf("expected AI Guard standby tag")
 	}
 	if !strings.Contains(out, "💡 Hint:") {
 		t.Errorf("expected hint line in standby mode")
@@ -60,8 +60,8 @@ func TestPrintStartupBanner_Disabled(t *testing.T) {
 	printStartupBanner(cfg, &buf)
 	out := buf.String()
 
-	if !strings.Contains(out, "Prompt Injection Scanner : [DISABLED]") {
-		t.Errorf("expected prompt injection scanner disabled tag")
+	if !strings.Contains(out, "AI Guard                 : [DISABLED]") {
+		t.Errorf("expected AI Guard disabled tag")
 	}
 }
 

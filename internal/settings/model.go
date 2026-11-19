@@ -29,7 +29,7 @@ type TimeoutsSettings struct {
 type GuardSettings struct {
 	// ThresholdScore is the minimum malicious probability (0.0 to 1.0) to trigger a security block.
 	ThresholdScore float64 `json:"threshold_score"`
-	// TimeoutMS is the warm execution SLA in milliseconds for SLM guard inferences.
+	// TimeoutMS is the warm execution SLA in milliseconds for AI Guard inferences.
 	TimeoutMS int `json:"timeout_ms"`
 	// ColdTimeoutMS is the cold-start execution SLA in milliseconds for model loading.
 	ColdTimeoutMS int `json:"cold_timeout_ms"`

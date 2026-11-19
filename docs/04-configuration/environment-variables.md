@@ -36,8 +36,8 @@ Settings are resolved in the following order (highest precedence first):
 | **`FARADAI_WIRE_ENV`** | `production` | Set to `development` for verbose debug logs and relaxed local SSRF checks. |
 | **`FARADAI_WIRE_DISABLE_PROCESS_LOCK`**| `false` | Set to `true` in CI/test environments to bypass the single-instance flock guard. |
 | **`FARADAI_WIRE_HMAC_SECRET`** | *(None)* | 32-byte cryptographic secret used for verifying signed context headers. |
-| **`LISTEN_PORT`** | `8090` | Ingress proxy port for agent traffic. |
-| **`ADMIN_PORT`** | `8095` | Admin Console and REST API port. |
+| **`LISTEN_PORT`** | `19410` | Ingress proxy port for agent traffic. |
+| **`ADMIN_PORT`** | `19415` | Admin Console and REST API port. |
 
 ---
 
@@ -61,8 +61,8 @@ FARADAI_WIRE_HMAC_SECRET=0123456789abcdef0123456789abcdef
 
 # Network Binding
 FARADAI_WIRE_HOST=127.0.0.1
-LISTEN_PORT=8090
-ADMIN_PORT=8095
+LISTEN_PORT=19410
+ADMIN_PORT=19415
 
 # Runtime Environment
 FARADAI_WIRE_ENV=development

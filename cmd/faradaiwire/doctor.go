@@ -12,7 +12,7 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
-	"github.com/FaradAiLab/FaradAiWire/internal/slmprobe"
+	"github.com/FaradAiLab/FaradAiWire/internal/guardprobe"
 )
 
 // checkPortStatus checks if a local TCP port is already bound or available.
@@ -42,7 +42,7 @@ func checkStorageWritable(dir string) error {
 	return nil
 }
 
-// executeDoctor runs all system and SLM diagnostic checks, writing human-readable output to out.
+// executeDoctor runs all system and AI Guard diagnostic checks, writing human-readable output to out.
 func executeDoctor(configPath string, out io.Writer) int {
 	fmt.Fprintln(out, "FaradAiWire Diagnostic Report (Doctor)")
 	fmt.Fprintln(out, "==========================================")
@@ -95,7 +95,7 @@ func executeDoctor(configPath string, out io.Writer) int {
 		fmt.Fprintf(out, "[✓] Storage      : Writable at %s\n", storageDir)
 	}
 
-	// 4. SLM Classifier Discovery & Diagnosis
+	// 4. AI Guard Discovery & Diagnosis
 	classifierURL := ""
 	if cfg.Filters.InjectionScanner.Enabled {
 		classifierURL = cfg.Filters.InjectionScanner.ClassifierURL
@@ -104,7 +104,7 @@ func executeDoctor(configPath string, out io.Writer) int {
 	probeCtx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 
-	probeRes := slmprobe.Probe(probeCtx, classifierURL)
+	probeRes := guardprobe.Probe(probeCtx, classifierURL)
 
 	// Check local DuckDB Model Catalog (GUARD-001 / DEC-01)
 	dbPath := ""
@@ -127,44 +127,40 @@ func executeDoctor(configPath string, out io.Writer) int {
 
 	fmt.Fprintln(out, "------------------------------------------")
 	if activeGuardModel != nil {
-		fmt.Fprintf(out, "[✓] Neural SLM   : ACTIVE (Local Guard: %s via Stdio MCP)\n", activeGuardModel.Name)
+		fmt.Fprintf(out, "[✓] AI Guard     : ACTIVE (Local Guard: %s via Stdio MCP)\n", activeGuardModel.Name)
 		fmt.Fprintf(out, "    ↳ Model       : %s (%s, %.1f%% Benchmark Accuracy)\n", activeGuardModel.ID, activeGuardModel.Family, activeGuardModel.BenchmarkAccuracy*100)
 		fmt.Fprintf(out, "    ↳ Best For    : %s\n", activeGuardModel.RecommendedFor)
 		if probeRes.ConfiguredActive {
 			fmt.Fprintf(out, "    ↳ External    : %s (%dms)\n", probeRes.ConfiguredURL, probeRes.LatencyMs)
 		}
 	} else if probeRes.ConfiguredActive {
-		fmt.Fprintf(out, "[✓] Neural SLM   : ACTIVE (connected to %s)\n", probeRes.ConfiguredURL)
+		fmt.Fprintf(out, "[✓] AI Guard     : ACTIVE (connected to %s)\n", probeRes.ConfiguredURL)
 		if probeRes.ModelName != "" {
 			fmt.Fprintf(out, "    ↳ Model       : %s\n", probeRes.ModelName)
 		}
 		fmt.Fprintf(out, "    ↳ Latency     : %dms round-trip\n", probeRes.LatencyMs)
 	} else if len(installedModels) > 0 {
-		fmt.Fprintf(out, "[!] Neural SLM   : Standby (%d local model(s) installed, but none active)\n", len(installedModels))
+		fmt.Fprintf(out, "[!] AI Guard     : Standby (%d local model(s) installed, but none active)\n", len(installedModels))
 		fmt.Fprintf(out, "    ↳ Installed   : %s\n", installedModels[0].Name)
-		fmt.Fprintf(out, "    ↳ To activate : Run 'faradai guard activate %s' or activate in Web Console\n", installedModels[0].ID)
+		fmt.Fprintf(out, "    ↳ To activate : Run 'faradaiwire guard activate %s' or activate in Web Console\n", installedModels[0].ID)
 	} else if probeRes.Detected {
-		fmt.Fprintf(out, "[!] Neural SLM   : Standby (Detected local %s at %s, but not active in config)\n", probeRes.DetectedProvider, probeRes.DetectedURL)
+		fmt.Fprintf(out, "[!] AI Guard     : Standby (Detected local %s at %s, but not active in config)\n", probeRes.DetectedProvider, probeRes.DetectedURL)
 		if probeRes.ModelName != "" {
 			fmt.Fprintf(out, "    ↳ Model       : %s\n", probeRes.ModelName)
 		}
 		fmt.Fprintln(out, "    ↳ To activate : Add to your config.yaml under filters.guard:")
-		if probeRes.DetectedProvider == slmprobe.ProviderPromptGuard {
-			fmt.Fprintf(out, "                    custom_url: \"%s\"\n", probeRes.DetectedURL)
-		} else {
-			fmt.Fprintf(out, "                    custom_url: \"%s\"\n", probeRes.DetectedURL)
-		}
+		fmt.Fprintf(out, "                    custom_url: \"%s\"\n", probeRes.DetectedURL)
 	} else {
-		fmt.Fprintln(out, "[-] Neural SLM   : Standby (Static Heuristics & Regex active)")
-		fmt.Fprintln(out, "    ↳ Tip         : Connect or activate an SLM for zero-day prompt injection defense:")
+		fmt.Fprintln(out, "[-] AI Guard     : Standby (Static Heuristics & Regex active)")
+		fmt.Fprintln(out, "    ↳ Tip         : Connect or activate AI Guard for zero-day prompt injection defense:")
 		fmt.Fprintln(out, "      • Option A (Ollama - Recommended):")
-		fmt.Fprintln(out, "        $ ollama run faradailab/guard-qwen3")
+		fmt.Fprintln(out, "        $ ollama run hf.co/faradailab/guard-qwen3guard")
 		fmt.Fprintln(out, "        Auto-detected on :11434 with zero configuration.")
 		fmt.Fprintln(out, "      • Option B (Docker Container):")
-		fmt.Fprintln(out, "        $ docker run -d -p 8000:8000 ghcr.io/faradailab/farad-ai-guard:qwen3")
-		fmt.Fprintln(out, "        Auto-detected on :8000 with zero configuration.")
+		fmt.Fprintln(out, "        $ docker run -d -p 8088:8088 ghcr.io/faradailab/farad-ai-guard:qwen3guard")
+		fmt.Fprintln(out, "        Auto-detected on :8088 with zero configuration.")
 		fmt.Fprintln(out, "      • Option C (Admin Web Console):")
-		fmt.Fprintf(out, "        Visit http://%s -> Settings -> SLM Probe\n", net.JoinHostPort(cfg.GetAdminHost(), strconv.Itoa(adminPort)))
+		fmt.Fprintf(out, "        Visit http://%s -> Overview -> Live Probe Guard\n", net.JoinHostPort(cfg.GetAdminHost(), strconv.Itoa(adminPort)))
 	}
 	fmt.Fprintln(out, "==========================================")
 

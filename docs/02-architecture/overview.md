@@ -15,8 +15,8 @@ graph TD
 
     subgraph FaradAiWire PEP [Host-Native Daemon]
         subgraph PortSegregation [Physical Port Segregation]
-            P1["Port 8090: Ingress Proxy\n(Fail-Closed Bearer Auth)"]
-            P2["Port 8095: Admin Console\n(Loopback REST & Embedded UI)"]
+            P1["Port 19410: Ingress Proxy\n(Fail-Closed Bearer Auth)"]
+            P2["Port 19415: Admin Console\n(Loopback REST & Embedded UI)"]
         end
 
         subgraph CoreEngine [Core Security Engine]
@@ -31,7 +31,7 @@ graph TD
             end
             
             subgraph DeepPath ["Deep Path (15-40ms)"]
-                D_SLM["Local SLM Prompt Guard\n(Ollama / Docker / Unix Socket)"]
+                D_Guard["Local AI Guard\n(Ollama / FaradAiGuard / Unix Socket)"]
                 D_HITL["Human-in-the-Loop Interceptor\n(TTY Prompt or Webhook)"]
             end
 
@@ -60,12 +60,12 @@ graph TD
 ## Architectural Pillars
 
 ### 1. Zero-Trust Ingress Security
-Every frame passing through Port 8090 must present valid Bearer authentication. Unauthenticated requests are rejected immediately with HTTP 401 before any JSON parsing or downstream processing occurs.
+Every frame passing through Port 19410 must present valid Bearer authentication. Unauthenticated requests are rejected immediately with HTTP 401 before any JSON parsing or downstream processing occurs.
 
 ### 2. Fast Path vs. Deep Path Adaptive Routing
 To maintain $<1\text{ ms}$ average latency overhead across high-frequency agent tool calls (e.g. `read_file`, `list_directory`), FaradAiWire implements an adaptive router:
 - **Fast Path:** Deterministic, in-memory filters executing compiled regexes, token-bucket math, and JSON schema checks in $<1\text{ ms}$.
-- **Deep Path:** Activated for sensitive tools, untrusted web outputs, or ambiguous arguments. Hands off payloads to local SLM classifiers (e.g., `llama-guard3:1b` or `qwen3guard-0.6b`) or pauses execution for Human-In-The-Loop approval.
+- **Deep Path:** Activated for sensitive tools, untrusted web outputs, or ambiguous arguments. Hands off payloads to local AI Guard models (e.g., `qwen3guard`, `mica-v0.5`, or `granite-guardian`) or pauses execution for Human-In-The-Loop approval.
 
 ### 3. Hexagonal Proxy Layering & Zero-IO Core
 The core security engine is decoupled from HTTP, SSE, and Stdio transport details:
@@ -101,7 +101,7 @@ Filters execute in strict order defined by `OrderPolicy` precedence constants:
 6. DLP Pattern Matcher      (Order: 50)  ── Masks or blocks credentials/PII
       │
       ▼
-7. Semantic SLM Guard       (Order: 55)  ── Neural classifier (injection/jailbreak)
+7. AI Guard                 (Order: 55)  ── Neural guard (injection/jailbreak)
       │
       ▼
 8. Human-in-the-Loop        (Order: 70)  ── Suspends destructive tool executions

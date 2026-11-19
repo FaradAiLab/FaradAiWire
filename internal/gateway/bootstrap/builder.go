@@ -325,7 +325,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	}
 	deps.KeyStore = keyStore
 
-	// 10. Decoupled SLM HTTP Inference Provider Client (ADR 0041)
+	// 10. Decoupled AI Guard HTTP Inference Provider Client
 	httpCfg := guard.DefaultHTTPProviderConfig()
 	if cfg.Filters.Guard.Discovery.CustomURL != "" {
 		httpCfg.BaseURL = cfg.Filters.Guard.Discovery.CustomURL
@@ -369,7 +369,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		AgentRepo:     agentRepo,
 	})
 
-	// 13. SLM Guard Model Installer
+	// 13. AI Guard Model Installer
 	guardInstaller := guard.NewInstaller(guard.InstallerConfig{
 		Catalog: deps.GuardCatalog,
 	})

@@ -38,8 +38,8 @@ When started, FaradAiWire prints the startup banner and binds its physical liste
 ┌──────────────────────────────────────────────────────────┐
 │ FaradAiWire - Zero-Trust AI Agent Security Gateway       │
 │                                                          │
-│  Proxy Ingress:  http://127.0.0.1:8090                   │
-│  Admin Console:  http://127.0.0.1:8095/admin/dashboard   │
+│  Proxy Ingress:  http://127.0.0.1:19410                  │
+│  Admin Console:  http://127.0.0.1:19415/admin/dashboard  │
 │  Status:         HEALTHY (Offline Standalone Mode)       │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -56,7 +56,7 @@ faradaiwire doctor
 
 Alternatively, query the Admin status endpoint:
 ```bash
-curl -s http://127.0.0.1:8095/admin/status | jq .
+curl -s http://127.0.0.1:19415/admin/status | jq .
 ```
 
 Expected JSON response:
@@ -65,8 +65,8 @@ Expected JSON response:
   "status": "healthy",
   "version": "v0.1.3",
   "runtime_mode": "standalone",
-  "ingress_port": 8090,
-  "admin_port": 8095,
+  "ingress_port": 19410,
+  "admin_port": 19415,
   "uptime_seconds": 12,
   "active_sessions": 0
 }
@@ -76,10 +76,10 @@ Expected JSON response:
 
 ## Step 3: Send an Inspected MCP Tool Call
 
-AI agents interact with FaradAiWire via JSON-RPC 2.0 frames over HTTP/SSE. Simulate an agent invoking a tool through the Proxy Ingress port (`8090`):
+AI agents interact with FaradAiWire via JSON-RPC 2.0 frames over HTTP/SSE. Simulate an agent invoking a tool through the Proxy Ingress port (`19410`):
 
 ```bash
-curl -X POST http://127.0.0.1:8090/message \
+curl -X POST http://127.0.0.1:19410/message \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer dev-local-key" \
   -d '{
@@ -114,7 +114,7 @@ The request passes through FaradAiWire's Fast-Path pipeline:
 FaradAiWire's DLP engine inspects outgoing parameters. Test what happens when an agent inadvertently tries to pass an AWS Secret Access Key or read a private key file:
 
 ```bash
-curl -X POST http://127.0.0.1:8090/message \
+curl -X POST http://127.0.0.1:19410/message \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer dev-local-key" \
   -d '{
@@ -148,7 +148,7 @@ FaradAiWire immediately aborts the call in **$<0.5\text{ ms}$** without forwardi
 ## Step 5: Inspect Audit Telemetry
 
 Open the Web Console in your browser:
-👉 **[http://localhost:8095/admin/dashboard](http://localhost:8095/admin/dashboard)**
+👉 **[http://localhost:19415/admin/dashboard](http://localhost:19415/admin/dashboard)**
 
 You can view:
 - **Verdict breakdown:** Allowed, Masked, Blocked, and HITL counts.
@@ -163,5 +163,5 @@ You can view:
 ## Next Steps
 
 - 🤖 **[Configure Your Agent](/docs/wire/agent-setup/):** Connect Claude Code, Cursor, or Windsurf.
-- 🛡️ **[Enable Neural SLM Guard](/docs/wire/security-filters/prompt-guard/):** Add local Llama-Guard or Prompt-Guard inference.
+- 🛡️ **[Enable AI Guard](/docs/wire/security-filters/prompt-guard/):** Add local Qwen3Guard, Prompt-Guard, or FaradAiGuard inference.
 - ⚙️ **[Customize DLP Rules](/docs/wire/configuration/config-yaml/):** Add regex patterns for internal tokens or proprietary database identifiers.

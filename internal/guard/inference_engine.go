@@ -33,7 +33,7 @@ var dualCheckQuestions = map[string]systemOneQuestion{
 }
 
 // InferenceEngine defines the strategy contract for building requests and parsing responses
-// across diverse SLM provider backends and inference paradigms.
+// across diverse AI Guard provider backends and inference paradigms.
 type InferenceEngine interface {
 	EndpointPath() string
 	BuildPayload(modelName string, req *InspectionRequest) (any, error)
@@ -327,7 +327,7 @@ func parseGenerativeResponse(body []byte, latencyMS float64, modelName string) (
 		MaliciousProbability: verdict.RiskScore,
 		AlignmentRisk:        verdict.RiskScore,
 		ExploitRisk:          verdict.RiskScore,
-		DecisionEngine:       fmt.Sprintf("L2_SLM_HTTP (%s)", modelName),
+		DecisionEngine:       fmt.Sprintf("L2_AI_GUARD_HTTP (%s)", modelName),
 		ThreatDomain:         verdict.Reason,
 		CWE:                  verdict.CWE,
 		LatencyMS:            latencyMS,

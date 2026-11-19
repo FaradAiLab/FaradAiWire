@@ -21,7 +21,7 @@ graph LR
     Queue --> Worker["Telemetry Writer Worker"]
     Worker -->|"Append"| JSONL["logs/faradai_audit.jsonl"]
     Worker -->|"Batch Insert"| DuckDB["Embedded DuckDB Engine\n(~/.faradaiwire/telemetry.duckdb)"]
-    DuckDB --> Dashboard["Web Console (Port 8095)"]
+    DuckDB --> Dashboard["Web Console (Port 19415)"]
 ```
 
 ---

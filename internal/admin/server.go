@@ -208,7 +208,7 @@ func (a *AdminServer) SetReloadConfigFunc(fn func(*config.Config) error) {
 	a.reloadConfigFunc = fn
 }
 
-// SetGuardManager sets the active SLM Stdio guard process manager.
+// SetGuardManager sets the active AI Guard stdio process manager.
 func (a *AdminServer) SetGuardManager(mgr guard.Manager) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -493,7 +493,7 @@ func (a *AdminServer) Handler() http.Handler {
 	// Runtime inspection and local telemetry endpoints (zero-auth localhost access)
 	mux.HandleFunc("/admin/status", a.handleStatus)
 	mux.HandleFunc("/admin/host/resources", a.handleHostResources)
-	mux.HandleFunc("/admin/slm/probe", a.handleSLMProbe)
+	mux.HandleFunc("/admin/guards/probe", a.handleGuardProbe)
 	mux.HandleFunc("/admin/audit-logs", a.handleAuditLogs)
 	mux.HandleFunc("/admin/audit-logs/events", a.handleLogEventsStream)
 	mux.HandleFunc("/admin/audit-logs/", a.handleAuditLogDetail)
@@ -529,7 +529,7 @@ func (a *AdminServer) Handler() http.Handler {
 	mux.HandleFunc("/admin/schemas/", a.handleSchemas)
 
 	// Mutating endpoints (guarded by withMutationGuard against managed enterprise mode modifications)
-	mux.HandleFunc("/admin/slm/configure", a.withMutationGuard(a.handleSLMConfigure))
+	mux.HandleFunc("/admin/guards/configure", a.withMutationGuard(a.handleGuardConfigure))
 	mux.HandleFunc("/admin/schemas/clear", a.withMutationGuard(a.handleClearSchemas))
 	mux.HandleFunc("/admin/config/toggle", a.withMutationGuard(a.handleConfigToggle))
 	mux.HandleFunc("/admin/agents/sync-tools", a.withMutationGuard(a.handleAgentSyncTools))

@@ -347,7 +347,7 @@ func RenderGuardStatus(status *guard.ProcessStatus, out io.Writer, useColor bool
 
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "%s╭────────────────────────────────────────────────────────────╮%s\n", cyan, reset)
-	fmt.Fprintf(out, "%s│%s         %sFarad Ai SLM Security Guard Process Status%s         %s│%s\n", cyan, reset, bold, reset, cyan, reset)
+	fmt.Fprintf(out, "%s│%s         %sFaradAiWire AI Guard Process Status%s              %s│%s\n", cyan, reset, bold, reset, cyan, reset)
 	fmt.Fprintf(out, "%s╰────────────────────────────────────────────────────────────╯%s\n", cyan, reset)
 	fmt.Fprintln(out)
 
@@ -358,9 +358,9 @@ func RenderGuardStatus(status *guard.ProcessStatus, out io.Writer, useColor bool
 		}
 		fmt.Fprintf(out, "  %sShield Mode%s    : %sL1 Static Rules Only (Fast Regex / Heuristics)%s\n", bold, reset, dim, reset)
 		fmt.Fprintf(out, "  %sHealth Status%s  : %s%s%s\n", bold, reset, yellow, healthStr, reset)
-		fmt.Fprintf(out, "  %sSubprocess%s     : %sInactive (No L2 SLM guard running)%s\n", bold, reset, dim, reset)
+		fmt.Fprintf(out, "  %sSubprocess%s     : %sInactive (No L2 AI Guard running)%s\n", bold, reset, dim, reset)
 		fmt.Fprintln(out)
-		fmt.Fprintf(out, "  %s💡 Hint:%s Run %sfaradai guard list%s to inspect models or activate via admin console.\n", dim, reset, bold, reset)
+		fmt.Fprintf(out, "  %s💡 Hint:%s Run %sfaradaiwire guard list%s to inspect models or activate via admin console.\n", dim, reset, bold, reset)
 		fmt.Fprintln(out)
 		return
 	}
@@ -383,7 +383,7 @@ func RenderGuardStatus(status *guard.ProcessStatus, out io.Writer, useColor bool
 		uptimeStr = uptime.String()
 	}
 
-	fmt.Fprintf(out, "  %sShield Mode%s    : %sFail-Fast Cascade (L1 Heuristics + L2 Neural SLM)%s\n", bold, reset, green, reset)
+	fmt.Fprintf(out, "  %sShield Mode%s    : %sFail-Fast Cascade (L1 Heuristics + L2 AI Guard)%s\n", bold, reset, green, reset)
 	fmt.Fprintf(out, "  %sHealth Status%s  : %s%s%s\n", bold, reset, statusColor, status.HealthStatus, reset)
 	fmt.Fprintf(out, "  %sActive Model%s   : %s%s%s\n", bold, reset, cyan, modelID, reset)
 	fmt.Fprintf(out, "  %sPID%s            : %s%d%s\n", bold, reset, bold, status.PID, reset)

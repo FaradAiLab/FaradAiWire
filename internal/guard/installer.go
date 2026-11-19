@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/FaradAiLab/FaradAiWire/internal/slmprobe"
+	"github.com/FaradAiLab/FaradAiWire/internal/guardprobe"
 )
 
 var (
@@ -83,7 +84,7 @@ type InstallerConfig struct {
 	WeightDownloader WeightDownloader
 }
 
-// Installer manages native pure-Go SLM model provisioning via Ollama pull and DuckDB catalog updates.
+// Installer manages native pure-Go AI Guard model provisioning via Ollama pull and DuckDB catalog updates.
 type Installer struct {
 	cfg        InstallerConfig
 	catalog    CatalogStore
@@ -109,7 +110,7 @@ func NewInstaller(cfg InstallerConfig) *Installer {
 	}
 }
 
-// DiscoverToolchain reports native pure-Go SLM provider readiness.
+// DiscoverToolchain reports native pure-Go AI Guard provider readiness.
 func (in *Installer) DiscoverToolchain(ctx context.Context) (*ToolchainInfo, error) {
 	return &ToolchainInfo{
 		Type:       ToolchainNative,
@@ -219,7 +220,7 @@ func (in *Installer) installInternal(ctx context.Context, modelID string) error 
 				UpdatedAt: time.Now(),
 			})
 
-			_ = slmprobe.Pull(ctx, in.ollamaURL, m.OllamaSource, func(prog slmprobe.PullProgress) {
+			if pullErr := guardprobe.Pull(ctx, in.ollamaURL, m.OllamaSource, func(prog guardprobe.PullProgress) {
 				pct := 0.3 + (prog.Percent/100.0)*0.6
 				if pct > 0.95 {
 					pct = 0.95
@@ -232,15 +233,28 @@ func (in *Installer) installInternal(ctx context.Context, modelID string) error 
 					Message:   prog.Status,
 					UpdatedAt: time.Now(),
 				})
-			})
+			}); pullErr != nil {
+				slog.Warn("Ollama pull did not complete; registering catalog entry locally", "model_id", modelID, "error", pullErr)
+			}
 		}
 
 		// Update catalog state to INSTALLED
-		_ = in.catalog.UpdateStatus(ctx, modelID, InstallStatusInstalled)
+		if err := in.catalog.UpdateStatus(ctx, modelID, InstallStatusInstalled); err != nil {
+			in.emitProgress(InstallProgress{
+				ModelID:   modelID,
+				Status:    InstallStatusFailed,
+				Step:      StepFailed,
+				Error:     err.Error(),
+				UpdatedAt: time.Now(),
+			})
+			return fmt.Errorf("update guard catalog status for %s: %w", modelID, err)
+		}
 	}
 
 	if in.cfg.BaseDir != "" {
-		_ = os.MkdirAll(filepath.Join(in.cfg.BaseDir, "models", modelID), 0755)
+		if err := os.MkdirAll(filepath.Join(in.cfg.BaseDir, "models", modelID), 0755); err != nil {
+			return fmt.Errorf("create model directory for %s: %w", modelID, err)
+		}
 	}
 
 	in.emitProgress(InstallProgress{

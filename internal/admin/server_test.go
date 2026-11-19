@@ -158,9 +158,9 @@ func TestAdminServer_MutationGuard_ManagedMode(t *testing.T) {
 			body:   `{}`,
 		},
 		{
-			name:   "Configure SLM",
+			name:   "Configure AI Guard",
 			method: http.MethodPost,
-			path:   "/admin/slm/configure",
+			path:   "/admin/guards/configure",
 			body:   `{"primary_endpoint":"http://localhost:11434"}`,
 		},
 		{
@@ -698,7 +698,7 @@ func TestAdminServer_AgentEndpoints_RepositoryMediation(t *testing.T) {
 	}
 }
 
-func TestAdmin_SLMProbe_And_Configure(t *testing.T) {
+func TestAdmin_GuardProbe_And_Configure(t *testing.T) {
 	cfg := &config.Config{
 		RuntimeMode: config.RuntimeModeStandalone,
 	}
@@ -713,7 +713,7 @@ func TestAdmin_SLMProbe_And_Configure(t *testing.T) {
 
 	handler := server.Handler()
 
-	// 1. Verify GET /admin/status includes slm_status (regex_standby initially)
+	// 1. Verify GET /admin/status includes guard_status (regex_standby initially)
 	reqStatus := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
 	recStatus := httptest.NewRecorder()
 	handler.ServeHTTP(recStatus, reqStatus)
@@ -727,50 +727,50 @@ func TestAdmin_SLMProbe_And_Configure(t *testing.T) {
 		t.Fatalf("failed to decode /admin/status response: %v", err)
 	}
 
-	slmStatus, ok := statusResp["slm_status"].(map[string]interface{})
+	guardStatus, ok := statusResp["guard_status"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected slm_status object in status response, got %v", statusResp)
+		t.Fatalf("expected guard_status object in status response, got %v", statusResp)
 	}
-	if slmStatus["tier"] != "regex_standby" {
-		t.Errorf("expected tier=regex_standby, got %v", slmStatus["tier"])
+	if guardStatus["tier"] != "regex_standby" {
+		t.Errorf("expected tier=regex_standby, got %v", guardStatus["tier"])
 	}
 	if statusResp["version"] != config.GetVersion() {
 		t.Errorf("expected version=%q in /admin/status, got %v", config.GetVersion(), statusResp["version"])
 	}
 
-	// 2. Verify GET /admin/slm/probe returns 200 and ProbeResult
-	reqProbe := httptest.NewRequest(http.MethodGet, "/admin/slm/probe", nil)
+	// 2. Verify GET /admin/guards/probe returns 200 and ProbeResult
+	reqProbe := httptest.NewRequest(http.MethodGet, "/admin/guards/probe", nil)
 	recProbe := httptest.NewRecorder()
 	handler.ServeHTTP(recProbe, reqProbe)
 
 	if recProbe.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from /admin/slm/probe, got %d", recProbe.Code)
+		t.Fatalf("expected 200 OK from /admin/guards/probe, got %d", recProbe.Code)
 	}
 
 	var probeResp map[string]interface{}
 	if err := json.NewDecoder(recProbe.Body).Decode(&probeResp); err != nil {
-		t.Fatalf("failed to decode /admin/slm/probe response: %v", err)
+		t.Fatalf("failed to decode /admin/guards/probe response: %v", err)
 	}
 	if _, hasDetected := probeResp["detected"]; !hasDetected {
 		t.Errorf("expected 'detected' field in probe response")
 	}
 
-	// 3. Verify POST /admin/slm/configure updates config and triggers reload
+	// 3. Verify POST /admin/guards/configure updates config and triggers reload
 	cfgBody, _ := json.Marshal(map[string]interface{}{
 		"classifier_url": "http://localhost:8088/predict",
 		"mode":           "docker",
 		"docker_url":     "http://localhost:8088",
 		"ollama_url":     "http://localhost:11434",
 	})
-	reqCfg := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", bytes.NewReader(cfgBody))
+	reqCfg := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", bytes.NewReader(cfgBody))
 	recCfg := httptest.NewRecorder()
 	handler.ServeHTTP(recCfg, reqCfg)
 
 	if recCfg.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from /admin/slm/configure, got %d: %s", recCfg.Code, recCfg.Body.String())
+		t.Fatalf("expected 200 OK from /admin/guards/configure, got %d: %s", recCfg.Code, recCfg.Body.String())
 	}
 	if !reloaded {
-		t.Errorf("expected reloadFunc to be triggered on slm configure")
+		t.Errorf("expected reloadFunc to be triggered on guard configure")
 	}
 	srvCfg := server.Config()
 	if srvCfg == nil {
@@ -796,16 +796,16 @@ func TestAdmin_SLMProbe_And_Configure(t *testing.T) {
 
 	var statusResp2 map[string]interface{}
 	json.NewDecoder(recStatus2.Body).Decode(&statusResp2)
-	slmStatus2 := statusResp2["slm_status"].(map[string]interface{})
-	if slmStatus2["tier"] != "neural_active" {
-		t.Errorf("expected tier=neural_active, got %v", slmStatus2["tier"])
+	guardStatus2 := statusResp2["guard_status"].(map[string]interface{})
+	if guardStatus2["tier"] != "neural_active" {
+		t.Errorf("expected tier=neural_active, got %v", guardStatus2["tier"])
 	}
-	if slmStatus2["classifier_url"] != "http://localhost:8088/predict" {
-		t.Errorf("expected classifier_url in status, got %v", slmStatus2["classifier_url"])
+	if guardStatus2["classifier_url"] != "http://localhost:8088/predict" {
+		t.Errorf("expected classifier_url in status, got %v", guardStatus2["classifier_url"])
 	}
 }
 
-func TestAdmin_SLM_SecurityGuardrails(t *testing.T) {
+func TestAdmin_Guard_SecurityGuardrails(t *testing.T) {
 	cfg := &config.Config{
 		RuntimeMode: config.RuntimeModeStandalone,
 	}
@@ -817,7 +817,7 @@ func TestAdmin_SLM_SecurityGuardrails(t *testing.T) {
 	metaBody, _ := json.Marshal(map[string]interface{}{
 		"classifier_url": "http://169.254.169.254/latest/meta-data/",
 	})
-	reqMeta := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", bytes.NewReader(metaBody))
+	reqMeta := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", bytes.NewReader(metaBody))
 	recMeta := httptest.NewRecorder()
 	handler.ServeHTTP(recMeta, reqMeta)
 	if recMeta.Code != http.StatusBadRequest {
@@ -825,7 +825,7 @@ func TestAdmin_SLM_SecurityGuardrails(t *testing.T) {
 	}
 
 	// 2. Rejection of invalid scheme (file://) in probe
-	reqFile := httptest.NewRequest(http.MethodGet, "/admin/slm/probe?url=file:///etc/passwd", nil)
+	reqFile := httptest.NewRequest(http.MethodGet, "/admin/guards/probe?url=file:///etc/passwd", nil)
 	recFile := httptest.NewRecorder()
 	handler.ServeHTTP(recFile, reqFile)
 	if recFile.Code != http.StatusBadRequest {
@@ -836,22 +836,22 @@ func TestAdmin_SLM_SecurityGuardrails(t *testing.T) {
 	lanBody, _ := json.Marshal(map[string]interface{}{
 		"classifier_url": "http://192.168.1.150:11434",
 	})
-	reqLan := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", bytes.NewReader(lanBody))
+	reqLan := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", bytes.NewReader(lanBody))
 	recLan := httptest.NewRecorder()
 	handler.ServeHTTP(recLan, reqLan)
 	if recLan.Code != http.StatusOK {
-		t.Errorf("expected 200 OK for LAN SLM configure, got %d", recLan.Code)
+		t.Errorf("expected 200 OK for LAN AI Guard configure, got %d", recLan.Code)
 	}
 
 	// 4. Verification of credential redaction in /admin/status
 	authBody, _ := json.Marshal(map[string]interface{}{
 		"classifier_url": "http://admin:secretPass123@127.0.0.1:8088/predict",
 	})
-	reqAuth := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", bytes.NewReader(authBody))
+	reqAuth := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", bytes.NewReader(authBody))
 	recAuth := httptest.NewRecorder()
 	handler.ServeHTTP(recAuth, reqAuth)
 	if recAuth.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for authenticated SLM configure, got %d", recAuth.Code)
+		t.Fatalf("expected 200 OK for authenticated AI Guard configure, got %d", recAuth.Code)
 	}
 
 	reqStatus := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
@@ -859,8 +859,8 @@ func TestAdmin_SLM_SecurityGuardrails(t *testing.T) {
 	handler.ServeHTTP(recStatus, reqStatus)
 	var statusMap map[string]interface{}
 	json.NewDecoder(recStatus.Body).Decode(&statusMap)
-	slmMap := statusMap["slm_status"].(map[string]interface{})
-	maskedURL, _ := slmMap["classifier_url"].(string)
+	guardMap := statusMap["guard_status"].(map[string]interface{})
+	maskedURL, _ := guardMap["classifier_url"].(string)
 
 	if strings.Contains(maskedURL, "secretPass123") {
 		t.Errorf("expected password to be redacted in status output, got %s", maskedURL)
@@ -1192,7 +1192,7 @@ func TestAdminServer_BearerAuthAndCSRFProtection(t *testing.T) {
 	})
 }
 
-func TestHandleSLMConfigure_ValidatesAllSLMURLs(t *testing.T) {
+func TestHandleGuardConfigure_ValidatesAllGuardURLs(t *testing.T) {
 	srv := NewAdminServer(&config.Config{}, nil, nil)
 	h := srv.Handler()
 
@@ -1207,7 +1207,7 @@ func TestHandleSLMConfigure_ValidatesAllSLMURLs(t *testing.T) {
 
 	for _, tc := range bodies {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(tc.body))
+			req := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(tc.body))
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
@@ -1221,7 +1221,7 @@ func TestHandleSLMConfigure_ValidatesAllSLMURLs(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Filters.InjectionScanner.ClassifierURL = "http://127.0.0.1:8088/predict"
 		failSrv := NewAdminServer(cfg, func() error { return errors.New("reload boom") }, nil)
-		failReq := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(`{"classifier_url":"http://admin:secret@127.0.0.1:9000/predict"}`))
+		failReq := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(`{"classifier_url":"http://admin:secret@127.0.0.1:9000/predict"}`))
 		failReq.Header.Set("Content-Type", "application/json")
 		failRec := httptest.NewRecorder()
 		failSrv.Handler().ServeHTTP(failRec, failReq)
@@ -1233,7 +1233,7 @@ func TestHandleSLMConfigure_ValidatesAllSLMURLs(t *testing.T) {
 		}
 
 		okSrv := NewAdminServer(&config.Config{}, func() error { return nil }, nil)
-		okReq := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(`{"classifier_url":"http://admin:secret@127.0.0.1:9000/predict"}`))
+		okReq := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(`{"classifier_url":"http://admin:secret@127.0.0.1:9000/predict"}`))
 		okReq.Header.Set("Content-Type", "application/json")
 		okRec := httptest.NewRecorder()
 		okSrv.Handler().ServeHTTP(okRec, okReq)
@@ -1246,7 +1246,7 @@ func TestHandleSLMConfigure_ValidatesAllSLMURLs(t *testing.T) {
 	})
 }
 
-func TestHandleSLMConfigure_LifecycleAndConcurrency(t *testing.T) {
+func TestHandleGuardConfigure_LifecycleAndConcurrency(t *testing.T) {
 	t.Run("live SetReloadConfigFunc swaps config without origCfg overwrite", func(t *testing.T) {
 		origCfg := &config.Config{
 			RuntimeMode: config.RuntimeModeStandalone,
@@ -1267,7 +1267,7 @@ func TestHandleSLMConfigure_LifecycleAndConcurrency(t *testing.T) {
 		})
 
 		body := `{"mode":"docker","docker_url":"http://127.0.0.1:18088","classifier_url":"http://127.0.0.1:18088/predict"}`
-		req := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
@@ -1312,7 +1312,7 @@ func TestHandleSLMConfigure_LifecycleAndConcurrency(t *testing.T) {
 			return errors.New("reload boom")
 		})
 
-		req := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(`{"classifier_url":"http://127.0.0.1:19000/predict"}`))
+		req := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(`{"classifier_url":"http://127.0.0.1:19000/predict"}`))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
@@ -1341,7 +1341,7 @@ func TestHandleSLMConfigure_LifecycleAndConcurrency(t *testing.T) {
 		srv := NewAdminServer(origCfg, func() error { return errors.New("legacy reload boom") }, nil)
 		srv.SetConfigProvider(cfgProvider)
 
-		req := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(`{"classifier_url":"http://127.0.0.1:19000/predict"}`))
+		req := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(`{"classifier_url":"http://127.0.0.1:19000/predict"}`))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
@@ -1380,7 +1380,7 @@ func TestHandleSLMConfigure_LifecycleAndConcurrency(t *testing.T) {
 					handler.ServeHTTP(settingsRec, httptest.NewRequest(http.MethodGet, "/admin/settings", nil))
 
 					body := fmt.Sprintf(`{"classifier_url":"http://127.0.0.1:%d/predict"}`, 18000+idx)
-					cfgReq := httptest.NewRequest(http.MethodPost, "/admin/slm/configure", strings.NewReader(body))
+					cfgReq := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(body))
 					cfgReq.Header.Set("Content-Type", "application/json")
 					cfgRec := httptest.NewRecorder()
 					handler.ServeHTTP(cfgRec, cfgReq)
@@ -1391,12 +1391,12 @@ func TestHandleSLMConfigure_LifecycleAndConcurrency(t *testing.T) {
 	})
 }
 
-func TestHandleSLMProbe_RedactsCredentials(t *testing.T) {
+func TestHandleGuardProbe_RedactsCredentials(t *testing.T) {
 	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
 	cfg.Filters.InjectionScanner.ClassifierURL = "http://admin:supersecret@127.0.0.1:19999/predict"
 	srv := NewAdminServer(cfg, nil, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/slm/probe", nil)
+	req := httptest.NewRequest(http.MethodGet, "/admin/guards/probe", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -1404,11 +1404,11 @@ func TestHandleSLMProbe_RedactsCredentials(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
 	}
 	if strings.Contains(rec.Body.String(), "supersecret") {
-		t.Fatalf("expected password redacted in /admin/slm/probe response, got %s", rec.Body.String())
+		t.Fatalf("expected password redacted in /admin/guards/probe response, got %s", rec.Body.String())
 	}
 	var payload map[string]interface{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode /admin/slm/probe JSON: %v", err)
+		t.Fatalf("decode /admin/guards/probe JSON: %v", err)
 	}
 	if got, _ := payload["configured_url"].(string); got != "http://admin:xxxxx@127.0.0.1:19999/predict" {
 		t.Fatalf("expected redacted configured_url, got %q", got)

@@ -141,7 +141,7 @@ var Registry = map[string]SettingMeta{
 	"guard.timeout_ms": {
 		Key:         "guard.timeout_ms",
 		Label:       "Guard Warm Timeout SLA",
-		Description: "Maximum execution SLA in milliseconds for warm SLM model inference",
+		Description: "Maximum execution SLA in milliseconds for warm AI Guard model inference",
 		Category:    "guard",
 		Type:        TypeInt,
 		DefaultVal:  1000,
@@ -152,7 +152,7 @@ var Registry = map[string]SettingMeta{
 	"guard.cold_timeout_ms": {
 		Key:         "guard.cold_timeout_ms",
 		Label:       "Guard Cold-Start Timeout SLA",
-		Description: "Maximum execution SLA in milliseconds during initial SLM model runner loading",
+		Description: "Maximum execution SLA in milliseconds during initial AI Guard model runner loading",
 		Category:    "guard",
 		Type:        TypeInt,
 		DefaultVal:  3000,

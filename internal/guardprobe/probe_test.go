@@ -1,4 +1,4 @@
-package slmprobe
+package guardprobe
 
 import (
 	"bytes"

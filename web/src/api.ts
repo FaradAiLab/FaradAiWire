@@ -135,10 +135,10 @@ export const api = {
       body: JSON.stringify({ filter_name: filter, filter, enabled }),
     }),
 
-  // SLM Neural Probe
-  probeSLM: (signal?: AbortSignal) => request<Record<string, unknown>>('/admin/slm/probe', { signal }),
-  configureSLM: (params: { classifier_url?: string; mode?: string; ollama_url?: string; docker_url?: string; custom_url?: string } | string) =>
-    request<{ status: string; message: string }>('/admin/slm/configure', {
+  // AI Guard Probe & Configuration
+  probeGuard: (signal?: AbortSignal) => request<Record<string, unknown>>('/admin/guards/probe', { signal }),
+  configureGuard: (params: { classifier_url?: string; mode?: string; ollama_url?: string; docker_url?: string; custom_url?: string } | string) =>
+    request<{ status: string; message: string }>('/admin/guards/configure', {
       method: 'POST',
       body: JSON.stringify(typeof params === 'string' ? { classifier_url: params } : params),
     }),

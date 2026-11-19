@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// InstallStatus defines the runtime deployment state of an SLM guard.
+// InstallStatus defines the runtime deployment state of an AI Guard model.
 type InstallStatus string
 
 const (
@@ -23,7 +23,7 @@ const (
 	ThreatActionBlock ThreatAction = "block"
 )
 
-// ModelParadigm defines the operational category of an SLM security guard.
+// ModelParadigm defines the operational category of an AI Guard security model.
 type ModelParadigm string
 
 const (
@@ -33,7 +33,7 @@ const (
 	ModelParadigmDecisionModel ModelParadigm = "decision_model"
 )
 
-// Model represents a curated SLM security guard in the DuckDB Model Catalog.
+// Model represents a curated AI Guard security model in the DuckDB Model Catalog.
 type Model struct {
 	ID                    string        `json:"id"`
 	Name                  string        `json:"name"`

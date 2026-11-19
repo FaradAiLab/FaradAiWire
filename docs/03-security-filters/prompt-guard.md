@@ -1,11 +1,11 @@
 ---
-title: "Neural Prompt Injection Guard"
-description: "Two-tier semantic guard: in-memory regex rules plus a local Small Language Model that inspects tool calls and tool responses for prompt injection."
+title: "AI Guard (Prompt Injection Defense)"
+description: "Two-tier AI Guard: in-memory regex rules plus a local neural guard model that inspects tool calls and tool responses for prompt injection."
 ---
 
-# Neural Prompt Injection Guard
+# AI Guard (Prompt Injection Defense)
 
-The **Semantic Security Guard** (`guard`) combines a sub-millisecond regex tier (L1) with a neural tier (L2) that asks a local Small Language Model (SLM) whether a tool call or tool response looks malicious. No cloud API is involved: the model runs in your own Ollama, Docker sidecar or custom OpenAI-compatible endpoint.
+**AI Guard** (`guard`) combines a sub-millisecond regex tier (L1) with a neural tier (L2) powered by a local AI Guard model (`FaradAiGuard` or Ollama) to inspect whether a tool call or tool response looks malicious. No cloud API is involved: the model runs in your own Ollama, FaradAiGuard Docker sidecar, or custom OpenAI-compatible endpoint.
 
 It protects against two cases:
 
@@ -25,7 +25,7 @@ graph TD
     Mode -->|"strict_always_hitl"| H["Human approval"]
     Mode -->|"guarded_block / guarded_hitl"| Run{"Guard engine running?"}
     Run -->|"No"| Allow2["Allow (L1-only fallback)"]
-    Run -->|"Yes"| L2["L2 SLM inspection"]
+    Run -->|"Yes"| L2["L2 AI Guard inspection"]
     L2 -->|"threat verdict"| Decide{"Decision"}
     Decide -->|"guarded_block, critical tool or default_action=block"| B2["Block -32004"]
     Decide -->|"guarded_hitl"| H
@@ -42,7 +42,7 @@ graph TD
    - looks like external egress (the name contains `search`, `fetch`, `http`, `web`, `browser`, `mail`, `slack`, `webhook`, `download`, `upload`, `api` and similar keywords) gives `guarded_hitl`;
    - matches `fast_path_tools` and the arguments are short or structured gives `autonomous`;
    - anything else gives `guarded_block` when the active model's `default_action` is `block`, otherwise `guarded_hitl`.
-3. **L2 inspection.** For `guarded_*` modes the tool name and arguments are sent to the active SLM.
+3. **L2 inspection.** For `guarded_*` modes the tool name and arguments are sent to the active AI Guard model.
 4. **Verdict.** A verdict of `BLOCKED`, `SUSPICIOUS` or `THREAT` is a threat. Any other verdict except `BENIGN` or `SAFE` is a threat when its malicious probability is at least the threshold score.
 5. **Action on a threat.**
    - Human-approved calls pass (Human Supremacy rule). The override is recorded in the audit metadata.
@@ -150,4 +150,4 @@ An agent can set a tool governance mode per tool (`autonomous`, `guarded_block`,
 - **Too many false positives.** Raise the threshold score, add safe tools to `fast_path_tools`, or set the tool to `autonomous` for that agent.
 - **A dangerous tool is not blocked.** Add it to `critical_blocks`, or set `guarded_block` for that tool.
 - **Approval prompts time out.** Increase the HITL timeout (`filters.hitl.timeout_seconds`).
-- **Start a local engine.** Ollama: `ollama pull llama-guard3:1b`. Docker sidecar: `docker run -d -p 8088:8088 ghcr.io/faradailab/prompt-guard:latest`.
+- **Start a local engine.** Ollama: `ollama pull hf.co/faradailab/guard-qwen3guard`. Docker sidecar (FaradAiGuard): `docker run -d -p 8088:8088 ghcr.io/faradailab/farad-ai-guard:qwen3guard`.

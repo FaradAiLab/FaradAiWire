@@ -1,11 +1,11 @@
 ---
 title: "Admin REST API Endpoints"
-description: "HTTP endpoints on Port 8095 for gateway status, configuration toggles, schema management, and telemetry."
+description: "HTTP endpoints on Port 19415 for gateway status, configuration toggles, schema management, AI Guard, and telemetry."
 ---
 
 # Admin REST API Endpoints 🛠️
 
-All endpoints documented here are hosted on FaradAiWire's **Admin Console Port (`8095`)** (bound to `127.0.0.1` by default via `--admin-host` / `admin_host`).
+All endpoints documented here are hosted on FaradAiWire's **Admin Console Port (`19415`)** (bound to `127.0.0.1` by default via `--admin-host` / `admin_host`).
 
 ### Authentication & CSRF Protections
 
@@ -22,20 +22,22 @@ Returns real-time health metrics, daemon version, uptime, and active session cou
 
 **Request:**
 ```bash
-curl -s http://127.0.0.1:8095/admin/status
+curl -s http://127.0.0.1:19415/admin/status
 ```
 
 **Response (`200 OK`):**
 ```json
 {
-  "status": "healthy",
-  "version": "v0.1.3",
-  "runtime_mode": "standalone",
-  "ingress_port": 8090,
-  "admin_port": 8095,
-  "uptime_seconds": 1842,
-  "active_sessions": 2,
-  "duckdb_events_count": 512
+  "status": "Ready",
+  "version": "v0.1.5",
+  "runtime_mode": "STANDALONE",
+  "ingress_port": 19410,
+  "ingress_host": "127.0.0.1",
+  "ingress_url": "http://127.0.0.1:19410",
+  "guard_tier": "neural_active",
+  "guard_model": "Qwen3Guard-0.6B",
+  "guard_endpoint": "http://127.0.0.1:11434",
+  "guard_latency_ms": 16.4
 }
 ```
 
@@ -51,7 +53,7 @@ Dynamically enables or disables a security filter at runtime without restarting 
 
 **Request:**
 ```bash
-curl -X POST http://127.0.0.1:8095/admin/config/toggle \
+curl -X POST http://127.0.0.1:19415/admin/config/toggle \
   -H "Content-Type: application/json" \
   -d '{
     "filter": "dlp",
@@ -77,7 +79,7 @@ Clears in-memory and on-disk schema caches in `./schemas/`, allowing tools to re
 
 **Request:**
 ```bash
-curl -X POST http://127.0.0.1:8095/admin/schemas/clear
+curl -X POST http://127.0.0.1:19415/admin/schemas/clear
 ```
 
 **Response (`200 OK`):**
@@ -119,7 +121,7 @@ Establishes a Server-Sent Events (SSE) stream delivering real-time JSON audit ev
 
 **Request:**
 ```bash
-curl -N http://127.0.0.1:8095/api/v1/logs/events
+curl -N http://127.0.0.1:19415/api/v1/logs/events
 ```
 
 **Streamed Event:**
@@ -130,20 +132,20 @@ data: {"id":"evt-109","timestamp":"2026-10-30T21:00:00Z","verdict":"BLOCKED","ru
 
 ---
 
-## 6. SLM Guard Probe & Configuration
+## 6. AI Guard Probe, Configuration & Model Lifecycle
 
-### `GET /admin/slm/probe`
-Probes configured or locally available SLM inference backends (Ollama, Docker Model Runner, local runtime, or custom URL). Any embedded URL credentials in `configured_url` are redacted before returning the JSON payload.
+### `GET /admin/guards/probe`
+Probes configured or locally available AI Guard inference backends (Ollama, FaradAiGuard Docker sidecar, or custom URL). Any embedded URL credentials in `configured_url` are redacted before returning the JSON payload.
 
-### `POST /admin/slm/configure`
-Updates SLM guard settings and atomically reloads configuration across the admin server and live gateway.
+### `POST /admin/guards/configure`
+Updates AI Guard discovery settings and atomically reloads configuration across the admin server and live gateway.
 
 **Request (`Content-Type: application/json`):**
 ```json
 {
   "classifier_url": "http://127.0.0.1:11434",
   "enabled": true,
-  "mode": "local"
+  "mode": "auto"
 }
 ```
 Supported optional fields: `classifier_url`, `enabled`, `mode`, `ollama_url`, `docker_url`, `custom_url`.
@@ -153,9 +155,18 @@ Supported optional fields: `classifier_url`, `enabled`, `mode`, `ollama_url`, `d
 {
   "status": "success",
   "classifier_url": "http://127.0.0.1:11434",
-  "mode": "local",
-  "message": "SLM configuration successfully updated"
+  "mode": "auto",
+  "message": "AI Guard configuration successfully updated"
 }
 ```
 *(Embedded credentials in `classifier_url` are redacted in the response.)*
+
+### Model Catalog, Lifecycle & HITL Endpoints
+- `GET /admin/guards/status`: Runtime status, PID, and health of the active AI Guard process.
+- `GET /admin/guards/models`: Lists all curated and installed AI Guard models.
+- `POST /admin/guards/models/{id}/install` & `GET /admin/guards/models/{id}/progress`: Trigger and track local model installation.
+- `POST /admin/guards/models/{id}/connect`: Verify and bind an external Ollama, Docker, or vLLM AI Guard endpoint.
+- `POST /admin/guards/models/{id}/activate` & `POST /admin/guards/models/deactivate`: Zero-downtime hot-swap or return to L1-only mode.
+- `POST /admin/guards/models/{id}/policy`: Configure `default_action` (`hitl` / `block`) and `critical_tools`.
+- `GET /admin/guards/hitl/pending` & `POST /admin/guards/hitl/respond`: Inspect and resolve pending HITL approvals.
 

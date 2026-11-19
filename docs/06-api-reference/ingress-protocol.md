@@ -1,15 +1,15 @@
 ---
 title: "MCP Ingress Protocol & Dual Transport"
-description: "JSON-RPC 2.0 streaming contracts over HTTP POST, SSE, and Stdio on Port 8090."
+description: "JSON-RPC 2.0 streaming contracts over HTTP POST, SSE, and Stdio on Port 19410."
 ---
 
 # MCP Ingress Protocol & Dual Transport 🔌
 
-FaradAiWire's Proxy Ingress listener operates on **Port 8090**, implementing standard Model Context Protocol (MCP) transport specifications.
+FaradAiWire's Proxy Ingress listener operates on **Port 19410**, implementing standard Model Context Protocol (MCP) transport specifications.
 
 ---
 
-## Ingress Endpoints (Port 8090)
+## Ingress Endpoints (Port 19410)
 
 | Endpoint | HTTP Method | Purpose |
 | :--- | :--- | :--- |
@@ -26,7 +26,7 @@ When an agent like Claude Code or Cursor connects to FaradAiWire via SSE:
 1. **Client Request:**
    ```http
    GET /sse HTTP/1.1
-   Host: 127.0.0.1:8090
+   Host: 127.0.0.1:19410
    Authorization: Bearer dev-local-key
    Accept: text/event-stream
    ```
@@ -52,7 +52,7 @@ When an agent like Claude Code or Cursor connects to FaradAiWire via SSE:
 For automated test runners, bash scripts, or simple agents:
 
 ```bash
-curl -X POST http://127.0.0.1:8090/message \
+curl -X POST http://127.0.0.1:19410/message \
   -H "Authorization: Bearer dev-local-key" \
   -H "Content-Type: application/json" \
   -d '{

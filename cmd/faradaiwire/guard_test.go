@@ -171,7 +171,7 @@ func TestRenderGuardStatus(t *testing.T) {
 	RenderGuardStatus(activeStatus, &buf, false)
 	out := buf.String()
 
-	if !strings.Contains(out, "Farad Ai SLM Security Guard Process Status") {
+	if !strings.Contains(out, "FaradAiWire AI Guard Process Status") {
 		t.Errorf("missing header in status output: %s", out)
 	}
 	if !strings.Contains(out, "qwen3guard") {
@@ -200,7 +200,7 @@ func TestRenderGuardStatus(t *testing.T) {
 	if !strings.Contains(stoppedOut, "STOPPED") {
 		t.Errorf("expected STOPPED in output: %s", stoppedOut)
 	}
-	if !strings.Contains(stoppedOut, "Inactive (No L2 SLM guard running)") {
+	if !strings.Contains(stoppedOut, "Inactive (No L2 AI Guard running)") {
 		t.Errorf("expected inactive note in output: %s", stoppedOut)
 	}
 }

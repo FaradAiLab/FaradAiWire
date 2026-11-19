@@ -517,12 +517,69 @@ paths:
           description: Archive snapshot not found
 
   # ============================================================================
-  # Guard & SLM Management Endpoints (Port 19415)
+  # AI Guard Management Endpoints (Port 19415)
   # ============================================================================
+  /admin/guards/probe:
+    get:
+      summary: Probe AI Guard Inference Providers
+      description: Probes configured or locally available AI Guard inference backends (Ollama, Docker FaradAiGuard, or custom URL) and redacts embedded URL credentials.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: url
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: AI Guard probe result
+        '400':
+          description: Invalid or disallowed probe target URL
+    post:
+      summary: Probe AI Guard Inference Providers (POST)
+      description: Probes a target AI Guard URL passed in the JSON request body (`{"url": "..."}`) or the currently configured endpoint.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: AI Guard probe result
+        '400':
+          description: Invalid or disallowed probe target URL
+
+  /admin/guards/configure:
+    post:
+      summary: Configure AI Guard Discovery & Endpoint
+      description: Updates AI Guard discovery settings (`mode`, `ollama_url`, `docker_url`, `custom_url`, `classifier_url`, `enabled`) and atomically reloads the gateway configuration.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                classifier_url: { type: string, example: "http://127.0.0.1:11434" }
+                enabled: { type: boolean, example: true }
+                mode: { type: string, enum: [auto, ollama, docker, custom], example: "auto" }
+                ollama_url: { type: string, example: "http://127.0.0.1:11434" }
+                docker_url: { type: string, example: "http://127.0.0.1:8088" }
+                custom_url: { type: string }
+      responses:
+        '200':
+          description: AI Guard configuration updated
+        '400':
+          description: Invalid request body or disallowed URL
+        '403':
+          description: Forbidden in MANAGED runtime mode
+
   /admin/guards/status:
     get:
-      summary: SLM Guard Subprocess Status
-      description: Reports the runtime status, PID, and health of the active semantic guard model.
+      summary: AI Guard Subprocess Status
+      description: Reports the runtime status, PID, and health of the active AI Guard model.
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
@@ -541,8 +598,8 @@ paths:
 
   /admin/guards/models:
     get:
-      summary: List Guard Models Catalog
-      description: Lists all available and installed small language models for semantic guardrails.
+      summary: List AI Guard Models Catalog
+      description: Lists all available and installed AI Guard models for deep-path inspection.
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
@@ -858,11 +915,11 @@ components:
         is_managed: { type: boolean }
         organization: { type: string, example: "Corporate Organization" }
         locked_editing: { type: boolean }
-        slm_tier: { type: string, example: "disabled" }
-        slm_model: { type: string, example: "L1 Static Rules (Fallback)" }
-        slm_endpoint: { type: string, example: "In-Memory Precompiled Regex" }
-        slm_latency_ms: { type: number, example: 0.2 }
-        slm_status:
+        guard_tier: { type: string, example: "disabled" }
+        guard_model: { type: string, example: "L1 Static Rules (Fallback)" }
+        guard_endpoint: { type: string, example: "In-Memory Precompiled Regex" }
+        guard_latency_ms: { type: number, example: 0.2 }
+        guard_status:
           type: object
           properties:
             tier: { type: string }

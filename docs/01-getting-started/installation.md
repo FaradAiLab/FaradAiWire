@@ -125,10 +125,10 @@ faradaiwire doctor
 
 ```text
 [✓] Configuration discovered at: /Users/username/.faradaiwire/config.yaml
-[✓] Ingress port 8090 is available
-[✓] Admin port 8095 is available
+[✓] Ingress port 19410 is available
+[✓] Admin port 19415 is available
 [✓] Local DuckDB telemetry initialized
-[i] SLM Provider: Ollama detected at http://127.0.0.1:11434 (llama-guard3:1b ready)
+[i] AI Guard Provider: Ollama detected at http://127.0.0.1:11434 (guard-qwen3guard ready)
 [✓] Gateway status: ALL CHECKS PASSED
 ```
 

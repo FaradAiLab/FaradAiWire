@@ -7,7 +7,7 @@ description: "Manage per-agent security profiles, tool authorizations, and DLP o
 
 Developer environments frequently run multiple specialized AI agents simultaneously—for example, a `code-reviewer` agent, an autonomous `database-migrator`, and a `support-assistant`. Each agent requires different tool privileges and data access limits.
 
-FaradAiWire supports **Per-Agent Domain Isolation** ([ADR-0015](../adr/0015-unified-hot-reload-and-multi-agent-domain-isolation.md)), allowing you to define granular security profiles for each agent persona in the `agents/` directory.
+FaradAiWire supports **Per-Agent Domain Isolation**, allowing you to define granular security profiles for each agent persona in the `agents/` directory.
 
 ```mermaid
 graph TD
@@ -71,7 +71,7 @@ hitl:
 When AI agent clients send tool requests, they include the `X-Farad-Agent` HTTP header:
 
 ```bash
-curl -X POST http://127.0.0.1:8090/message \
+curl -X POST http://127.0.0.1:19410/message \
   -H "Authorization: Bearer dev-local-key" \
   -H "X-Farad-Agent: code-reviewer" \
   -H "Content-Type: application/json" \

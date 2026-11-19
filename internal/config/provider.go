@@ -568,7 +568,7 @@ type DLPPattern struct {
 	Placeholder string `yaml:"placeholder,omitempty" json:"placeholder,omitempty"`
 }
 
-// DiscoveryConfig configures SLM inference provider auto-detection and custom endpoints.
+// DiscoveryConfig configures AI Guard inference provider auto-detection and custom endpoints.
 type DiscoveryConfig struct {
 	Mode      string `yaml:"mode" json:"mode"`             // "auto" | "ollama" | "docker" | "custom"
 	OllamaURL string `yaml:"ollama_url" json:"ollama_url"` // default "http://127.0.0.1:11434"
@@ -576,7 +576,7 @@ type DiscoveryConfig struct {
 	CustomURL string `yaml:"custom_url" json:"custom_url"`
 }
 
-// GuardConfig configures the extensible SLM security guard engine (ADR 0032 / GUARD-004 / ADR 0041).
+// GuardConfig configures the extensible AI Guard security engine (GUARD-004).
 type GuardConfig struct {
 	Enabled          bool            `yaml:"enabled" json:"enabled"`
 	L1Patterns       []DLPPattern    `yaml:"l1_patterns" json:"l1_patterns"`
