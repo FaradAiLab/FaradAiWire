@@ -3,6 +3,7 @@ package settings
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,13 +69,13 @@ var Registry = map[string]SettingMeta{
 	},
 	"limits.max_preview_bytes": {
 		Key:         "limits.max_preview_bytes",
-		Label:       "Snippet Preview Limit",
-		Description: "Maximum payload preview length stored in telemetry events and audit logs",
+		Label:       "Audit Payload Capture Limit",
+		Description: "Maximum per-field byte length retained for request and response payloads in local DuckDB audit records",
 		Category:    "limits",
 		Type:        TypeInt,
-		DefaultVal:  4096,
-		Min:         256,
-		Max:         65536,
+		DefaultVal:  524288,  // 512 KB
+		Min:         65536,   // 64 KB
+		Max:         4194304, // 4 MB
 		Unit:        "bytes",
 	},
 
@@ -194,6 +195,25 @@ var Registry = map[string]SettingMeta{
 		Max:         1440,
 		Unit:        "minutes",
 	},
+	"maintenance.audit_retention_days": {
+		Key:         "maintenance.audit_retention_days",
+		Label:       "Audit Log Retention Window",
+		Description: "Number of days to retain local tool invocation records in DuckDB before automatic cleanup",
+		Category:    "maintenance",
+		Type:        TypeInt,
+		DefaultVal:  30,
+		Min:         7,
+		Max:         365,
+		Unit:        "days",
+	},
+	"maintenance.retain_local_payloads": {
+		Key:         "maintenance.retain_local_payloads",
+		Label:       "Local Full Payload Capture",
+		Description: "Store unredacted request and response payloads (including blocked/masked calls) strictly inside the local DuckDB store",
+		Category:    "maintenance",
+		Type:        TypeBool,
+		DefaultVal:  true,
+	},
 }
 
 // ErrUnknownSetting indicates an attempted mutation of an unregistered parameter key.
@@ -251,6 +271,9 @@ func validateMeta(key string, meta SettingMeta, val any) error {
 			floatVal = float64(v)
 		default:
 			return fmt.Errorf("%w: key %q expects a float value, got %T", ErrInvalidValue, key, val)
+		}
+		if math.IsNaN(floatVal) || math.IsInf(floatVal, 0) {
+			return fmt.Errorf("%w: key %q must be a finite number", ErrInvalidValue, key)
 		}
 		if meta.Min > 0 && floatVal < meta.Min {
 			return fmt.Errorf("%w: key %q value %v is below minimum allowed %v", ErrInvalidValue, key, floatVal, meta.Min)
@@ -405,6 +428,10 @@ func ApplySetting(s *OperationalSettings, key string, val any) error {
 			s.Guard.ThresholdScore = v
 		case float32:
 			s.Guard.ThresholdScore = float64(v)
+		case int:
+			s.Guard.ThresholdScore = float64(v)
+		case int64:
+			s.Guard.ThresholdScore = float64(v)
 		default:
 			return fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
 		}
@@ -464,6 +491,23 @@ func ApplySetting(s *OperationalSettings, key string, val any) error {
 		default:
 			return fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
 		}
+	case "maintenance.audit_retention_days":
+		switch v := val.(type) {
+		case int:
+			s.Maintenance.AuditRetentionDays = v
+		case int64:
+			s.Maintenance.AuditRetentionDays = int(v)
+		case float64:
+			s.Maintenance.AuditRetentionDays = int(v)
+		default:
+			return fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
+		}
+	case "maintenance.retain_local_payloads":
+		b, ok := val.(bool)
+		if !ok {
+			return fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
+		}
+		s.Maintenance.RetainLocalPayloads = b
 
 	default:
 		return fmt.Errorf("%w: key %q has no mapping", ErrUnknownSetting, key)
@@ -508,6 +552,10 @@ func ExtractSetting(s *OperationalSettings, key string) (any, error) {
 		return s.Maintenance.SessionIdleTimeoutMin, nil
 	case "maintenance.correlation_ttl_min":
 		return s.Maintenance.CorrelationTTLMin, nil
+	case "maintenance.audit_retention_days":
+		return s.Maintenance.AuditRetentionDays, nil
+	case "maintenance.retain_local_payloads":
+		return s.Maintenance.RetainLocalPayloads, nil
 
 	default:
 		return nil, fmt.Errorf("%w: key %q has no mapping", ErrUnknownSetting, key)

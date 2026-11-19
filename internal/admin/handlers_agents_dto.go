@@ -23,6 +23,28 @@ type AgentPayload struct {
 	RestoreRetainedProtocols []string                                       `json:"restore_retained_protocols,omitempty"`
 	RateLimit                *agent.RateLimitOverride                       `json:"rate_limit,omitempty"`
 	LoopProtection           *agent.LoopProtectionOverride                  `json:"loop_protection,omitempty"`
+	SchemaValidation         *agent.SchemaValidationOverride                `json:"schema_validation,omitempty"`
+	Guard                    *agent.GuardOverride                           `json:"guard,omitempty"`
+}
+
+func validateSchemaValidation(s *agent.SchemaValidationOverride) error {
+	if s == nil {
+		return nil
+	}
+	if !s.Mode.IsValid() {
+		return fmt.Errorf("invalid schema_validation mode '%s': allowed values are 'enforce', 'audit', or 'off'", s.Mode)
+	}
+	return nil
+}
+
+func validateGuardOverride(g *agent.GuardOverride) error {
+	if g == nil {
+		return nil
+	}
+	if !g.Mode.IsValid() {
+		return fmt.Errorf("invalid guard mode '%s': allowed values are 'enforce', 'audit', or 'off'", g.Mode)
+	}
+	return nil
 }
 
 func validateRateLimit(r *agent.RateLimitOverride) error {
@@ -70,4 +92,3 @@ func validateRetainedGovernance(retained map[string]map[string]agent.ToolGoverna
 	}
 	return nil
 }
-

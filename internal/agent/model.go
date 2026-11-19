@@ -166,6 +166,60 @@ type LoopProtectionOverride struct {
 	ExcludeTools  []string `json:"exclude_tools,omitempty"`
 }
 
+// SchemaValidationMode defines per-agent enforcement behavior for SchemaFilter.
+type SchemaValidationMode string
+
+const (
+	// SchemaValidationEnforce validates tool arguments strictly and blocks invalid calls (default).
+	SchemaValidationEnforce SchemaValidationMode = "enforce"
+	// SchemaValidationAudit records schema mismatches in AuditMetadata without blocking execution.
+	SchemaValidationAudit SchemaValidationMode = "audit"
+	// SchemaValidationOff bypasses schema validation for the agent profile.
+	SchemaValidationOff SchemaValidationMode = "off"
+)
+
+// IsValid returns true when m is a supported SchemaValidationMode value.
+func (m SchemaValidationMode) IsValid() bool {
+	switch m {
+	case SchemaValidationEnforce, SchemaValidationAudit, SchemaValidationOff:
+		return true
+	default:
+		return false
+	}
+}
+
+// SchemaValidationOverride configures schema validation governance for an individual agent.
+type SchemaValidationOverride struct {
+	Mode SchemaValidationMode `json:"mode"` // "enforce" (default), "audit", or "off"
+}
+
+// GuardEnforcementMode defines per-agent enforcement behavior for Semantic Security Guard.
+type GuardEnforcementMode string
+
+const (
+	// GuardModeEnforce applies L1/L2 guard policies strictly (default).
+	GuardModeEnforce GuardEnforcementMode = "enforce"
+	// GuardModeAudit evaluates guard rules and records findings in AuditMetadata without blocking.
+	GuardModeAudit GuardEnforcementMode = "audit"
+	// GuardModeOff bypasses request L1 block and response guard blocking for the agent profile.
+	GuardModeOff GuardEnforcementMode = "off"
+)
+
+// IsValid returns true when m is a supported GuardEnforcementMode value.
+func (m GuardEnforcementMode) IsValid() bool {
+	switch m {
+	case GuardModeEnforce, GuardModeAudit, GuardModeOff:
+		return true
+	default:
+		return false
+	}
+}
+
+// GuardOverride configures Semantic Security Guard enforcement behavior for an individual agent.
+type GuardOverride struct {
+	Mode GuardEnforcementMode `json:"mode"` // "enforce" (default), "audit", or "off"
+}
+
 // RouteConfig represents an agent's routing policy and attached MCP protocols.
 type RouteConfig struct {
 	AgentID            string                                   `json:"agent_id"`
@@ -179,6 +233,24 @@ type RouteConfig struct {
 	RetainedGovernance map[string]map[string]ToolGovernanceMode `json:"retained_governance,omitempty"` // Layer 3 configuration retention per detached protocol
 	RateLimit          *RateLimitOverride                       `json:"rate_limit,omitempty"`          // Agent-level Rate Limiting override (ADR-0042)
 	LoopProtection     *LoopProtectionOverride                  `json:"loop_protection,omitempty"`     // Agent-level Loop Protection override (ADR-0042)
+	SchemaValidation   *SchemaValidationOverride                `json:"schema_validation,omitempty"`   // Agent-level Schema Validation mode (SEC-023)
+	Guard              *GuardOverride                           `json:"guard,omitempty"`               // Agent-level Semantic Security Guard mode (SEC-023)
+}
+
+// GetSchemaValidationMode resolves the effective SchemaValidationMode, defaulting to enforce.
+func (r *RouteConfig) GetSchemaValidationMode() SchemaValidationMode {
+	if r == nil || r.SchemaValidation == nil || !r.SchemaValidation.Mode.IsValid() {
+		return SchemaValidationEnforce
+	}
+	return r.SchemaValidation.Mode
+}
+
+// GetGuardMode resolves the effective GuardEnforcementMode, defaulting to enforce.
+func (r *RouteConfig) GetGuardMode() GuardEnforcementMode {
+	if r == nil || r.Guard == nil || !r.Guard.Mode.IsValid() {
+		return GuardModeEnforce
+	}
+	return r.Guard.Mode
 }
 
 // UnmarshalJSON provides flexible unmarshaling for agent_name/name and sets default routing mode.
@@ -268,6 +340,18 @@ func (r *RouteConfig) Clone() *RouteConfig {
 		}
 		if r.LoopProtection.ExcludeTools != nil {
 			clone.LoopProtection.ExcludeTools = append([]string(nil), r.LoopProtection.ExcludeTools...)
+		}
+	}
+
+	if r.SchemaValidation != nil {
+		clone.SchemaValidation = &SchemaValidationOverride{
+			Mode: r.SchemaValidation.Mode,
+		}
+	}
+
+	if r.Guard != nil {
+		clone.Guard = &GuardOverride{
+			Mode: r.Guard.Mode,
 		}
 	}
 

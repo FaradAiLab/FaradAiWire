@@ -7,17 +7,22 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 )
 
-// RetentionCleaner periodically sweeps the DuckDB database to enforce 14-day retention and 1 GB file size ceiling.
+// RetentionCleaner periodically sweeps the DuckDB database to enforce configurable day retention (default 30 days) and 1 GB file size ceiling.
 type RetentionCleaner struct {
 	db            *sql.DB
 	dbPath        string
 	retentionDays int
 	maxSizeBytes  int64
 	interval      time.Duration
+	settingsCache atomic.Pointer[settings.Cache]
 	stopCh        chan struct{}
+	stopOnce      sync.Once
 	wg            sync.WaitGroup
 	mu            sync.Mutex
 }
@@ -25,7 +30,7 @@ type RetentionCleaner struct {
 // NewRetentionCleaner initializes a new retention cleaner instance.
 func NewRetentionCleaner(db *sql.DB, dbPath string, retentionDays int, maxSizeBytes int64, interval time.Duration) *RetentionCleaner {
 	if retentionDays <= 0 {
-		retentionDays = 14
+		retentionDays = 30
 	}
 	if maxSizeBytes <= 0 {
 		maxSizeBytes = 1024 * 1024 * 1024 // 1 GB
@@ -42,6 +47,28 @@ func NewRetentionCleaner(db *sql.DB, dbPath string, retentionDays int, maxSizeBy
 		interval:      interval,
 		stopCh:        make(chan struct{}),
 	}
+}
+
+// SetSettingsCache attaches a live atomic operational settings cache so runtime
+// adjustments to maintenance.audit_retention_days apply without daemon restarts.
+func (r *RetentionCleaner) SetSettingsCache(cache *settings.Cache) {
+	if r == nil {
+		return
+	}
+	r.settingsCache.Store(cache)
+}
+
+func (r *RetentionCleaner) effectiveRetentionDays() int {
+	days := r.retentionDays
+	if cache := r.settingsCache.Load(); cache != nil {
+		if s := cache.Get(); s != nil && s.Maintenance.AuditRetentionDays >= 7 && s.Maintenance.AuditRetentionDays <= 365 {
+			days = s.Maintenance.AuditRetentionDays
+		}
+	}
+	if days <= 0 {
+		days = 30
+	}
+	return days
 }
 
 // Start launches the background retention loop. It runs one immediate sweep and then runs periodically.
@@ -75,9 +102,14 @@ func (r *RetentionCleaner) Start() {
 	}()
 }
 
-// Stop gracefully stops the background retention cleaner.
+// Stop gracefully stops the background retention cleaner. Safe to call multiple times.
 func (r *RetentionCleaner) Stop() {
-	close(r.stopCh)
+	if r == nil {
+		return
+	}
+	r.stopOnce.Do(func() {
+		close(r.stopCh)
+	})
 	r.wg.Wait()
 }
 
@@ -90,16 +122,18 @@ func (r *RetentionCleaner) EnforceRetention(ctx context.Context) error {
 		return fmt.Errorf("database connection is nil")
 	}
 
-	// 1. Time-based retention pruning (delete entries older than retentionDays)
-	cutoff := time.Now().AddDate(0, 0, -r.retentionDays)
+	// 1. Time-based retention pruning (delete entries older than effective retention days)
+	effectiveDays := r.effectiveRetentionDays()
+	cutoff := time.Now().AddDate(0, 0, -effectiveDays)
 	res, err := r.db.ExecContext(ctx, "DELETE FROM tool_audit_logs WHERE timestamp < ?", cutoff)
 	if err != nil {
 		return fmt.Errorf("failed to prune expired audit logs: %w", err)
 	}
+	_, _ = r.db.ExecContext(ctx, "DELETE FROM tool_audit_responses WHERE timestamp < ?", cutoff)
 	if rowsAffected, _ := res.RowsAffected(); rowsAffected > 0 {
-		slog.Info("DuckDB telemetry pruned expired records",
+		slog.InfoContext(ctx, "DuckDB telemetry pruned expired records",
 			slog.Int64("rows_deleted", rowsAffected),
-			slog.Int("retention_days", r.retentionDays),
+			slog.Int("retention_days", effectiveDays),
 		)
 	}
 
@@ -107,7 +141,7 @@ func (r *RetentionCleaner) EnforceRetention(ctx context.Context) error {
 	if r.dbPath != "" && r.dbPath != ":memory:" {
 		fi, statErr := os.Stat(r.dbPath)
 		if statErr == nil && fi.Size() > r.maxSizeBytes {
-			slog.Warn("DuckDB telemetry exceeded size ceiling, starting aggressive pruning",
+			slog.WarnContext(ctx, "DuckDB telemetry exceeded size ceiling, starting aggressive pruning",
 				slog.Int64("current_size_bytes", fi.Size()),
 				slog.Int64("max_size_bytes", r.maxSizeBytes),
 			)
@@ -130,13 +164,18 @@ func (r *RetentionCleaner) EnforceRetention(ctx context.Context) error {
 				if affected == 0 {
 					break
 				}
+				// Prune orphaned response rows whose parent invocation was purged
+				_, _ = r.db.ExecContext(ctx, `
+					DELETE FROM tool_audit_responses
+					WHERE invocation_id NOT IN (SELECT id FROM tool_audit_logs)
+				`)
 
 				// Checkpoint after batch
 				_, _ = r.db.ExecContext(ctx, "CHECKPOINT;")
 
 				curFi, curErr := os.Stat(r.dbPath)
 				if curErr == nil && curFi.Size() <= r.maxSizeBytes {
-					slog.Info("DuckDB telemetry file size brought under ceiling",
+					slog.InfoContext(ctx, "DuckDB telemetry file size brought under ceiling",
 						slog.Int64("current_size_bytes", curFi.Size()),
 					)
 					break
@@ -147,7 +186,7 @@ func (r *RetentionCleaner) EnforceRetention(ctx context.Context) error {
 
 	// 3. Issue DuckDB CHECKPOINT to reclaim WAL and compact storage pages
 	if _, cpErr := r.db.ExecContext(ctx, "CHECKPOINT;"); cpErr != nil {
-		slog.Debug("DuckDB checkpoint execution note", slog.String("info", cpErr.Error()))
+		slog.DebugContext(ctx, "DuckDB checkpoint execution note", slog.String("info", cpErr.Error()))
 	}
 
 	return nil

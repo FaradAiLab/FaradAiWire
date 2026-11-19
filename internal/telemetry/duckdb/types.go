@@ -2,6 +2,8 @@ package duckdb
 
 import (
 	"time"
+
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 )
 
 // Config configures the embedded DuckDB telemetry engine.
@@ -12,15 +14,16 @@ type Config struct {
 	MaxPayloadBytes int
 	BufferSize      int
 	BatchFlushMs    int
+	SettingsCache   *settings.Cache
 }
 
 // DefaultConfig returns optimal production defaults for Farad Ai Core.
 func DefaultConfig() Config {
 	return Config{
 		DBPath:          "", // Filled with ~/.faradaiwire/wire.duckdb or :memory: in tests
-		RetentionDays:   14,
+		RetentionDays:   30,
 		MaxSizeBytes:    1024 * 1024 * 1024, // 1 GB ceiling
-		MaxPayloadBytes: 64 * 1024,          // 64 KB truncation ceiling
+		MaxPayloadBytes: 512 * 1024,         // 512 KB truncation ceiling
 		BufferSize:      4096,               // Event channel buffer
 		BatchFlushMs:    100,                // Flush write-behind batch every 100ms
 	}
@@ -28,20 +31,28 @@ func DefaultConfig() Config {
 
 // AuditRecord represents a persisted analytical audit record in DuckDB.
 type AuditRecord struct {
-	ID                string    `json:"id"`
-	Timestamp         time.Time `json:"timestamp"`
-	AgentName         string    `json:"agent_name"`
-	ReleaseVersion    string    `json:"release_version"`
-	ToolName          string    `json:"tool_name"`
-	CallerRole        string    `json:"caller_role"`
-	Decision          string    `json:"decision"` // ALLOW, BLOCK, MASK, RATE_LIMITED, etc.
-	MatchedRule       string    `json:"matched_rule,omitempty"`
-	LatencyMs         float64   `json:"latency_ms"`
-	InputSizeBytes    int       `json:"input_size_bytes"`
-	OutputSizeBytes   int       `json:"output_size_bytes"`
-	RawPayloadPreview      string `json:"raw_payload_preview"`
-	OriginalPayloadPreview string `json:"original_payload_preview,omitempty"`
-	IntegrityHash          string `json:"integrity_hash"`
+	ID                     string    `json:"id"`
+	Timestamp              time.Time `json:"timestamp"`
+	TraceID                string    `json:"trace_id,omitempty"`
+	AgentName              string    `json:"agent_name"`
+	ReleaseVersion         string    `json:"release_version"`
+	ToolName               string    `json:"tool_name"`
+	CallerRole             string    `json:"caller_role"`
+	Decision               string    `json:"decision"` // PENDING, ALLOWED, BLOCKED, MASKED, AUDIT, CRITICAL
+	RequestDecision        string    `json:"request_decision,omitempty"`
+	ResponseDecision       string    `json:"response_decision,omitempty"`
+	MatchedRule            string    `json:"matched_rule,omitempty"`
+	ErrorMessage           string    `json:"error_message,omitempty"`
+	LatencyMs              float64   `json:"latency_ms"`
+	InputSizeBytes         int       `json:"input_size_bytes"`
+	OutputSizeBytes        int       `json:"output_size_bytes"`
+	RawPayloadPreview      string    `json:"raw_payload_preview"`
+	OriginalPayloadPreview string    `json:"original_payload_preview,omitempty"`
+	OriginalRequest        string    `json:"original_request,omitempty"`
+	Request                string    `json:"request,omitempty"`
+	OriginalResponse       string    `json:"original_response,omitempty"`
+	Response               string    `json:"response,omitempty"`
+	IntegrityHash          string    `json:"integrity_hash"`
 
 	// UI Compatibility Aliases for embedded console
 	Method      string                 `json:"method,omitempty"`
@@ -52,13 +63,15 @@ type AuditRecord struct {
 
 // QueryFilter defines criteria for querying audit logs from DuckDB.
 type QueryFilter struct {
-	Limit     int
-	Offset    int
-	Decision  string
-	AgentName string
-	ToolName  string
-	Since     *time.Time
-	Until     *time.Time
+	Limit       int
+	Offset      int
+	Decision    string
+	AgentName   string
+	ToolName    string
+	TraceID     string
+	SummaryOnly bool
+	Since       *time.Time
+	Until       *time.Time
 }
 
 // QueryResult represents the paginated result of an audit query.

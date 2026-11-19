@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -417,12 +418,60 @@ func TestAdminServer_CORSOriginAllowlist(t *testing.T) {
 type mockTelemetryReader struct {
 	lastFilter duckdb.QueryFilter
 	result     *duckdb.QueryResult
+	detail     *duckdb.AuditRecord
 	err        error
 }
 
 func (m *mockTelemetryReader) QueryAuditLogs(ctx context.Context, f duckdb.QueryFilter) (*duckdb.QueryResult, error) {
 	m.lastFilter = f
 	return m.result, m.err
+}
+
+func (m *mockTelemetryReader) GetAuditLogByID(ctx context.Context, id string) (*duckdb.AuditRecord, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.detail != nil && (m.detail.ID == id || m.detail.TraceID == id) {
+		return m.detail, nil
+	}
+	return nil, sql.ErrNoRows
+}
+
+func TestAdminServer_AuditLogDetail(t *testing.T) {
+	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	server := NewAdminServer(cfg, nil, nil)
+	server.SetTelemetryEngine(&mockTelemetryReader{
+		detail: &duckdb.AuditRecord{
+			ID:               "inv-123",
+			TraceID:          "trace-123",
+			AgentName:        "antigravity",
+			ToolName:         "codegraph_explore",
+			Decision:         "BLOCKED",
+			RequestDecision:  "ALLOWED",
+			ResponseDecision: "BLOCKED",
+			OriginalRequest:  `{"query":"test"}`,
+			OriginalResponse: `{"result":"secret"}`,
+			Response:         `{"error":"blocked"}`,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/audit-logs/inv-123", nil)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Status string             `json:"status"`
+		Record duckdb.AuditRecord `json:"record"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if payload.Record.OriginalRequest != `{"query":"test"}` || payload.Record.Response != `{"error":"blocked"}` {
+		t.Fatalf("unexpected detail record: %+v", payload.Record)
+	}
 }
 
 func TestAdminServer_AuditLogs_DuckDB(t *testing.T) {

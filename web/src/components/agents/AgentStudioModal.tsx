@@ -8,6 +8,8 @@ import {
   ToolGovernanceMode,
   RateLimitOverride,
   LoopProtectionOverride,
+  SchemaValidationOverride,
+  GuardOverride,
 } from '../../types'
 import { api } from '../../api'
 import { Drawer } from '../ui/Drawer'
@@ -64,6 +66,8 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
     window_seconds: 10,
     exclude_tools: [],
   })
+  const [schemaValidation, setSchemaValidation] = useState<SchemaValidationOverride>({ mode: 'enforce' })
+  const [guardOverride, setGuardOverride] = useState<GuardOverride>({ mode: 'enforce' })
   const [savingAgent, setSavingAgent] = useState(false)
   const [isCreatedInSession, setIsCreatedInSession] = useState(false)
   const [isDlpSaving, setIsDlpSaving] = useState(false)
@@ -139,6 +143,8 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
         exclude_tools: [],
       }
     )
+    setSchemaValidation(agent.config?.schema_validation || { mode: 'enforce' })
+    setGuardOverride(agent.config?.guard || { mode: 'enforce' })
   }
 
   const reloadFromRemote = async (targetName: string) => {
@@ -182,6 +188,8 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
         window_seconds: 10,
         exclude_tools: [],
       })
+      setSchemaValidation({ mode: 'enforce' })
+      setGuardOverride({ mode: 'enforce' })
     }
   }, [isOpen, mode, initialAgent])
 
@@ -348,6 +356,8 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
       restore_retained_protocols: restoredProtocols.length > 0 ? restoredProtocols : undefined,
       rate_limit: rateLimit,
       loop_protection: loopProtection,
+      schema_validation: schemaValidation,
+      guard: guardOverride,
     }
 
     try {
@@ -686,6 +696,10 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
             onChangeRateLimit={setRateLimit}
             loopProtection={loopProtection}
             onChangeLoopProtection={setLoopProtection}
+            schemaValidation={schemaValidation}
+            onChangeSchemaValidation={setSchemaValidation}
+            guardOverride={guardOverride}
+            onChangeGuardOverride={setGuardOverride}
             availableTools={availableTools}
             activeFilters={activeFilters}
           />

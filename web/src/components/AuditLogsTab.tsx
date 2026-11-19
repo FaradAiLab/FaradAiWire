@@ -41,15 +41,24 @@ function normalizeAuditEvent(raw: any): AuditEvent {
   let decision = rawDecision
   let severity: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'CRITICAL' | 'AUDIT' = raw.severity || 'INFO'
 
-  if (rawDecision === 'AUDIT' || raw.severity === 'AUDIT') {
+  if (rawDecision === 'CRITICAL' || raw.severity === 'CRITICAL') {
+    severity = 'CRITICAL'
+    decision = 'CRITICAL'
+  } else if (rawDecision === 'AUDIT' || raw.severity === 'AUDIT') {
     severity = 'AUDIT'
     decision = 'AUDIT'
-  } else if (rawDecision === 'BLOCKED' || rawDecision === 'DENIED' || raw.error_code || raw.error) {
+  } else if (rawDecision === 'BLOCKED' || rawDecision === 'DENIED') {
     severity = 'ERROR'
     decision = 'BLOCKED'
+  } else if (rawDecision === 'ERROR' || raw.error_code || raw.error) {
+    severity = 'ERROR'
+    decision = rawDecision === 'ERROR' ? 'ERROR' : 'BLOCKED'
   } else if (rawDecision === 'MASKED' || raw.severity === 'WARN') {
     severity = 'WARN'
     decision = 'MASKED'
+  } else if (rawDecision === 'PENDING') {
+    severity = 'INFO'
+    decision = 'PENDING'
   } else if (rawDecision === 'ALLOWED' || rawDecision === 'ALLOW' || raw.severity === 'INFO') {
     severity = 'INFO'
     decision = 'ALLOWED'
@@ -61,7 +70,10 @@ function normalizeAuditEvent(raw: any): AuditEvent {
   const event_type = raw.event_type || (raw.method ? `MCP ${raw.method}` : 'EVENT')
   const agent = raw.agent || raw.agent_name || raw.user_context?.agent_name || ''
   const layer = raw.layer || raw.filter_name || raw.path_type || ''
-  const error = raw.error || (decision === 'BLOCKED' ? raw.message : undefined)
+  const error =
+    raw.error ||
+    raw.error_message ||
+    (decision === 'BLOCKED' ? raw.message || raw.matched_rule : undefined)
 
   const payload_preview =
     raw.raw_payload_preview ||
@@ -119,16 +131,42 @@ function normalizeAuditEvent(raw: any): AuditEvent {
     agent,
     client_session_id: raw.client_session_id,
     tool_name: raw.tool_name,
+    phase: raw.phase,
+    request_decision: raw.request_decision,
+    response_decision: raw.response_decision,
     matched_rule,
     audited_rules,
     latency_ms,
+    input_size_bytes: raw.input_size_bytes,
+    output_size_bytes: raw.output_size_bytes,
     payload_preview,
     raw_payload_preview: payload_preview,
     original_payload,
     original_payload_preview: original_payload,
+    original_request: raw.original_request,
+    request: raw.request,
+    original_response: raw.original_response,
+    response: raw.response,
+    error_message: raw.error_message,
     details,
     error,
   }
+}
+
+const VERDICT_RANK: Record<string, number> = {
+  PENDING: 0,
+  ALLOWED: 1,
+  AUDIT: 2,
+  MASKED: 3,
+  ERROR: 4,
+  BLOCKED: 5,
+  CRITICAL: 6,
+}
+
+function mergeCompositeDecision(a?: string, b?: string): string {
+  const ua = (a || '').toUpperCase()
+  const ub = (b || '').toUpperCase()
+  return (VERDICT_RANK[ub] ?? 0) >= (VERDICT_RANK[ua] ?? 0) ? ub || ua : ua
 }
 
 function formatSmartDate(isoString: string): { display: string; iso: string } {
@@ -259,12 +297,15 @@ export const AuditLogsTab: React.FC = () => {
   const [activeTabs, setActiveTabs] = useState<Record<string, 'text' | 'diff' | 'json' | 'raw'>>({})
   const [diffLayout, setDiffLayout] = useState<'split' | 'stacked'>('split')
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [detailLoadingIds, setDetailLoadingIds] = useState<Set<string>>(new Set())
+  const [loadedDetailIds, setLoadedDetailIds] = useState<Set<string>>(new Set())
 
   const logContainerRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
 
   // Initial load of historical logs from DuckDB
   const fetchHistoricalLogs = () => {
+    setLoadedDetailIds(new Set())
     api
       .getAuditLogs()
       .then((res: any) => {
@@ -300,7 +341,62 @@ export const AuditLogsTab: React.FC = () => {
       try {
         const list = Array.isArray(rawBatch) ? rawBatch : [rawBatch]
         const normalized = list.map(normalizeAuditEvent)
-        setEvents((prev) => [...prev, ...normalized].slice(-500))
+        const updatedKeys: string[] = []
+
+        setEvents((prev) => {
+          const next = [...prev]
+          for (const item of normalized) {
+            const key = item.id || item.trace_id
+            const matchIdx = item.id
+              ? next.findIndex((e) => e.id === item.id)
+              : item.trace_id
+              ? next.findIndex((e) => !e.id && e.trace_id === item.trace_id)
+              : -1
+            if (matchIdx >= 0 && (item.phase === 'response' || item.phase === 'complete')) {
+              const existing = next[matchIdx]
+              const mergedDec = mergeCompositeDecision(existing.request_decision || existing.decision, item.decision)
+              const mergedRule =
+                existing.matched_rule && item.matched_rule && existing.matched_rule !== item.matched_rule
+                  ? `${existing.matched_rule},${item.matched_rule}`
+                  : item.matched_rule || existing.matched_rule
+              next[matchIdx] = {
+                ...existing,
+                decision: mergedDec,
+                severity:
+                  mergedDec === 'CRITICAL'
+                    ? 'CRITICAL'
+                    : mergedDec === 'BLOCKED' || mergedDec === 'ERROR'
+                    ? 'ERROR'
+                    : mergedDec === 'MASKED'
+                    ? 'WARN'
+                    : mergedDec === 'AUDIT'
+                    ? 'AUDIT'
+                    : existing.severity,
+                response_decision: item.response_decision || item.decision,
+                matched_rule: mergedRule,
+                latency_ms: (existing.latency_ms || 0) + (item.latency_ms || 0),
+                error: item.error || existing.error,
+                error_message: item.error_message || existing.error_message,
+                payload_preview: item.payload_preview || existing.payload_preview,
+              }
+              if (key) updatedKeys.push(key)
+            } else if (matchIdx >= 0) {
+              // Deduplicate repeated request-phase broadcasts for the same invocation ID
+              next[matchIdx] = { ...next[matchIdx], ...item }
+            } else {
+              next.push(item)
+            }
+          }
+          return next.slice(-500)
+        })
+
+        if (updatedKeys.length > 0) {
+          setLoadedDetailIds((prev) => {
+            const copy = new Set(prev)
+            updatedKeys.forEach((k) => copy.delete(k))
+            return copy
+          })
+        }
       } catch (err) {
         console.error('Failed to parse audit batch', err)
       }
@@ -345,16 +441,46 @@ export const AuditLogsTab: React.FC = () => {
     }
   }, [events, autoScroll])
 
-  const toggleRow = (id: string) => {
+  const toggleRow = (rowKey: string, ev?: AuditEvent) => {
+    const willExpand = !expandedIds.has(rowKey)
     setExpandedIds((prev) => {
       const next = new Set(prev)
-      if (next.has(id)) {
-        next.delete(id)
+      if (next.has(rowKey)) {
+        next.delete(rowKey)
       } else {
-        next.add(id)
+        next.add(rowKey)
       }
       return next
     })
+
+    const lookupId = ev?.id || ev?.trace_id
+    if (willExpand && lookupId && !loadedDetailIds.has(rowKey) && !detailLoadingIds.has(rowKey)) {
+      setDetailLoadingIds((prev) => new Set(prev).add(rowKey))
+      api
+        .getAuditLogDetail(lookupId)
+        .then((res) => {
+          if (res?.record) {
+            const detailed = normalizeAuditEvent(res.record)
+            setEvents((prev) =>
+              prev.map((item) => {
+                const itemKey = item.id || item.trace_id
+                return itemKey === rowKey || item.id === lookupId ? { ...item, ...detailed } : item
+              })
+            )
+          }
+          setLoadedDetailIds((prev) => new Set(prev).add(rowKey))
+        })
+        .catch(() => {
+          // Graceful fallback to summary payload already present in row
+        })
+        .finally(() => {
+          setDetailLoadingIds((prev) => {
+            const copy = new Set(prev)
+            copy.delete(rowKey)
+            return copy
+          })
+        })
+    }
   }
 
   const setTabForEvent = (id: string, tab: 'text' | 'diff' | 'json' | 'raw') => {
@@ -379,10 +505,10 @@ export const AuditLogsTab: React.FC = () => {
 
     events.forEach((ev) => {
       const dec = (ev.decision || '').toUpperCase()
-      if (dec === 'BLOCKED' || ev.severity === 'ERROR') blocked++
+      if (dec === 'BLOCKED' || dec === 'CRITICAL' || dec === 'ERROR' || ev.severity === 'ERROR' || ev.severity === 'CRITICAL') blocked++
       else if (dec === 'MASKED' || ev.severity === 'WARN') masked++
       else if (dec === 'AUDIT' || ev.severity === 'AUDIT') audit++
-      else allowed++
+      else if (dec !== 'PENDING') allowed++
 
       if (typeof ev.latency_ms === 'number' && ev.latency_ms >= 0) {
         totalLatency += ev.latency_ms
@@ -409,7 +535,7 @@ export const AuditLogsTab: React.FC = () => {
         if (selectedVerdict === 'ALLOWED' && dec !== 'ALLOWED') return false
         if (selectedVerdict === 'MASKED' && dec !== 'MASKED') return false
         if (selectedVerdict === 'AUDIT' && dec !== 'AUDIT') return false
-        if (selectedVerdict === 'BLOCKED' && dec !== 'BLOCKED') return false
+        if (selectedVerdict === 'BLOCKED' && dec !== 'BLOCKED' && dec !== 'ERROR' && dec !== 'CRITICAL') return false
       }
 
       if (!filterText.trim()) return true
@@ -431,6 +557,22 @@ export const AuditLogsTab: React.FC = () => {
 
   const getVerdictStyle = (decision: string) => {
     switch (decision?.toUpperCase()) {
+      case 'CRITICAL':
+        return {
+          badge:
+            'bg-red-100 dark:bg-red-950/90 text-red-800 dark:text-red-200 border-red-300 dark:border-red-700/70 shadow-sm',
+          indicator: 'bg-red-600',
+          icon: ShieldAlert,
+          label: 'CRITICAL',
+        }
+      case 'ERROR':
+        return {
+          badge:
+            'bg-orange-50 dark:bg-orange-950/80 text-orange-800 dark:text-orange-300 border-orange-200 dark:border-orange-700/60 shadow-sm',
+          indicator: 'bg-orange-500',
+          icon: ShieldAlert,
+          label: 'ERROR',
+        }
       case 'BLOCKED':
         return {
           badge:
@@ -454,6 +596,14 @@ export const AuditLogsTab: React.FC = () => {
           indicator: 'bg-purple-500',
           icon: Eye,
           label: 'AUDIT',
+        }
+      case 'PENDING':
+        return {
+          badge:
+            'bg-sky-50 dark:bg-sky-950/80 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-700/50 shadow-sm',
+          indicator: 'bg-sky-500',
+          icon: Clock,
+          label: 'PENDING',
         }
       case 'ALLOWED':
       default:
@@ -633,9 +783,21 @@ export const AuditLogsTab: React.FC = () => {
         className="bg-surface rounded-2xl p-3 h-[580px] overflow-y-auto space-y-2 border border-subtle shadow-sm dark:shadow-2xl"
       >
         {filteredEvents.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-muted gap-2">
-            <Shield className="w-8 h-8 text-muted animate-pulse" />
-            <span className="text-xs font-mono">No matching telemetry events found...</span>
+          <div className="h-full flex flex-col items-center justify-center text-muted gap-2.5">
+            <Shield className="w-8 h-8 text-muted" />
+            <span className="text-xs">No matching audit records found.</span>
+            {(filterText.trim() || selectedVerdict !== 'ALL') && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterText('')
+                  setSelectedVerdict('ALL')
+                }}
+                className="px-3 py-1 rounded-lg text-xs font-medium bg-accent/10 text-accent border border-accent/30 hover:bg-accent/20 transition-colors"
+              >
+                Clear filters
+              </button>
+            )}
           </div>
         ) : (
           filteredEvents.map((ev, idx) => {
@@ -648,11 +810,18 @@ export const AuditLogsTab: React.FC = () => {
 
             const parsedPayload = parsePayloadContent(ev.payload_preview)
             const parsedOriginal = parsePayloadContent(ev.original_payload)
-            const hasDiff = Boolean(
-              ev.original_payload &&
-                ev.original_payload.trim() &&
-                ev.original_payload !== ev.payload_preview
-            )
+            const parsedOrigReq = parsePayloadContent(ev.original_request)
+            const parsedSentReq = parsePayloadContent(ev.request || ev.original_request)
+            const parsedOrigResp = parsePayloadContent(ev.original_response)
+            const parsedFinalResp = parsePayloadContent(ev.response || ev.original_response)
+            const hasFourFields = Boolean(ev.original_request || ev.request || ev.original_response || ev.response)
+            const hasReqDiff = Boolean(ev.original_request && ev.request && ev.request !== ev.original_request)
+            const hasRespDiff = Boolean(ev.original_response && ev.response && ev.response !== ev.original_response)
+            const hasDiff =
+              hasReqDiff ||
+              hasRespDiff ||
+              Boolean(ev.original_payload && ev.original_payload.trim() && ev.original_payload !== ev.payload_preview)
+            const isLoadingDetail = detailLoadingIds.has(rowKey)
 
             // Normalize internal rule display
             const isCleanPass = ev.matched_rule === 'pipeline' || (!ev.matched_rule && ev.decision === 'ALLOWED')
@@ -664,17 +833,26 @@ export const AuditLogsTab: React.FC = () => {
               >
                 {/* Collapsible Row Header */}
                 <div
-                  onClick={() => toggleRow(rowKey)}
-                  className="p-2.5 flex items-center gap-2.5 cursor-pointer select-none text-xs flex-wrap"
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={isExpanded}
+                  onClick={() => toggleRow(rowKey, ev)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      toggleRow(rowKey, ev)
+                    }
+                  }}
+                  className="p-2.5 flex items-center gap-2.5 cursor-pointer select-none text-xs flex-wrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                 >
                   {/* Expand Chevron */}
-                  <button className="text-muted hover:text-primary">
+                  <span className="text-muted" aria-hidden="true">
                     {isExpanded ? (
                       <ChevronDown className="w-4 h-4 text-accent" />
                     ) : (
                       <ChevronRight className="w-4 h-4" />
                     )}
-                  </button>
+                  </span>
 
                   {/* Smart Date & Time */}
                   <div
@@ -768,8 +946,15 @@ export const AuditLogsTab: React.FC = () => {
                   <div className="p-3 bg-slate-100/70 dark:bg-black/60 border-t border-subtle space-y-3">
                     {/* Navigation Tabs */}
                     <div className="flex items-center justify-between flex-wrap gap-2 border-b border-subtle pb-2">
-                      <div className="flex items-center gap-1 bg-surface p-1 rounded-lg border border-subtle">
+                      <div
+                        role="tablist"
+                        aria-label="Audit record detail views"
+                        className="flex items-center gap-1 bg-surface p-1 rounded-lg border border-subtle"
+                      >
                         <button
+                          type="button"
+                          role="tab"
+                          aria-selected={activeTab === 'text'}
                           onClick={() => setTabForEvent(rowKey, 'text')}
                           className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
                             activeTab === 'text'
@@ -782,6 +967,9 @@ export const AuditLogsTab: React.FC = () => {
                         </button>
 
                         <button
+                          type="button"
+                          role="tab"
+                          aria-selected={activeTab === 'diff'}
                           onClick={() => setTabForEvent(rowKey, 'diff')}
                           className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
                             activeTab === 'diff'
@@ -797,6 +985,9 @@ export const AuditLogsTab: React.FC = () => {
                         </button>
 
                         <button
+                          type="button"
+                          role="tab"
+                          aria-selected={activeTab === 'json'}
                           onClick={() => setTabForEvent(rowKey, 'json')}
                           className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
                             activeTab === 'json'
@@ -808,6 +999,9 @@ export const AuditLogsTab: React.FC = () => {
                         </button>
 
                         <button
+                          type="button"
+                          role="tab"
+                          aria-selected={activeTab === 'raw'}
                           onClick={() => setTabForEvent(rowKey, 'raw')}
                           className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
                             activeTab === 'raw'
@@ -871,25 +1065,120 @@ export const AuditLogsTab: React.FC = () => {
                     </div>
 
                     {/* Tab Contents - DUAL-TONE TELEMETRY INVARIANT: ALWAYS #0F172A / slate-900 viewport */}
-                    {activeTab === 'text' && (
-                      <div className="bg-[#0F172A] p-3.5 rounded-xl border border-[#1E293B] font-mono text-xs text-slate-100 max-h-80 overflow-y-auto leading-relaxed shadow-inner">
-                        {renderHighlightedText(parsedPayload.displayText)}
+                    {isLoadingDetail && (
+                      <div className="text-[11px] font-mono text-muted px-1">
+                        Loading full 4-field invocation payload from local vault...
                       </div>
                     )}
 
+                    {activeTab === 'text' && (
+                      hasFourFields ? (
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between text-[10px] font-mono">
+                              <span className="font-semibold text-sky-400">
+                                1. Original Request {hasReqDiff ? '(Modified before upstream)' : ev.request_decision === 'BLOCKED' ? '(Blocked at ingress)' : '(Sent untouched)'}
+                              </span>
+                              {ev.request_decision && (
+                                <span className="text-muted">req:{ev.request_decision}</span>
+                              )}
+                            </div>
+                            <div className="bg-[#0F172A] p-3.5 rounded-xl border border-[#1E293B] font-mono text-xs text-slate-100 max-h-80 overflow-y-auto leading-relaxed shadow-inner">
+                              {parsedOrigReq.displayText ? renderHighlightedText(parsedOrigReq.displayText) : <span className="text-slate-500">No request payload recorded</span>}
+                            </div>
+                            {hasReqDiff && (
+                              <div className="space-y-1">
+                                <div className="text-[10px] font-mono font-semibold text-emerald-400">2. Dispatched Request (Upstream)</div>
+                                <div className="bg-[#0F172A] p-3 rounded-xl border border-emerald-900/40 font-mono text-xs text-slate-100 max-h-56 overflow-y-auto leading-relaxed">
+                                  {renderHighlightedText(parsedSentReq.displayText)}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between text-[10px] font-mono">
+                              <span className="font-semibold text-purple-400">
+                                3. {ev.original_response ? 'Original Response (Upstream)' : 'Final Response (Client)'}
+                              </span>
+                              {ev.response_decision && (
+                                <span className="text-muted">resp:{ev.response_decision}</span>
+                              )}
+                            </div>
+                            <div className="bg-[#0F172A] p-3.5 rounded-xl border border-[#1E293B] font-mono text-xs text-slate-100 max-h-80 overflow-y-auto leading-relaxed shadow-inner">
+                              {ev.original_response ? (
+                                renderHighlightedText(parsedOrigResp.displayText)
+                              ) : ev.response ? (
+                                renderHighlightedText(parsedFinalResp.displayText)
+                              ) : (
+                                <span className="text-slate-500">Awaiting or no response payload</span>
+                              )}
+                            </div>
+                            {hasRespDiff && (
+                              <div className="space-y-1">
+                                <div className="text-[10px] font-mono font-semibold text-amber-400">4. Final Response (Client)</div>
+                                <div className="bg-[#0F172A] p-3 rounded-xl border border-amber-900/40 font-mono text-xs text-slate-100 max-h-56 overflow-y-auto leading-relaxed">
+                                  {renderHighlightedText(parsedFinalResp.displayText)}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="bg-[#0F172A] p-3.5 rounded-xl border border-[#1E293B] font-mono text-xs text-slate-100 max-h-80 overflow-y-auto leading-relaxed shadow-inner">
+                          {renderHighlightedText(parsedPayload.displayText)}
+                        </div>
+                      )
+                    )}
+
                     {activeTab === 'diff' && (
-                      <div className="space-y-2">
+                      <div className="space-y-3">
                         {!hasDiff ? (
                           <div className="bg-purple-950/20 border border-purple-800/30 p-3 rounded-xl text-purple-300 text-xs font-mono space-y-1">
                             <div className="font-semibold flex items-center gap-1.5">
                               <Eye className="w-4 h-4 text-purple-400" />
-                              No Diff Available
+                              No Mutation Diff Available
                             </div>
                             <p className="text-[11px] text-gray-400">
                               {ev.decision === 'ALLOWED'
-                                ? 'No masking or modification was applied to this request.'
-                                : 'Original unmasked payload was not retained. Enable `dlp.debug_retain_unmasked_diff: true` in your gateway configuration to compare original and masked payloads side-by-side.'}
+                                ? 'No masking or modification was applied to this invocation.'
+                                : 'Request and response were not mutated in-place, or Local Full Payload Capture is disabled in Operational Settings.'}
                             </p>
+                          </div>
+                        ) : hasReqDiff || hasRespDiff ? (
+                          <div className="space-y-3">
+                            {hasReqDiff && (
+                              <div className={diffLayout === 'split' ? 'grid grid-cols-1 md:grid-cols-2 gap-2' : 'space-y-2'}>
+                                <div className="space-y-1">
+                                  <div className="text-[10px] font-mono font-semibold text-rose-400">Original Request (Raw)</div>
+                                  <div className="bg-[#0F172A] p-3 rounded-xl border border-rose-900/40 font-mono text-[11px] text-slate-200 max-h-72 overflow-y-auto whitespace-pre-wrap leading-relaxed">
+                                    {parsedOrigReq.displayText}
+                                  </div>
+                                </div>
+                                <div className="space-y-1">
+                                  <div className="text-[10px] font-mono font-semibold text-emerald-400">Sent Request (Filtered)</div>
+                                  <div className="bg-[#0F172A] p-3 rounded-xl border border-emerald-900/40 font-mono text-[11px] text-slate-200 max-h-72 overflow-y-auto leading-relaxed">
+                                    {renderHighlightedText(parsedSentReq.displayText)}
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                            {hasRespDiff && (
+                              <div className={diffLayout === 'split' ? 'grid grid-cols-1 md:grid-cols-2 gap-2' : 'space-y-2'}>
+                                <div className="space-y-1">
+                                  <div className="text-[10px] font-mono font-semibold text-rose-400">Original Response (Upstream Raw)</div>
+                                  <div className="bg-[#0F172A] p-3 rounded-xl border border-rose-900/40 font-mono text-[11px] text-slate-200 max-h-72 overflow-y-auto whitespace-pre-wrap leading-relaxed">
+                                    {parsedOrigResp.displayText}
+                                  </div>
+                                </div>
+                                <div className="space-y-1">
+                                  <div className="text-[10px] font-mono font-semibold text-emerald-400">Final Response (Client)</div>
+                                  <div className="bg-[#0F172A] p-3 rounded-xl border border-emerald-900/40 font-mono text-[11px] text-slate-200 max-h-72 overflow-y-auto leading-relaxed">
+                                    {renderHighlightedText(parsedFinalResp.displayText)}
+                                  </div>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         ) : diffLayout === 'split' ? (
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -937,15 +1226,32 @@ export const AuditLogsTab: React.FC = () => {
                     )}
 
                     {activeTab === 'json' && (
-                      <div className="bg-[#0F172A] p-3 rounded-xl border border-[#1E293B] font-mono text-[11px] text-cyan-300 max-h-80 overflow-y-auto shadow-inner">
-                        <pre className="whitespace-pre-wrap">{parsedPayload.formattedJson}</pre>
-                      </div>
+                      hasFourFields ? (
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                          <div className="space-y-1">
+                            <div className="text-[10px] font-mono font-semibold text-sky-400">Request JSON</div>
+                            <div className="bg-[#0F172A] p-3 rounded-xl border border-[#1E293B] font-mono text-[11px] text-cyan-300 max-h-80 overflow-y-auto shadow-inner">
+                              <pre className="whitespace-pre-wrap">{parsedSentReq.formattedJson || parsedOrigReq.formattedJson || 'null'}</pre>
+                            </div>
+                          </div>
+                          <div className="space-y-1">
+                            <div className="text-[10px] font-mono font-semibold text-purple-400">Response JSON</div>
+                            <div className="bg-[#0F172A] p-3 rounded-xl border border-[#1E293B] font-mono text-[11px] text-cyan-300 max-h-80 overflow-y-auto shadow-inner">
+                              <pre className="whitespace-pre-wrap">{parsedFinalResp.formattedJson || parsedOrigResp.formattedJson || 'null'}</pre>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="bg-[#0F172A] p-3 rounded-xl border border-[#1E293B] font-mono text-[11px] text-cyan-300 max-h-80 overflow-y-auto shadow-inner">
+                          <pre className="whitespace-pre-wrap">{parsedPayload.formattedJson}</pre>
+                        </div>
+                      )
                     )}
 
                     {activeTab === 'raw' && (
                       <div className="bg-[#0F172A] p-3 rounded-xl border border-[#1E293B] font-mono text-[10px] text-slate-300 max-h-80 overflow-y-auto shadow-inner">
                         <pre className="whitespace-pre-wrap">
-                          {JSON.stringify(ev.details || ev, null, 2)}
+                          {JSON.stringify(ev, null, 2)}
                         </pre>
                       </div>
                     )}

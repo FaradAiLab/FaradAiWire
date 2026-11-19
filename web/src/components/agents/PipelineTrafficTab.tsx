@@ -1,5 +1,12 @@
 import React, { useState } from 'react'
-import { RateLimitOverride, LoopProtectionOverride, ToolMetadata } from '../../types'
+import {
+  RateLimitOverride,
+  LoopProtectionOverride,
+  SchemaValidationOverride,
+  GuardOverride,
+  FilterEnforcementMode,
+  ToolMetadata,
+} from '../../types'
 import { Input } from '../ui/Input'
 import { Badge, BadgeProps } from '../ui/Badge'
 
@@ -25,9 +32,68 @@ export interface PipelineTrafficTabProps {
   onChangeRateLimit: (rateLimit: RateLimitOverride) => void
   loopProtection?: LoopProtectionOverride
   onChangeLoopProtection: (loopProtection: LoopProtectionOverride) => void
+  schemaValidation?: SchemaValidationOverride
+  onChangeSchemaValidation?: (schemaValidation: SchemaValidationOverride) => void
+  guardOverride?: GuardOverride
+  onChangeGuardOverride?: (guardOverride: GuardOverride) => void
   availableTools: ToolMetadata[]
   activeFilters?: string[]
 }
+
+interface TripleStateInfo {
+  isActive: boolean
+  isSuspended: boolean
+  statusLabel: string
+  badgeLabel: string
+  statusVariant: StepVariant
+}
+
+function resolveTripleState(clusterActive: boolean, mode: FilterEnforcementMode): TripleStateInfo {
+  if (mode === 'off') {
+    return {
+      isActive: false,
+      isSuspended: false,
+      statusLabel: 'Disabled',
+      badgeLabel: 'Disabled',
+      statusVariant: 'neutral',
+    }
+  }
+  if (!clusterActive) {
+    return {
+      isActive: false,
+      isSuspended: true,
+      statusLabel: 'Suspended',
+      badgeLabel: 'Suspended (Paused at Gateway)',
+      statusVariant: 'amber',
+    }
+  }
+  if (mode === 'audit') {
+    return {
+      isActive: true,
+      isSuspended: false,
+      statusLabel: 'Audit Only',
+      badgeLabel: 'Active (Audit)',
+      statusVariant: 'cyan',
+    }
+  }
+  return {
+    isActive: true,
+    isSuspended: false,
+    statusLabel: 'Active',
+    badgeLabel: 'Active',
+    statusVariant: 'emerald',
+  }
+}
+
+const ENFORCEMENT_OPTIONS: {
+  mode: FilterEnforcementMode
+  label: string
+  hint: string
+}[] = [
+  { mode: 'enforce', label: 'Enforce', hint: 'Block violations cleanly' },
+  { mode: 'audit', label: 'Audit Only', hint: 'Log metadata, never block' },
+  { mode: 'off', label: 'Disabled', hint: 'Bypass filter for profile' },
+]
 
 export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
   rateLimit = { enabled: true, max_burst: 10, refill_rate: 2.0 },
@@ -39,6 +105,10 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
     exclude_tools: [],
   },
   onChangeLoopProtection,
+  schemaValidation = { mode: 'enforce' },
+  onChangeSchemaValidation,
+  guardOverride = { mode: 'enforce' },
+  onChangeGuardOverride,
   availableTools,
   activeFilters = [],
 }) => {
@@ -102,6 +172,10 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
   }
 
   const excluded = loopProtection.exclude_tools || []
+  const schemaMode: FilterEnforcementMode = schemaValidation?.mode || 'enforce'
+  const guardMode: FilterEnforcementMode = guardOverride?.mode || 'enforce'
+  const schemaState = resolveTripleState(isGlobalSchemaActive, schemaMode)
+  const guardState = resolveTripleState(isGlobalGuardActive, guardMode)
 
   // Execution rail blueprint steps
   const pipelineSteps = [
@@ -111,9 +185,9 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
       category: 'Ingress Guard',
       icon: <EyeOff className="w-4 h-4 text-purple-400" />,
       isActive: isGlobalPrefillActive,
-      isSuspended: false,
-      statusLabel: isGlobalPrefillActive ? 'Active' : 'Cluster Off',
-      statusVariant: (isGlobalPrefillActive ? 'emerald' : 'neutral') as StepVariant,
+      isSuspended: !isGlobalPrefillActive,
+      statusLabel: isGlobalPrefillActive ? 'Active' : 'Suspended',
+      statusVariant: (isGlobalPrefillActive ? 'emerald' : 'amber') as StepVariant,
       latency: '<0.1ms',
       desc: 'Blocks adversarial prompt injection and prefix forcing.',
     },
@@ -123,13 +197,13 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
       category: 'Traffic Ingress',
       icon: <Zap className="w-4 h-4 text-cyan-400" />,
       isActive: isGlobalRateLimitActive,
-      isSuspended: false,
+      isSuspended: !isGlobalRateLimitActive,
       statusLabel: !isGlobalRateLimitActive
-        ? 'Cluster Off'
+        ? 'Suspended'
         : rateLimit.max_burst > 0
         ? `${rateLimit.max_burst} Calls / ${rateLimit.refill_rate} RPS`
         : 'Active',
-      statusVariant: (isGlobalRateLimitActive ? 'cyan' : 'neutral') as StepVariant,
+      statusVariant: (isGlobalRateLimitActive ? 'cyan' : 'amber') as StepVariant,
       latency: '<0.05ms',
       desc: 'Token-bucket rate limiter defending upstream backends against spikes.',
     },
@@ -152,36 +226,36 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
       name: 'Schema Validation',
       category: 'Contract Integrity',
       icon: <FileCheck className="w-4 h-4 text-emerald-400" />,
-      isActive: isGlobalSchemaActive,
-      isSuspended: false,
-      statusLabel: isGlobalSchemaActive ? 'Active' : 'Cluster Off',
-      statusVariant: (isGlobalSchemaActive ? 'emerald' : 'neutral') as StepVariant,
+      isActive: schemaState.isActive,
+      isSuspended: schemaState.isSuspended,
+      statusLabel: schemaState.statusLabel,
+      statusVariant: schemaState.statusVariant,
       latency: '<0.2ms',
       desc: 'Enforces JSON Schema pinning and input contract stability.',
     },
     {
       order: 50,
       name: 'DLP Masking',
-      category: 'Full-Duplex (Req/Resp)',
+      category: 'Request & Response',
       icon: <Shield className="w-4 h-4 text-blue-400" />,
       isActive: isGlobalDLPActive,
-      isSuspended: false,
-      statusLabel: isGlobalDLPActive ? 'Active' : 'Cluster Off',
-      statusVariant: (isGlobalDLPActive ? 'emerald' : 'neutral') as StepVariant,
+      isSuspended: !isGlobalDLPActive,
+      statusLabel: isGlobalDLPActive ? 'Active' : 'Suspended',
+      statusVariant: (isGlobalDLPActive ? 'emerald' : 'amber') as StepVariant,
       latency: '<0.3ms',
       desc: 'Deterministic regex & pattern redaction for PII, tokens, and secrets.',
     },
     {
       order: 55,
       name: 'Semantic Security Guard',
-      category: 'Full-Duplex Neural Guard',
+      category: 'Request & Response',
       icon: <Activity className="w-4 h-4 text-indigo-400" />,
-      isActive: isGlobalGuardActive,
-      isSuspended: false,
-      statusLabel: isGlobalGuardActive ? 'Active Engine' : 'Cluster Off',
-      statusVariant: (isGlobalGuardActive ? 'emerald' : 'neutral') as StepVariant,
+      isActive: guardState.isActive,
+      isSuspended: guardState.isSuspended,
+      statusLabel: guardState.statusLabel,
+      statusVariant: guardState.statusVariant,
       latency: '<1.5ms',
-      desc: 'Unified local neural guard deep inspection (Root Intent Isolation).',
+      desc: 'Local neural threat inspection for tool inputs and responses.',
     },
     {
       order: 70,
@@ -189,9 +263,9 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
       category: 'Egress Approval',
       icon: <UserCheck className="w-4 h-4 text-rose-400" />,
       isActive: isGlobalHITLActive,
-      isSuspended: false,
-      statusLabel: isGlobalHITLActive ? 'Dynamic' : 'Cluster Off',
-      statusVariant: (isGlobalHITLActive ? 'emerald' : 'neutral') as StepVariant,
+      isSuspended: !isGlobalHITLActive,
+      statusLabel: isGlobalHITLActive ? 'Dynamic' : 'Suspended',
+      statusVariant: (isGlobalHITLActive ? 'emerald' : 'amber') as StepVariant,
       latency: 'Human / Auto',
       desc: 'Dual-channel operator authorization for high-risk executions.',
     },
@@ -212,18 +286,25 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Badge variant="cyan" className="font-mono text-[10px]">
-            Rate Limit: Enforced
-          </Badge>
+        <div className="flex items-center gap-2 flex-wrap">
+          {!isGlobalRateLimitActive ? (
+            <Badge variant="amber" className="font-mono text-[10px] flex items-center gap-1">
+              <AlertTriangle className="w-3 h-3 text-amber-500" />
+              Rate Limit: Suspended
+            </Badge>
+          ) : (
+            <Badge variant="cyan" className="font-mono text-[10px]">
+              Rate Limit: Active
+            </Badge>
+          )}
           {!isGlobalLoopActive ? (
             <Badge variant="amber" className="font-mono text-[10px] flex items-center gap-1">
               <AlertTriangle className="w-3 h-3 text-amber-500" />
-              Loop: Suspended (Master Killswitch)
+              Loop: Suspended
             </Badge>
           ) : (
             <Badge variant="emerald" className="font-mono text-[10px]">
-              Loop Guard: Enforced
+              Loop Guard: Active
             </Badge>
           )}
         </div>
@@ -516,6 +597,81 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
         </div>
       </div>
 
+      {/* Section 2.5: Profile Filter Governance (Schema & Guard Overrides) */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {[
+          {
+            key: 'schema',
+            title: 'Contract Integrity (Schema Validation)',
+            icon: <FileCheck className="w-4 h-4 text-emerald-500" />,
+            desc: 'Controls JSON Schema argument enforcement for this profile. Use Audit Only for lazy client schemas or Disabled for custom payloads.',
+            mode: schemaMode,
+            state: schemaState,
+            onSelect: (m: FilterEnforcementMode) => onChangeSchemaValidation?.({ mode: m }),
+            note: 'Default is Enforce. When Schema Validation is paused in Gateway Settings, active rules display as Suspended.',
+          },
+          {
+            key: 'guard',
+            title: 'Semantic Security Guard (Req L1 & Response)',
+            icon: <Shield className="w-4 h-4 text-indigo-400" />,
+            desc: 'Controls L1 regex & L2 neural inspection across request and response paths. Per-tool Autonomous rules in Guardrails also bypass request L1 and response L1/L2 blocks.',
+            mode: guardMode,
+            state: guardState,
+            onSelect: (m: FilterEnforcementMode) => onChangeGuardOverride?.({ mode: m }),
+            note: 'Use Audit Only to capture security telemetry in invocation logs without blocking Autonomous IDE workflows.',
+          },
+        ].map((card) => (
+          <div
+            key={card.key}
+            className="p-4 rounded-2xl bg-surface border border-subtle flex flex-col justify-between space-y-4 shadow-xs"
+          >
+            <div>
+              <div className="flex items-center justify-between pb-3 border-b border-subtle gap-2">
+                <span className="font-semibold text-primary flex items-center gap-2 text-xs">
+                  {card.icon}
+                  {card.title}
+                </span>
+                <Badge variant={card.state.statusVariant} size="sm" className="font-mono text-[9px] shrink-0">
+                  {card.state.badgeLabel}
+                </Badge>
+              </div>
+              <p className="text-xs text-muted mt-2 leading-relaxed">{card.desc}</p>
+
+              <div className="grid grid-cols-3 gap-2 mt-3" role="radiogroup" aria-label={card.title}>
+                {ENFORCEMENT_OPTIONS.map((opt) => {
+                  const selected = card.mode === opt.mode
+                  return (
+                    <button
+                      key={opt.mode}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      onClick={() => card.onSelect(opt.mode)}
+                      className={`p-2 rounded-xl border text-left transition-all ${
+                        selected
+                          ? opt.mode === 'off'
+                            ? 'bg-neutral-500/15 border-subtle text-primary shadow-xs'
+                            : opt.mode === 'audit'
+                            ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-600 dark:text-cyan-300 shadow-xs'
+                            : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-600 dark:text-emerald-300 shadow-xs'
+                          : 'bg-canvas hover:bg-surface border-subtle text-muted hover:text-primary'
+                      }`}
+                    >
+                      <div className="text-[11px] font-semibold">{opt.label}</div>
+                      <div className="text-[10px] opacity-80 leading-tight mt-0.5">{opt.hint}</div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            <div className="p-2.5 rounded-xl bg-canvas border border-subtle text-[10px] text-muted leading-tight">
+              {card.note}
+            </div>
+          </div>
+        ))}
+      </div>
+
       {/* Section 3: Runtime Security Envelope Blueprint */}
       <div className="p-4 rounded-2xl bg-surface border border-subtle space-y-4 shadow-xs">
         <div className="flex items-center justify-between pb-3 border-b border-subtle">
@@ -529,7 +685,7 @@ export const PipelineTrafficTab: React.FC<PipelineTrafficTabProps> = ({
             </p>
           </div>
           <Badge variant="indigo" className="font-mono text-[10px]">
-            Full-Duplex Wire
+            Request &amp; Response Pipeline
           </Badge>
         </div>
 

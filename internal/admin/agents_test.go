@@ -736,6 +736,12 @@ func TestAdminEndpoints_Agents_TrafficPipelineOverrides(t *testing.T) {
 			WindowSeconds: 30,
 			ExcludeTools:  []string{"echo", "ping"},
 		},
+		SchemaValidation: &agent.SchemaValidationOverride{
+			Mode: agent.SchemaValidationAudit,
+		},
+		Guard: &agent.GuardOverride{
+			Mode: agent.GuardModeOff,
+		},
 	}
 	putBody, _ := json.Marshal(putPayload)
 	putReq := httptest.NewRequest(http.MethodPut, "/admin/agents/traffic-agent", bytes.NewReader(putBody))
@@ -758,23 +764,38 @@ func TestAdminEndpoints_Agents_TrafficPipelineOverrides(t *testing.T) {
 	if updatedCfg.LoopProtection == nil || updatedCfg.LoopProtection.MaxRepeat != 15 || updatedCfg.LoopProtection.WindowSeconds != 30 || len(updatedCfg.LoopProtection.ExcludeTools) != 2 {
 		t.Fatalf("updated loop protection not saved properly: %+v", updatedCfg.LoopProtection)
 	}
+	if updatedCfg.GetSchemaValidationMode() != agent.SchemaValidationAudit {
+		t.Fatalf("updated schema_validation not saved properly: %+v", updatedCfg.SchemaValidation)
+	}
+	if updatedCfg.GetGuardMode() != agent.GuardModeOff {
+		t.Fatalf("updated guard override not saved properly: %+v", updatedCfg.Guard)
+	}
 
-	// 3. Test validation failure on negative values
-	invalidPayload := AgentPayload{
-		Protocols: cfg.Protocols,
-		RateLimit: &agent.RateLimitOverride{
-			MaxBurst:   -1,
-			RefillRate: 1.0,
+	// 3. Test validation failure on negative values or invalid schema/guard mode
+	invalidPayloads := []AgentPayload{
+		{
+			Protocols: cfg.Protocols,
+			RateLimit: &agent.RateLimitOverride{MaxBurst: -1, RefillRate: 1.0},
+		},
+		{
+			Protocols:        cfg.Protocols,
+			SchemaValidation: &agent.SchemaValidationOverride{Mode: "invalid-mode"},
+		},
+		{
+			Protocols: cfg.Protocols,
+			Guard:     &agent.GuardOverride{Mode: "invalid-guard"},
 		},
 	}
-	invBody, _ := json.Marshal(invalidPayload)
-	invReq := httptest.NewRequest(http.MethodPut, "/admin/agents/traffic-agent", bytes.NewReader(invBody))
-	invReq.Header.Set("Content-Type", "application/json")
-	invRec := httptest.NewRecorder()
-	handler.ServeHTTP(invRec, invReq)
+	for i, inv := range invalidPayloads {
+		invBody, _ := json.Marshal(inv)
+		invReq := httptest.NewRequest(http.MethodPut, "/admin/agents/traffic-agent", bytes.NewReader(invBody))
+		invReq.Header.Set("Content-Type", "application/json")
+		invRec := httptest.NewRecorder()
+		handler.ServeHTTP(invRec, invReq)
 
-	if invRec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 Bad Request for negative rate limit burst, got %d", invRec.Code)
+		if invRec.Code != http.StatusBadRequest {
+			t.Fatalf("case %d: expected 400 Bad Request, got %d: %s", i, invRec.Code, invRec.Body.String())
+		}
 	}
 }
 
@@ -1055,5 +1076,54 @@ func TestAdminEndpoints_Agents_PUT_HydratesExistingBeforeTemplateStore(t *testin
 	}
 	if gotCfg.Protocols[0].AuthToken != "agent-specific-secret-999" {
 		t.Fatalf("expected agent-specific secret preserved before global template, got %q", gotCfg.Protocols[0].AuthToken)
+	}
+}
+
+func TestAdminEndpoints_Agents_RestoreRetainedProtocolsNotWipedByToolGovernance(t *testing.T) {
+	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	repo := server.getAgentRepository()
+
+	if err := repo.SaveAgentConfig("restore-agent", &agent.RouteConfig{
+		AgentID:     "restore-agent",
+		AgentName:   "restore-agent",
+		RoutingMode: "aggregated",
+		Protocols:   []agent.ProtocolConfig{},
+		RetainedGovernance: map[string]map[string]agent.ToolGovernanceMode{
+			"p1": {
+				"p1__delete_file": agent.ModeStrictAlwaysHITL,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("SaveAgentConfig: %v", err)
+	}
+
+	putBody, _ := json.Marshal(AgentPayload{
+		Protocols: []agent.ProtocolConfig{
+			{ID: "p1", Name: "p1", Type: "stdio", Command: "echo"},
+		},
+		ToolGovernance: map[string]agent.ToolGovernanceMode{
+			"p1__read_file": agent.ModeAutonomous,
+		},
+		RestoreRetainedProtocols: []string{"p1"},
+	})
+	req := httptest.NewRequest(http.MethodPut, "/admin/agents/restore-agent", bytes.NewReader(putBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on PUT, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	repo.ClearCache()
+	gotCfg, err := repo.GetAgentConfig("restore-agent")
+	if err != nil {
+		t.Fatalf("GetAgentConfig: %v", err)
+	}
+	if gotCfg.ToolGovernance["p1__delete_file"] != agent.ModeStrictAlwaysHITL {
+		t.Fatalf("expected restored retained rule p1__delete_file=strict_always_hitl preserved, got %+v", gotCfg.ToolGovernance)
+	}
+	if gotCfg.ToolGovernance["p1__read_file"] != agent.ModeAutonomous {
+		t.Fatalf("expected explicit payload rule p1__read_file=autonomous preserved, got %+v", gotCfg.ToolGovernance)
 	}
 }

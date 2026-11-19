@@ -43,14 +43,16 @@ func NewEventBroker(debounceInterval time.Duration) *EventBroker {
 }
 
 // LogEvent implements filter.AuditLogger.
-// It places the event on an in-memory buffered channel in a non-blocking manner (< 1µs).
+// It enqueues a lightweight summary projection onto an in-memory buffered channel (< 1µs),
+// keeping heavy 4-field payloads out of debounced SSE broadcasts.
 func (b *EventBroker) LogEvent(event *filter.AuditEvent) {
 	if b == nil || event == nil || b.isClosed.Load() {
 		return
 	}
 
+	summary := event.LightweightSummaryCopy(4096)
 	select {
-	case b.inbound <- event:
+	case b.inbound <- summary:
 	default:
 		// Queue full: increment counter and drop to protect proxy hot-path SLA
 		atomic.AddUint64(&b.droppedCount, 1)
@@ -122,6 +124,7 @@ func (b *EventBroker) run() {
 			case subCh <- batch:
 			default:
 				// Slow client: drop batch to prevent blocking the broker or other clients
+				atomic.AddUint64(&b.droppedCount, uint64(len(batch)))
 			}
 		}
 		b.mu.RUnlock()

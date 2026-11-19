@@ -193,7 +193,7 @@ paths:
   /admin/audit-logs:
     get:
       summary: Query Historical Audit Logs
-      description: Queries append-only security logs stored in DuckDB or file audit trail.
+      description: Queries consolidated four-field invocation audit records stored in local DuckDB or fallback JSONL audit trail.
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
@@ -204,12 +204,22 @@ paths:
         - name: offset
           in: query
           schema: { type: integer, default: 0 }
-        - name: search
+        - name: decision
+          in: query
+          schema: { type: string, enum: [PENDING, ALLOWED, AUDIT, MASKED, ERROR, BLOCKED, CRITICAL] }
+        - name: agent_name
           in: query
           schema: { type: string }
-        - name: action
+        - name: tool_name
           in: query
-          schema: { type: string, enum: [allow, block, mask, error] }
+          schema: { type: string }
+        - name: trace_id
+          in: query
+          schema: { type: string }
+        - name: summary
+          in: query
+          description: Set to "1" to omit heavy four-field payload blobs from list responses.
+          schema: { type: string, enum: ["0", "1"] }
       responses:
         '200':
           description: Audit logs query result
@@ -217,6 +227,50 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuditLogsResponse'
+
+  /admin/audit-logs/{id}:
+    get:
+      summary: Get Single Audit Invocation Record
+      description: Returns a complete consolidated Tool Invocation Record including all four sparse lifecycle snapshots (original_request, request, original_response, response).
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Complete invocation record
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "success" }
+                  record:
+                    $ref: '#/components/schemas/AuditRecord'
+        '400':
+          description: Missing record identifier
+        '404':
+          description: Audit record not found
+        '500':
+          description: Internal storage error
+
+  /admin/audit-logs/events:
+    get:
+      summary: Live Audit Events Stream (Admin Alias SSE)
+      description: Real-time Server-Sent Events stream delivering lightweight debounced audit summaries to Admin Console subscribers.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: SSE event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
 
   /api/v1/logs/events:
     get:
@@ -252,7 +306,7 @@ paths:
   /admin/agents:
     get:
       summary: List Configured Agents
-      description: Returns summary of all local agent domains configured in the agents directory.
+      description: Returns summary and masked configurations of all local agent profiles.
       responses:
         '200':
           description: List of agent configurations
@@ -265,6 +319,83 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/AgentSummary'
+    post:
+      summary: Create Agent Security Profile
+      description: Creates a new agent profile with protocol bindings, tool governance, rate limiting, loop protection, schema validation, and guard enforcement overrides.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentPayload'
+      responses:
+        '201':
+          description: Agent profile created
+        '400':
+          description: Validation error (INVALID_IDENTIFIER, INVALID_GOVERNANCE_MODE, INVALID_RETAINED_GOVERNANCE_MODE, INVALID_RATE_LIMIT, INVALID_LOOP_PROTECTION, INVALID_SCHEMA_VALIDATION, INVALID_GUARD_OVERRIDE)
+        '403':
+          description: Forbidden in managed runtime mode (FORBIDDEN_MANAGED_MODE)
+        '409':
+          description: Agent already exists (AGENT_ALREADY_EXISTS)
+
+  /admin/agents/{name}:
+    get:
+      summary: Get Single Agent Profile
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Agent profile details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSummary'
+        '404':
+          description: Agent not found
+    put:
+      summary: Update Agent Security Profile
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentPayload'
+      responses:
+        '200':
+          description: Agent profile updated with snapshot archived
+        '400':
+          description: Validation error
+        '404':
+          description: Agent not found
+    delete:
+      summary: Delete Agent Security Profile
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Agent deleted
+        '409':
+          description: Agent has active sessions (AGENT_IN_USE)
 
   /admin/agents/sync-tools:
     post:
@@ -760,22 +891,96 @@ components:
     AuditLogsResponse:
       type: object
       properties:
+        enabled: { type: boolean, example: true }
+        total: { type: integer, example: 1 }
+        limit: { type: integer, example: 50 }
+        offset: { type: integer, example: 0 }
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditRecord'
         events:
           type: array
           items:
-            $ref: '#/components/schemas/AuditEvent'
-        total: { type: integer, example: 1 }
+            $ref: '#/components/schemas/AuditRecord'
+        error: { type: string }
 
-    AuditEvent:
+    AuditRecord:
       type: object
       properties:
+        id: { type: string }
         timestamp: { type: string, format: date-time }
         trace_id: { type: string, example: "trc-a1b2c3d4" }
+        agent_name: { type: string, example: "antigravity" }
+        release_version: { type: string }
         tool_name: { type: string, example: "fetch_customer_record" }
-        action: { type: string, enum: [allow, block, mask, error], example: "mask" }
-        filter_name: { type: string, example: "dlp" }
-        reason: { type: string, example: "Masked 1 sensitive credit_card match(es)" }
+        caller_role: { type: string, example: "default" }
+        decision: { type: string, enum: [PENDING, ALLOWED, AUDIT, MASKED, ERROR, BLOCKED, CRITICAL], example: "MASKED" }
+        request_decision: { type: string, enum: [PENDING, ALLOWED, AUDIT, MASKED, ERROR, BLOCKED, CRITICAL] }
+        response_decision: { type: string, enum: [PENDING, ALLOWED, AUDIT, MASKED, ERROR, BLOCKED, CRITICAL] }
+        matched_rule: { type: string, example: "dlp" }
+        error_message: { type: string }
         latency_ms: { type: number, example: 4.2 }
+        input_size_bytes: { type: integer }
+        output_size_bytes: { type: integer }
+        raw_payload_preview: { type: string }
+        original_payload_preview: { type: string }
+        original_request: { type: string }
+        request: { type: string }
+        original_response: { type: string }
+        response: { type: string }
+        integrity_hash: { type: string }
+
+    AuditEvent:
+      $ref: '#/components/schemas/AuditRecord'
+
+    FilterEnforcementOverride:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [enforce, audit, off]
+          default: enforce
+
+    AgentPayload:
+      type: object
+      properties:
+        agent_name: { type: string, example: "antigravity" }
+        description: { type: string }
+        routing_mode: { type: string, enum: [aggregated, direct], default: aggregated }
+        protocol_ids:
+          type: array
+          items: { type: string }
+        clear_all_protocols: { type: boolean }
+        enabled_tools:
+          type: array
+          items: { type: string }
+        tool_governance:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [autonomous, guarded_block, guarded_hitl, strict_always_hitl]
+        restore_retained_protocols:
+          type: array
+          items: { type: string }
+        rate_limit:
+          type: object
+          properties:
+            max_burst: { type: integer }
+            refill_rate: { type: number }
+        loop_protection:
+          type: object
+          properties:
+            max_repeat: { type: integer }
+            window_seconds: { type: integer }
+            exclude_tools:
+              type: array
+              items: { type: string }
+        schema_validation:
+          $ref: '#/components/schemas/FilterEnforcementOverride'
+        guard:
+          $ref: '#/components/schemas/FilterEnforcementOverride'
 
     MCPTool:
       type: object
@@ -791,7 +996,16 @@ components:
       properties:
         name: { type: string, example: "finance-agent" }
         routing_mode: { type: string, enum: [aggregated, direct], example: "aggregated" }
-        tools_count: { type: integer, example: 5 }
+        config:
+          $ref: '#/components/schemas/AgentPayload'
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/MCPTool'
+        effective_tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/MCPTool'
         status: { type: string, example: "active" }
 
     KeySummaryResponse:

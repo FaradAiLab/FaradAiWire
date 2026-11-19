@@ -3,6 +3,7 @@ package schema_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/schema"
+	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
@@ -638,5 +641,120 @@ func TestSchemaFilter_CaseInsensitiveToolLookup(t *testing.T) {
 	_, err := f.FilterRequest(ctx, reqInvalid)
 	if err == nil || err.Code != mcp.ErrSchemaValidation {
 		t.Fatalf("expected ErrSchemaValidation for mixed-case tool missing required param, got %+v", err)
+	}
+}
+
+type mockAgentResolver struct {
+	agent.Resolver
+	configs map[string]*agent.RouteConfig
+}
+
+func (m *mockAgentResolver) GetAgentConfig(agentName string) (*agent.RouteConfig, error) {
+	if cfg, ok := m.configs[agentName]; ok {
+		return cfg, nil
+	}
+	return nil, errors.New("agent not found")
+}
+
+func TestSchemaFilter_PerAgentGovernanceModes(t *testing.T) {
+	f := schema.NewSchemaFilter(true, "", true, false)
+	defer f.Close()
+
+	listResp := &mcp.Response{
+		JSONRPC: "2.0",
+		ID:      1,
+		Result: json.RawMessage(fmt.Sprintf(`{
+			"tools": [{
+				"name": "search_docs",
+				"inputSchema": %s
+			}]
+		}`, sampleSchema)),
+	}
+	if _, err := f.FilterResponse(context.Background(), listResp); err != nil {
+		t.Fatalf("unexpected FilterResponse error: %v", err)
+	}
+
+	resolver := &mockAgentResolver{
+		configs: map[string]*agent.RouteConfig{
+			"enforce-agent": {
+				AgentName:        "enforce-agent",
+				SchemaValidation: &agent.SchemaValidationOverride{Mode: agent.SchemaValidationEnforce},
+			},
+			"audit-agent": {
+				AgentName:        "audit-agent",
+				SchemaValidation: &agent.SchemaValidationOverride{Mode: agent.SchemaValidationAudit},
+			},
+			"off-agent": {
+				AgentName:        "off-agent",
+				SchemaValidation: &agent.SchemaValidationOverride{Mode: agent.SchemaValidationOff},
+			},
+			"default-agent": {
+				AgentName: "default-agent",
+			},
+		},
+	}
+	f.SetAgentRepository(resolver)
+
+	tests := []struct {
+		name           string
+		agentName      string
+		wantErr        bool
+		wantAuditCount int
+	}{
+		{
+			name:           "unconfigured agent defaults to enforce and blocks invalid schema",
+			agentName:      "default-agent",
+			wantErr:        true,
+			wantAuditCount: 0,
+		},
+		{
+			name:           "enforce mode blocks invalid schema",
+			agentName:      "enforce-agent",
+			wantErr:        true,
+			wantAuditCount: 0,
+		},
+		{
+			name:           "audit mode allows invalid schema and records audit rule",
+			agentName:      "audit-agent",
+			wantErr:        false,
+			wantAuditCount: 1,
+		},
+		{
+			name:           "off mode bypasses validation with zero audit rules",
+			agentName:      "off-agent",
+			wantErr:        false,
+			wantAuditCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auditMeta := &types.AuditMetadata{}
+			ctx := types.WithAuditMetadata(context.Background(), auditMeta)
+			ctx = context.WithValue(ctx, types.AgentNameContextKey, tt.agentName)
+
+			reqInvalid := &mcp.Request{
+				JSONRPC: "2.0",
+				Method:  "tools/call",
+				Params:  json.RawMessage(`{"name": "search_docs", "arguments": {"limit": 5}}`),
+				ID:      42,
+			}
+
+			_, mcpErr := f.FilterRequest(ctx, reqInvalid)
+			if tt.wantErr {
+				if mcpErr == nil || mcpErr.Code != mcp.ErrSchemaValidation {
+					t.Fatalf("expected ErrSchemaValidation, got %+v", mcpErr)
+				}
+			} else if mcpErr != nil {
+				t.Fatalf("expected nil error in mode for %s, got %+v", tt.agentName, mcpErr)
+			}
+
+			if len(auditMeta.AuditedRules) != tt.wantAuditCount {
+				t.Errorf("got %d audit rules (%v), want %d", len(auditMeta.AuditedRules), auditMeta.AuditedRules, tt.wantAuditCount)
+			}
+			if tt.wantAuditCount > 0 && auditMeta.AuditedRules[0] != "schema_validation:search_docs" {
+				t.Errorf("got audit rule %q, want %q", auditMeta.AuditedRules[0], "schema_validation:search_docs")
+			}
+		})
 	}
 }

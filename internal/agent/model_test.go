@@ -43,6 +43,12 @@ func TestRouteConfig_Clone_DeepCopy(t *testing.T) {
 			WindowSeconds: 60,
 			ExcludeTools:  []string{"ping"},
 		},
+		SchemaValidation: &SchemaValidationOverride{
+			Mode: SchemaValidationAudit,
+		},
+		Guard: &GuardOverride{
+			Mode: GuardModeOff,
+		},
 	}
 
 	clone := orig.Clone()
@@ -98,6 +104,16 @@ func TestRouteConfig_Clone_DeepCopy(t *testing.T) {
 	if clone.LoopProtection.ExcludeTools[0] == "mutated-exclude" {
 		t.Errorf("loop_protection exclude_tools leaked mutation to clone")
 	}
+
+	orig.SchemaValidation.Mode = SchemaValidationOff
+	if clone.SchemaValidation.Mode == SchemaValidationOff {
+		t.Errorf("schema_validation leaked mutation to clone")
+	}
+
+	orig.Guard.Mode = GuardModeEnforce
+	if clone.Guard.Mode == GuardModeEnforce {
+		t.Errorf("guard override leaked mutation to clone")
+	}
 }
 
 func TestRouteConfig_Clone_NilSafe(t *testing.T) {
@@ -132,5 +148,56 @@ func TestRouteConfig_GetToolGovernanceMode_CaseInsensitive(t *testing.T) {
 
 	if mode, ok := cfg.GetToolGovernanceMode("fs__read_file"); ok || mode != "" {
 		t.Errorf("GetToolGovernanceMode(unknown) = (%q, %v), want (\"\", false)", mode, ok)
+	}
+}
+
+func TestRouteConfig_FilterEnforcementModes(t *testing.T) {
+	tests := []struct {
+		name           string
+		cfg            *RouteConfig
+		wantSchemaMode SchemaValidationMode
+		wantGuardMode  GuardEnforcementMode
+	}{
+		{
+			name:           "nil config defaults to enforce",
+			cfg:            nil,
+			wantSchemaMode: SchemaValidationEnforce,
+			wantGuardMode:  GuardModeEnforce,
+		},
+		{
+			name:           "empty overrides default to enforce",
+			cfg:            &RouteConfig{},
+			wantSchemaMode: SchemaValidationEnforce,
+			wantGuardMode:  GuardModeEnforce,
+		},
+		{
+			name: "invalid override values safely fallback to enforce",
+			cfg: &RouteConfig{
+				SchemaValidation: &SchemaValidationOverride{Mode: "bogus"},
+				Guard:            &GuardOverride{Mode: "invalid"},
+			},
+			wantSchemaMode: SchemaValidationEnforce,
+			wantGuardMode:  GuardModeEnforce,
+		},
+		{
+			name: "explicit audit and off modes honored",
+			cfg: &RouteConfig{
+				SchemaValidation: &SchemaValidationOverride{Mode: SchemaValidationAudit},
+				Guard:            &GuardOverride{Mode: GuardModeOff},
+			},
+			wantSchemaMode: SchemaValidationAudit,
+			wantGuardMode:  GuardModeOff,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetSchemaValidationMode(); got != tt.wantSchemaMode {
+				t.Errorf("GetSchemaValidationMode() = %q, want %q", got, tt.wantSchemaMode)
+			}
+			if got := tt.cfg.GetGuardMode(); got != tt.wantGuardMode {
+				t.Errorf("GetGuardMode() = %q, want %q", got, tt.wantGuardMode)
+			}
+		})
 	}
 }

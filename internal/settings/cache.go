@@ -47,6 +47,12 @@ func ResolveEffectiveSettings(base *config.Config, overrides map[string]string) 
 		if base.Filters.HITL.TimeoutSeconds > 0 {
 			effective.Guard.HITLTimeoutSec = base.Filters.HITL.TimeoutSeconds
 		}
+		if base.Telemetry.RetentionDays >= 7 && base.Telemetry.RetentionDays <= 365 {
+			effective.Maintenance.AuditRetentionDays = base.Telemetry.RetentionDays
+		}
+		if base.Telemetry.MaxPayloadBytes >= 65536 && base.Telemetry.MaxPayloadBytes <= 4194304 {
+			effective.Limits.MaxPreviewBytes = base.Telemetry.MaxPayloadBytes
+		}
 	}
 
 	// Overlay sparse DuckDB overrides

@@ -74,6 +74,10 @@ func WireFilterDependencies(pipe *filter.Pipeline, cfg *config.Config, deps Filt
 		return
 	}
 
+	if deps.SettingsCache != nil {
+		pipe.SetSettingsCache(deps.SettingsCache)
+	}
+
 	// 1. Schema Validation Store
 	if deps.SchemaStore != nil {
 		if sf, ok := pipe.GetFilter("schema_validation").(*schema.SchemaFilter); ok && sf != nil {
@@ -91,13 +95,16 @@ func WireFilterDependencies(pipe *filter.Pipeline, cfg *config.Config, deps Filt
 		}
 	}
 
-	// 3. Agent Repo for Loop and Rate Limit filters
+	// 3. Agent Repo for Loop, Rate Limit, and Schema Validation filters
 	if deps.AgentRepo != nil {
 		if lf, ok := pipe.GetFilter("loop_protection").(*limit.LoopFilter); ok && lf != nil {
 			lf.SetAgentRepository(deps.AgentRepo)
 		}
 		if rf, ok := pipe.GetFilter("rate_limiting").(*limit.RateLimitFilter); ok && rf != nil {
 			rf.SetAgentRepository(deps.AgentRepo)
+		}
+		if sf, ok := pipe.GetFilter("schema_validation").(*schema.SchemaFilter); ok && sf != nil {
+			sf.SetAgentRepository(deps.AgentRepo)
 		}
 	}
 
@@ -189,59 +196,8 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		deps.DBManager = dbMgr
 	}
 
-	// 3. Initialize analytical DuckDB telemetry engine if enabled
-	if cfg.IsTelemetryEnabled() && dbMgr != nil {
-		telemetryCfg := duckdbTelemetry.Config{
-			DBPath:          cfg.GetTelemetryDBPath(),
-			RetentionDays:   cfg.Telemetry.RetentionDays,
-			MaxSizeBytes:    cfg.Telemetry.MaxSizeBytes,
-			MaxPayloadBytes: cfg.Telemetry.MaxPayloadBytes,
-			BufferSize:      cfg.Telemetry.BufferSize,
-			BatchFlushMs:    cfg.Telemetry.BatchFlushMs,
-		}
-		tEngine, tErr := duckdbTelemetry.NewWithDB(dbMgr.DB(), telemetryCfg)
-		if tErr != nil {
-			slog.Warn("Failed to initialize DuckDB telemetry engine, proceeding without local analytics", slog.String("error", tErr.Error()))
-		} else {
-			deps.TelemetryEngine = tEngine
-		}
-	}
-
-	// 4. Initialize and seed DuckDB Model Catalog (GUARD-001)
-	if dbMgr != nil && dbMgr.DB() != nil {
-		cat := guard.NewCatalog(dbMgr.DB())
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := cat.Migrate(ctx); err != nil {
-			slog.Warn("Failed to migrate guard models table in DuckDB", slog.String("error", err.Error()))
-		}
-		if err := cat.Seed(ctx); err != nil {
-			slog.Warn("Failed to seed official guard models into DuckDB", slog.String("error", err.Error()))
-		}
-		cancel()
-		deps.GuardCatalog = cat
-	}
-
-	// 5. Initialize and seed DuckDB Policy Store & Canonical Packs (POL-001)
-	if dbMgr != nil && dbMgr.DB() != nil {
-		ps := policy.NewDuckDBStore(dbMgr.DB())
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := ps.Migrate(ctx); err != nil {
-			slog.Warn("Failed to migrate policy tables in DuckDB", slog.String("error", err.Error()))
-		}
-		if err := policy.Seed(ctx, ps); err != nil {
-			slog.Warn("Failed to seed canonical policy packs into DuckDB", slog.String("error", err.Error()))
-		}
-
-		ss := schema.NewDuckDBSchemaStore(dbMgr.DB())
-		if err := ss.Migrate(ctx); err != nil {
-			slog.Warn("Failed to migrate mcp_tool_schemas table in DuckDB", slog.String("error", err.Error()))
-		}
-		cancel()
-		deps.PolicyStore = ps
-		deps.SchemaStore = ss
-	}
-
-	// 5.b. Initialize DuckDB Settings Store & Zero-I/O Overlay Cache (ADR-0053)
+	// 3. Initialize DuckDB Settings Store & Zero-I/O Overlay Cache BEFORE telemetry engine
+	// so RetentionCleaner's boot sweep honors persisted maintenance.audit_retention_days (ADR-0053 / ARCH-034).
 	var settingsStore settings.Store
 	var settingsCache *settings.Cache
 
@@ -268,6 +224,59 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 
 	deps.SettingsStore = settingsStore
 	deps.SettingsCache = settingsCache
+
+	// 4. Initialize analytical DuckDB telemetry engine if enabled
+	if cfg.IsTelemetryEnabled() && dbMgr != nil {
+		telemetryCfg := duckdbTelemetry.Config{
+			DBPath:          cfg.GetTelemetryDBPath(),
+			RetentionDays:   cfg.Telemetry.RetentionDays,
+			MaxSizeBytes:    cfg.Telemetry.MaxSizeBytes,
+			MaxPayloadBytes: cfg.Telemetry.MaxPayloadBytes,
+			BufferSize:      cfg.Telemetry.BufferSize,
+			BatchFlushMs:    cfg.Telemetry.BatchFlushMs,
+			SettingsCache:   settingsCache,
+		}
+		tEngine, tErr := duckdbTelemetry.NewWithDB(dbMgr.DB(), telemetryCfg)
+		if tErr != nil {
+			slog.Warn("Failed to initialize DuckDB telemetry engine, proceeding without local analytics", slog.String("error", tErr.Error()))
+		} else {
+			deps.TelemetryEngine = tEngine
+		}
+	}
+
+	// 5. Initialize and seed DuckDB Model Catalog (GUARD-001)
+	if dbMgr != nil && dbMgr.DB() != nil {
+		cat := guard.NewCatalog(dbMgr.DB())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := cat.Migrate(ctx); err != nil {
+			slog.Warn("Failed to migrate guard models table in DuckDB", slog.String("error", err.Error()))
+		}
+		if err := cat.Seed(ctx); err != nil {
+			slog.Warn("Failed to seed official guard models into DuckDB", slog.String("error", err.Error()))
+		}
+		cancel()
+		deps.GuardCatalog = cat
+	}
+
+	// 5.b. Initialize and seed DuckDB Policy Store & Canonical Packs (POL-001)
+	if dbMgr != nil && dbMgr.DB() != nil {
+		ps := policy.NewDuckDBStore(dbMgr.DB())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := ps.Migrate(ctx); err != nil {
+			slog.Warn("Failed to migrate policy tables in DuckDB", slog.String("error", err.Error()))
+		}
+		if err := policy.Seed(ctx, ps); err != nil {
+			slog.Warn("Failed to seed canonical policy packs into DuckDB", slog.String("error", err.Error()))
+		}
+
+		ss := schema.NewDuckDBSchemaStore(dbMgr.DB())
+		if err := ss.Migrate(ctx); err != nil {
+			slog.Warn("Failed to migrate mcp_tool_schemas table in DuckDB", slog.String("error", err.Error()))
+		}
+		cancel()
+		deps.PolicyStore = ps
+		deps.SchemaStore = ss
+	}
 
 	// 6. Compose audit loggers into a single unified logger
 	var loggers []filter.AuditLogger

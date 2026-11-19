@@ -311,7 +311,10 @@ export const api = {
   getMCPTools: (signal?: AbortSignal) => request<{ tools: ToolMetadata[] }>('/admin/mcp/tools', { signal }),
 
   // Audit Logs
-  getAuditLogs: (signal?: AbortSignal) => request<{ events?: AuditEvent[]; logs?: any[] }>('/admin/audit-logs', { signal }),
+  getAuditLogs: (signal?: AbortSignal) =>
+    request<{ events?: AuditEvent[]; logs?: any[] }>('/admin/audit-logs?summary=1', { signal }),
+  getAuditLogDetail: (id: string, signal?: AbortSignal) =>
+    request<{ status: string; record: AuditEvent }>(`/admin/audit-logs/${encodeURIComponent(id)}`, { signal }),
 
   // Human-in-the-Loop Safety
   respondHITL: (callId: string, approved: boolean) =>

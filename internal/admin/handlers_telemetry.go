@@ -2,8 +2,11 @@ package admin
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -37,19 +40,22 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		filter := duckdb.QueryFilter{
-			Limit:     limit,
-			Offset:    offset,
-			Decision:  strings.TrimSpace(r.URL.Query().Get("decision")),
-			AgentName: strings.TrimSpace(r.URL.Query().Get("agent_name")),
-			ToolName:  strings.TrimSpace(r.URL.Query().Get("tool_name")),
+			Limit:       limit,
+			Offset:      offset,
+			Decision:    strings.TrimSpace(r.URL.Query().Get("decision")),
+			AgentName:   strings.TrimSpace(r.URL.Query().Get("agent_name")),
+			ToolName:    strings.TrimSpace(r.URL.Query().Get("tool_name")),
+			TraceID:     strings.TrimSpace(r.URL.Query().Get("trace_id")),
+			SummaryOnly: r.URL.Query().Get("summary") == "1",
 		}
 
 		result, err := engine.QueryAuditLogs(r.Context(), filter)
 		if err != nil {
+			slog.ErrorContext(r.Context(), "Failed to query telemetry audit logs", slog.String("error", err.Error()))
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"enabled": true,
-				"error":   "Failed to query duckdb telemetry: " + err.Error(),
+				"error":   "Failed to query audit logs",
 				"logs":    []interface{}{},
 			})
 			return
@@ -67,20 +73,22 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Fallback to legacy file-based JSONL audit trail if configured
-	auditLogPath := a.cfg.AuditLog.Path
-	if auditLogPath == "" || !a.cfg.AuditLog.Enabled {
+	cfg := a.Config()
+	if cfg == nil || cfg.AuditLog.Path == "" || !cfg.AuditLog.Enabled {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"enabled": false,
 			"logs":    []string{},
 		})
 		return
 	}
+	auditLogPath := cfg.AuditLog.Path
 
 	file, err := os.Open(auditLogPath)
 	if err != nil {
+		slog.WarnContext(r.Context(), "Failed to open fallback audit log file", slog.String("error", err.Error()))
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"enabled": true,
-			"error":   "Failed to open audit log: " + err.Error(),
+			"error":   "Failed to open audit log file",
 			"logs":    []string{},
 		})
 		return
@@ -114,6 +122,58 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		"enabled": true,
 		"logs":    parsedLogs,
 		"events":  parsedLogs,
+	})
+}
+
+func (a *AdminServer) handleAuditLogDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/admin/audit-logs/"))
+	if id == "" || strings.Contains(id, "/") {
+		http.Error(w, "Invalid audit log identifier", http.StatusBadRequest)
+		return
+	}
+
+	a.mu.RLock()
+	engine := a.telemetryEngine
+	a.mu.RUnlock()
+	if engine == nil {
+		http.Error(w, "DuckDB telemetry engine not available", http.StatusNotFound)
+		return
+	}
+
+	detailReader, ok := engine.(TelemetryDetailReader)
+	if !ok {
+		res, err := engine.QueryAuditLogs(r.Context(), duckdb.QueryFilter{TraceID: id, Limit: 1})
+		if err != nil || res == nil || len(res.Logs) == 0 {
+			http.Error(w, "Audit record not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "success",
+			"record": res.Logs[0],
+		})
+		return
+	}
+
+	rec, err := detailReader.GetAuditLogByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "Audit record not found", http.StatusNotFound)
+			return
+		}
+		slog.ErrorContext(r.Context(), "Failed to retrieve audit record detail", slog.String("id", id), slog.String("error", err.Error()))
+		http.Error(w, "Failed to retrieve audit record", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "success",
+		"record": rec,
 	})
 }
 
@@ -174,7 +234,6 @@ func (a *AdminServer) handleLogEventsStream(w http.ResponseWriter, r *http.Reque
 				continue
 			}
 			fmt.Fprintf(w, "event: audit_batch\ndata: %s\n\n", data)
-			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 		}
 	}

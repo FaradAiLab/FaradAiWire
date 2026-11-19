@@ -12,6 +12,50 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
+type profileGuardPolicy struct {
+	guardMode      agent.GuardEnforcementMode
+	toolMode       agent.ToolGovernanceMode
+	toolConfigured bool
+}
+
+func (f *GuardFilter) resolveProfilePolicy(ctx context.Context, toolName string) profileGuardPolicy {
+	policy := profileGuardPolicy{
+		guardMode: agent.GuardModeEnforce,
+	}
+	agentName := types.GetAgentName(ctx)
+	if agentName == "" {
+		return policy
+	}
+
+	f.mu.RLock()
+	repo := f.agentRepo
+	f.mu.RUnlock()
+	if repo == nil {
+		return policy
+	}
+
+	agentCfg, err := repo.GetAgentConfig(agentName)
+	if err != nil || agentCfg == nil {
+		return policy
+	}
+
+	policy.guardMode = agentCfg.GetGuardMode()
+	if m, ok := agentCfg.GetToolGovernanceMode(toolName); ok && m.IsValid() {
+		policy.toolMode = m
+		policy.toolConfigured = true
+	}
+	return policy
+}
+
+func recordGuardAudit(ctx context.Context, rule string) {
+	if meta := types.GetAuditMetadata(ctx); meta != nil {
+		meta.AuditedRules = append(meta.AuditedRules, rule)
+		if meta.FilterName == "" {
+			meta.FilterName = "guard"
+		}
+	}
+}
+
 // FilterResponse evaluates outgoing tool execution responses for indirect prompt injection and sensitive data leaks.
 func (f *GuardFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (*mcp.Response, *mcp.Error) {
 	if resp == nil || resp.Result == nil || len(resp.Result) == 0 {
@@ -23,6 +67,12 @@ func (f *GuardFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (*
 	if toolName == "" {
 		return resp, nil
 	}
+
+	policy := f.resolveProfilePolicy(ctx, toolName)
+	if policy.guardMode == agent.GuardModeOff {
+		return resp, nil
+	}
+	bypassAutonomous := policy.toolConfigured && policy.toolMode == agent.ModeAutonomous
 
 	// -------------------------------------------------------------------------
 	// TIER 1: L1 Static & DLP In-Memory Regex Engine (< 0.2ms)
@@ -36,21 +86,28 @@ func (f *GuardFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (*
 	mgr := f.manager
 	f.mu.RUnlock()
 
-	// 1.1 Check block rules first to terminate early (zero neural overhead)
-	for _, rule := range rules {
-		if rule.Action == "block" && rule.Regex.MatchString(payloadStr) {
-			slog.WarnContext(ctx, "Semantic Security Guard L1 Policy blocked tool response",
-				slog.String("rule", rule.Name),
-				slog.String("tool", toolName),
-			)
-			return nil, mcp.NewError(
-				mcp.ErrIndirectInjection,
-				fmt.Sprintf("Security Alert: Indirect prompt injection detected in tool response by L1 rule '%s'", rule.Name),
-				map[string]interface{}{
-					"rule": rule.Name,
-					"tool": toolName,
-				},
-			)
+	// 1.1 Check block rules first to terminate early unless tool is explicitly Autonomous
+	if !bypassAutonomous {
+		for _, rule := range rules {
+			if rule.Action == "block" && rule.Regex.MatchString(payloadStr) {
+				slog.WarnContext(ctx, "Semantic Security Guard L1 Policy matched tool response",
+					slog.String("rule", rule.Name),
+					slog.String("tool", toolName),
+					slog.String("guard_mode", string(policy.guardMode)),
+				)
+				if policy.guardMode == agent.GuardModeAudit {
+					recordGuardAudit(ctx, "guard:response:l1:"+rule.Name)
+					continue
+				}
+				return nil, mcp.NewError(
+					mcp.ErrIndirectInjection,
+					fmt.Sprintf("Security Alert: Indirect prompt injection detected in tool response by L1 rule '%s'", rule.Name),
+					map[string]interface{}{
+						"rule": rule.Name,
+						"tool": toolName,
+					},
+				)
+			}
 		}
 	}
 
@@ -64,6 +121,10 @@ func (f *GuardFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (*
 
 	if isMasked {
 		resp.Result = json.RawMessage(payloadStr)
+	}
+
+	if bypassAutonomous {
+		return resp, nil
 	}
 
 	// -------------------------------------------------------------------------
@@ -127,13 +188,19 @@ func (f *GuardFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (*
 				engine = "Semantic Security Guard"
 			}
 
-			slog.WarnContext(ctx, "Semantic Security Guard blocked indirect prompt injection in tool response",
+			slog.WarnContext(ctx, "Semantic Security Guard detected indirect prompt injection in tool response",
 				slog.String("tool", toolName),
 				slog.String("engine", engine),
 				slog.String("threat_domain", result.ThreatDomain),
 				slog.String("cwe", result.CWE),
 				slog.Float64("score", result.MaliciousProbability),
+				slog.String("guard_mode", string(policy.guardMode)),
 			)
+
+			if policy.guardMode == agent.GuardModeAudit {
+				recordGuardAudit(ctx, fmt.Sprintf("guard:response:l2:%s:%s", engine, result.CWE))
+				return resp, nil
+			}
 
 			return nil, mcp.NewError(
 				mcp.ErrIndirectInjection,
@@ -163,9 +230,18 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 		Name      string                 `json:"name"`
 		Arguments map[string]interface{} `json:"arguments"`
 	}
-	if err := json.Unmarshal(req.Params, &callParams); err != nil || callParams.Name == "" {
+	if err := json.Unmarshal(req.Params, &callParams); err != nil {
+		return nil, mcp.NewError(mcp.ErrInvalidParams, "Invalid tools/call parameters: "+err.Error(), nil)
+	}
+	if callParams.Name == "" {
+		return nil, mcp.NewError(mcp.ErrInvalidParams, "Missing required tool name in tools/call parameters", nil)
+	}
+
+	policy := f.resolveProfilePolicy(ctx, callParams.Name)
+	if policy.guardMode == agent.GuardModeOff {
 		return req, nil
 	}
+	bypassAutonomous := policy.toolConfigured && policy.toolMode == agent.ModeAutonomous
 
 	// -------------------------------------------------------------------------
 	// TIER 1: L1 Static & DLP In-Memory Regex Engine (< 0.2ms)
@@ -177,16 +253,27 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 	rules := f.compiledL1
 	cfg := f.cfg
 	mgr := f.manager
+	hitl := f.hitlDispatcher
 	f.mu.RUnlock()
 
-	// 1.1 Check block rules first to terminate early (zero GPU overhead)
-	for _, rule := range rules {
-		if rule.Action == "block" && rule.Regex.MatchString(payloadStr) {
-			return nil, mcp.NewError(
-				mcp.ErrDLPViolation,
-				fmt.Sprintf("L1 Guard Policy Block: %s", rule.Name),
-				nil,
-			)
+	// 1.1 Check block rules first to terminate early unless tool is explicitly Autonomous
+	if !bypassAutonomous {
+		for _, rule := range rules {
+			if rule.Action == "block" && rule.Regex.MatchString(payloadStr) {
+				if policy.guardMode == agent.GuardModeAudit {
+					slog.WarnContext(ctx, "Semantic Security Guard L1 Policy audited tool request",
+						slog.String("rule", rule.Name),
+						slog.String("tool", callParams.Name),
+					)
+					recordGuardAudit(ctx, "guard:request:l1:"+rule.Name)
+					continue
+				}
+				return nil, mcp.NewError(
+					mcp.ErrDLPViolation,
+					fmt.Sprintf("L1 Guard Policy Block: %s", rule.Name),
+					nil,
+				)
+			}
 		}
 	}
 
@@ -200,46 +287,18 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 
 	if isMasked {
 		req.Params = json.RawMessage(payloadStr)
-		// Re-sync arguments map for downstream L2 inspection
-		_ = json.Unmarshal(req.Params, &callParams)
+		// Re-sync arguments map for downstream L2 inspection; fail closed if masking broke JSON structure
+		if err := json.Unmarshal(req.Params, &callParams); err != nil {
+			return nil, mcp.NewError(mcp.ErrInvalidParams, "Post-redaction tools/call parameters invalid: "+err.Error(), nil)
+		}
 	}
 
 	// -------------------------------------------------------------------------
-	// TIER 1.5: Context Extraction & Agent Tool Governance Mode Resolution
+	// TIER 1.5: Agent Tool Governance Mode Resolution
 	// -------------------------------------------------------------------------
-	var agentName string
-	if val := ctx.Value(types.AgentNameContextKey); val != nil {
-		if s, ok := val.(string); ok {
-			agentName = s
-		}
-	}
-	if agentName == "" {
-		if val := ctx.Value("agent_name"); val != nil {
-			if s, ok := val.(string); ok {
-				agentName = s
-			}
-		}
-	}
-	if agentName == "" {
-		if val := ctx.Value("agent"); val != nil {
-			if s, ok := val.(string); ok {
-				agentName = s
-			}
-		}
-	}
-
-	f.mu.RLock()
-	repo := f.agentRepo
-	hitl := f.hitlDispatcher
-	f.mu.RUnlock()
-
 	var mode agent.ToolGovernanceMode
-	if repo != nil && agentName != "" {
-		if agentCfg, err := repo.GetAgentConfig(agentName); err == nil && agentCfg != nil {
-			if m, ok := agentCfg.GetToolGovernanceMode(callParams.Name); ok && m.IsValid() {
-				mode = m
-			}
-		}
+	if policy.toolConfigured {
+		mode = policy.toolMode
 	}
 
 	// Boundary-aware smart default when unconfigured
@@ -378,6 +437,17 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 				if meta := types.GetAuditMetadata(ctx); meta != nil {
 					meta.AuditedRules = append(meta.AuditedRules, fmt.Sprintf("human_supremacy_override:%s:%s", engine, result.CWE))
 				}
+				return req, nil
+			}
+
+			if policy.guardMode == agent.GuardModeAudit {
+				slog.WarnContext(ctx, "Semantic Security Guard audited threat verdict on tool request",
+					slog.String("tool", callParams.Name),
+					slog.String("engine", engine),
+					slog.String("threat_domain", result.ThreatDomain),
+					slog.String("cwe", result.CWE),
+				)
+				recordGuardAudit(ctx, fmt.Sprintf("guard:request:l2:%s:%s", engine, result.CWE))
 				return req, nil
 			}
 

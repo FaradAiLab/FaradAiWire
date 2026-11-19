@@ -9,6 +9,7 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/adaptive"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	pkgfilter "github.com/FaradAiLab/FaradAiWire/pkg/filter"
 )
 
@@ -30,6 +31,8 @@ const (
 	UserContextKey ContextKey = types.UserContextKey
 	// TraceIDContextKey stores the trace ID in the request context.
 	TraceIDContextKey ContextKey = types.TraceIDContextKey
+	// InvocationIDContextKey stores the unique invocation record ID across request and response phases.
+	InvocationIDContextKey ContextKey = types.InvocationIDContextKey
 	// ToolNameContextKey stores the tool name in request/response context.
 	ToolNameContextKey ContextKey = types.ToolNameContextKey
 	// PathTypeContextKey stores the execution path type (FAST_PATH / DEEP_PATH) in context.
@@ -45,6 +48,7 @@ type Pipeline struct {
 	router                  *adaptive.Router
 	logger                  AuditLogger
 	debugRetainUnmaskedDiff bool
+	settingsCache           *settings.Cache
 }
 
 // NewPipeline initializes a new filter pipeline.
@@ -52,6 +56,26 @@ func NewPipeline(logger AuditLogger) *Pipeline {
 	return &Pipeline{
 		logger: logger,
 	}
+}
+
+// SetSettingsCache attaches a live atomic operational settings cache to the pipeline.
+func (p *Pipeline) SetSettingsCache(cache *settings.Cache) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.settingsCache = cache
+	p.mu.Unlock()
+}
+
+// SettingsCache returns the configured live operational settings cache, or nil.
+func (p *Pipeline) SettingsCache() *settings.Cache {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.settingsCache
 }
 
 // SetDebugRetainUnmaskedDiff sets whether pre-filter payloads are recorded for local diffing.
@@ -203,13 +227,15 @@ func (p *Pipeline) GetAdaptiveRouter() *adaptive.Router {
 // ClearBaselines resets dynamic baselines across any filters in the pipeline that support it.
 func (p *Pipeline) ClearBaselines() {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
+	filters := make([]NamedFilter, len(p.filters))
+	copy(filters, p.filters)
+	p.mu.RUnlock()
 
 	type baselineClearer interface {
 		ClearBaselines()
 	}
 
-	for _, f := range p.filters {
+	for _, f := range filters {
 		if bc, ok := f.(baselineClearer); ok {
 			bc.ClearBaselines()
 		}

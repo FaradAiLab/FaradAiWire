@@ -127,6 +127,16 @@ export interface LoopProtectionOverride {
   exclude_tools?: string[]
 }
 
+export type FilterEnforcementMode = 'enforce' | 'audit' | 'off'
+
+export interface SchemaValidationOverride {
+  mode: FilterEnforcementMode
+}
+
+export interface GuardOverride {
+  mode: FilterEnforcementMode
+}
+
 export interface AgentConfig {
   agent_id: string
   agent_name: string
@@ -139,6 +149,8 @@ export interface AgentConfig {
   retained_governance?: Record<string, Record<string, ToolGovernanceMode>>
   rate_limit?: RateLimitOverride
   loop_protection?: LoopProtectionOverride
+  schema_validation?: SchemaValidationOverride
+  guard?: GuardOverride
 }
 
 export interface AgentItem {
@@ -205,13 +217,23 @@ export interface AuditEvent {
   agent?: string
   client_session_id?: string
   tool_name?: string
+  phase?: string
+  request_decision?: string
+  response_decision?: string
   matched_rule?: string
   audited_rules?: string[]
   latency_ms?: number
+  input_size_bytes?: number
+  output_size_bytes?: number
   payload_preview?: string
   raw_payload_preview?: string
   original_payload?: string
   original_payload_preview?: string
+  original_request?: string
+  request?: string
+  original_response?: string
+  response?: string
+  error_message?: string
   details?: Record<string, unknown>
   error?: string
 }

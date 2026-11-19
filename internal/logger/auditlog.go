@@ -40,42 +40,56 @@ func NewFileAuditLogger(path string) (*FileAuditLogger, error) {
 }
 
 // LogEvent writes a structured audit event to the JSONL file.
+// Unmasked local-vault fields are stripped via RedactedCopy so flat logs never
+// leak plaintext secrets or PII (ZERO-DLP BLEED invariant).
 func (f *FileAuditLogger) LogEvent(event *filter.AuditEvent) {
-	if f == nil || f.file == nil {
-		// Log-to-console fallback if no file logger is configured
-		data, _ := json.Marshal(event)
+	safeEvent := event.RedactedCopy()
+	if safeEvent == nil {
+		return
+	}
+
+	data, err := json.Marshal(safeEvent)
+	if err != nil {
+		slog.Error("Error marshaling audit event",
+			slog.String("trace_id", safeEvent.TraceID),
+			slog.String("agent", safeEvent.AgentName),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+
+	logFallback := func() {
 		slog.Info("Audit event console fallback",
-			slog.String("trace_id", event.TraceID),
-			slog.String("agent", event.AgentName),
-			slog.String("decision", event.Decision),
-			slog.String("tool", event.ToolName),
-			slog.Float64("latency_ms", event.LatencyMs),
+			slog.String("trace_id", safeEvent.TraceID),
+			slog.String("agent", safeEvent.AgentName),
+			slog.String("decision", safeEvent.Decision),
+			slog.String("tool", safeEvent.ToolName),
+			slog.Float64("latency_ms", safeEvent.LatencyMs),
 			slog.String("audit_json", string(data)),
 		)
+	}
+
+	if f == nil {
+		logFallback()
 		return
 	}
 
 	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	data, err := json.Marshal(event)
-	if err != nil {
-		slog.Error("Error marshaling audit event",
-			slog.String("trace_id", event.TraceID),
-			slog.String("agent", event.AgentName),
-			slog.String("error", err.Error()),
-		)
+	if f.file == nil {
+		f.mu.Unlock()
+		logFallback()
 		return
 	}
+	line := append(data, '\n')
+	_, writeErr := f.file.Write(line)
+	f.mu.Unlock()
 
-	data = append(data, '\n')
-	if _, err := f.file.Write(data); err != nil {
+	if writeErr != nil {
 		slog.Error("Error writing to audit log file",
-			slog.String("trace_id", event.TraceID),
-			slog.String("agent", event.AgentName),
-			slog.String("error", err.Error()),
+			slog.String("trace_id", safeEvent.TraceID),
+			slog.String("agent", safeEvent.AgentName),
+			slog.String("error", writeErr.Error()),
 		)
-		return
 	}
 }
 

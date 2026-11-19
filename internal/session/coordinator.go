@@ -216,10 +216,17 @@ func (c *InboundCoordinator) ExecuteMessage(
 			traceID = t
 		}
 	}
+	var invocationID string
 
 	if isRequest {
+		if traceID == "" {
+			traceID = filter.GenerateTraceID()
+			userCtx = context.WithValue(userCtx, filter.TraceIDContextKey, traceID)
+		}
 		var toolName string
 		if req.Method == "tools/call" {
+			invocationID = filter.GenerateTraceID()
+			userCtx = context.WithValue(userCtx, filter.InvocationIDContextKey, invocationID)
 			var callParams struct {
 				Name string `json:"name"`
 			}
@@ -237,12 +244,13 @@ func (c *InboundCoordinator) ExecuteMessage(
 				}
 			}
 			cStore.Put(NewCorrelationKey(clientSessionID, reqIDStr), &PendingRequest{
-				UserCtx:   uCtx,
-				Context:   r.Context(),
-				ToolName:  toolName,
-				AgentName: agentName,
-				Timestamp: time.Now(),
-				TraceID:   traceID,
+				UserCtx:      uCtx,
+				Context:      r.Context(),
+				ToolName:     toolName,
+				AgentName:    agentName,
+				TraceID:      traceID,
+				InvocationID: invocationID,
+				Timestamp:    time.Now(),
 			})
 		}
 
@@ -397,35 +405,49 @@ func (c *InboundCoordinator) ExecuteMessage(
 			if effectiveAgent == "" && bridge != nil {
 				effectiveAgent = bridge.AgentName
 			}
-			if toolName != "" && c.agentRepo != nil && effectiveAgent != "" {
-				toolInfo, _ := c.agentRepo.ResolveToolProtocol(effectiveAgent, toolName)
+			if toolName != "" && agentRepo != nil && effectiveAgent != "" {
+				toolInfo, _ := agentRepo.ResolveToolProtocol(effectiveAgent, toolName)
 				if toolInfo != nil && !toolInfo.IsToolAllowed(toolName) {
 					var reqID interface{}
 					if req != nil {
 						reqID = req.ID
 					}
-					errResp := mcp.NewErrorResponse(reqID, -32004, fmt.Sprintf("Security policy violation: Tool '%s' is not allowed by protocol whitelist", toolName), map[string]interface{}{
+					if reqID != nil && cStore != nil {
+						cStore.GetAndRemove(NewCorrelationKey(clientSessionID, fmt.Sprintf("%v", reqID)))
+					}
+					errMsg := fmt.Sprintf("Security policy violation: Tool '%s' is not allowed by protocol whitelist", toolName)
+					errResp := mcp.NewErrorResponse(reqID, -32004, errMsg, map[string]interface{}{
 						"agent":    effectiveAgent,
 						"protocol": toolInfo.ProtocolName,
 						"tool":     toolName,
 					})
 					respBytes, _ := json.Marshal(errResp)
+					if pipeline != nil {
+						pipeline.EmitResponseFailure(userCtx, invocationID, traceID, effectiveAgent, toolName, "protocol_whitelist", filter.DecisionBlocked, errMsg, respBytes)
+					}
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write(respBytes)
 					return
 				}
 
-				agentCfg, _ := c.agentRepo.GetAgentConfig(effectiveAgent)
+				agentCfg, _ := agentRepo.GetAgentConfig(effectiveAgent)
 				if agentCfg != nil && !agentCfg.IsToolAllowed(toolName) {
 					var reqID interface{}
 					if req != nil {
 						reqID = req.ID
 					}
-					errResp := mcp.NewErrorResponse(reqID, -32004, fmt.Sprintf("Security policy violation: Tool '%s' is not allowed by agent tool scoping policy", toolName), map[string]interface{}{
+					if reqID != nil && cStore != nil {
+						cStore.GetAndRemove(NewCorrelationKey(clientSessionID, fmt.Sprintf("%v", reqID)))
+					}
+					errMsg := fmt.Sprintf("Security policy violation: Tool '%s' is not allowed by agent tool scoping policy", toolName)
+					errResp := mcp.NewErrorResponse(reqID, -32004, errMsg, map[string]interface{}{
 						"agent": effectiveAgent,
 						"tool":  toolName,
 					})
 					respBytes, _ := json.Marshal(errResp)
+					if pipeline != nil {
+						pipeline.EmitResponseFailure(userCtx, invocationID, traceID, effectiveAgent, toolName, "tool_scoping", filter.DecisionBlocked, errMsg, respBytes)
+					}
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write(respBytes)
 					return
@@ -440,8 +462,14 @@ func (c *InboundCoordinator) ExecuteMessage(
 			if req != nil {
 				reqID = req.ID
 			}
+			if reqID != nil && cStore != nil {
+				cStore.GetAndRemove(NewCorrelationKey(clientSessionID, fmt.Sprintf("%v", reqID)))
+			}
 			errResp := mcp.NewErrorResponse(reqID, mcp.ErrInternalError, dispatchErr.Error(), nil)
 			respBytes, _ := json.Marshal(errResp)
+			if pipeline != nil {
+				pipeline.EmitResponseFailure(userCtx, invocationID, traceID, bridge.AgentName, toolName, "dispatcher", filter.DecisionError, dispatchErr.Error(), respBytes)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write(respBytes)
 			return

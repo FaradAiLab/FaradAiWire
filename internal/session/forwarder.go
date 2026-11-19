@@ -118,6 +118,8 @@ func (f *Forwarder) BackendPath() string {
 	return f.backendPath
 }
 
+const maxSessionPaths = 4096
+
 // SetSessionBackendPath associates a specific backend message path with a session.
 func (f *Forwarder) SetSessionBackendPath(sessionID, path string) {
 	f.mu.Lock()
@@ -125,7 +127,30 @@ func (f *Forwarder) SetSessionBackendPath(sessionID, path string) {
 	if f.sessionPaths == nil {
 		f.sessionPaths = make(map[string]string)
 	}
+	if _, exists := f.sessionPaths[sessionID]; !exists && len(f.sessionPaths) >= maxSessionPaths {
+		for k := range f.sessionPaths {
+			delete(f.sessionPaths, k)
+			break
+		}
+	}
 	f.sessionPaths[sessionID] = strings.TrimSpace(path)
+}
+
+// DeleteSessionBackendPath removes the cached backend path for a closed or evicted session.
+func (f *Forwarder) DeleteSessionBackendPath(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	f.mu.Lock()
+	delete(f.sessionPaths, sessionID)
+	f.mu.Unlock()
+}
+
+func redactURLQueryForLog(rawURL string) string {
+	if idx := strings.IndexByte(rawURL, '?'); idx >= 0 {
+		return rawURL[:idx]
+	}
+	return rawURL
 }
 
 // SessionBackendPath returns the backend message path for the given session ID,
@@ -160,6 +185,7 @@ func (f *Forwarder) ForwardMessage(
 		if reqID != nil {
 			errResp := mcp.NewErrorResponse(reqID, -32001, fmt.Sprintf("Upstream corporate gateway unreachable: invalid target URL: %v", err), nil)
 			respBytes, _ := json.Marshal(errResp)
+			f.logUpstreamFailure(userCtx, clientSessionID, reqID, errResp.Error.Message, respBytes)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(respBytes)
@@ -185,6 +211,7 @@ func (f *Forwarder) ForwardMessage(
 		if reqID != nil {
 			errResp := mcp.NewErrorResponse(reqID, -32001, fmt.Sprintf("Upstream corporate gateway unreachable: %v", err), nil)
 			respBytes, _ := json.Marshal(errResp)
+			f.logUpstreamFailure(userCtx, clientSessionID, reqID, errResp.Error.Message, respBytes)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(respBytes)
@@ -211,8 +238,9 @@ func (f *Forwarder) ForwardMessage(
 		backReq.Header.Set("X-Trace-ID", traceID)
 	}
 
-	slog.Info("Forwarding message to backend",
-		slog.String("target_url", backendMessageURL),
+	logURL := redactURLQueryForLog(backendMessageURL)
+	slog.InfoContext(r.Context(), "Forwarding message to backend",
+		slog.String("target_url", logURL),
 		slog.String("client_session_id", clientSessionID),
 		slog.String("trace_id", traceID),
 		slog.Int("body_len", len(body)),
@@ -224,13 +252,14 @@ func (f *Forwarder) ForwardMessage(
 
 	resp, err := client.Do(backReq)
 	if err != nil {
-		slog.Warn("Upstream corporate gateway unreachable",
-			slog.String("target_url", backendMessageURL),
+		slog.WarnContext(r.Context(), "Upstream corporate gateway unreachable",
+			slog.String("target_url", logURL),
 			slog.String("error", err.Error()),
 		)
 		if reqID != nil {
 			errResp := mcp.NewErrorResponse(reqID, -32001, fmt.Sprintf("Upstream corporate gateway unreachable: %v", err), nil)
 			respBytes, _ := json.Marshal(errResp)
+			f.logUpstreamFailure(userCtx, clientSessionID, reqID, errResp.Error.Message, respBytes)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(respBytes)
@@ -247,6 +276,7 @@ func (f *Forwarder) ForwardMessage(
 		if reqID != nil {
 			errResp := mcp.NewErrorResponse(reqID, -32001, fmt.Sprintf("Upstream corporate gateway unreachable: read response error: %v", err), nil)
 			respBytes, _ := json.Marshal(errResp)
+			f.logUpstreamFailure(userCtx, clientSessionID, reqID, errResp.Error.Message, respBytes)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(respBytes)
@@ -257,8 +287,8 @@ func (f *Forwarder) ForwardMessage(
 	}
 
 	if int64(len(respBody)) > maxUpstreamBytes {
-		slog.Warn("Upstream backend response exceeded payload limit",
-			slog.String("target_url", backendMessageURL),
+		slog.WarnContext(r.Context(), "Upstream backend response exceeded payload limit",
+			slog.String("target_url", logURL),
 			slog.Int("bytes_read", len(respBody)),
 			slog.Int64("max_allowed", maxUpstreamBytes),
 		)
@@ -266,6 +296,7 @@ func (f *Forwarder) ForwardMessage(
 		if reqID != nil {
 			errResp := mcp.NewErrorResponse(reqID, -32603, errMsg, nil)
 			respBytes, _ := json.Marshal(errResp)
+			f.logUpstreamFailure(userCtx, clientSessionID, reqID, errMsg, respBytes)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(respBytes)
@@ -279,6 +310,7 @@ func (f *Forwarder) ForwardMessage(
 		if reqID != nil {
 			errResp := mcp.NewErrorResponse(reqID, -32001, fmt.Sprintf("Upstream corporate gateway unreachable: backend returned HTTP %d: %s", resp.StatusCode, string(respBody)), nil)
 			respBytes, _ := json.Marshal(errResp)
+			f.logUpstreamFailure(userCtx, clientSessionID, reqID, errResp.Error.Message, respBytes)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(respBytes)
@@ -289,7 +321,11 @@ func (f *Forwarder) ForwardMessage(
 	if len(respBody) > 0 && resp.StatusCode >= 200 && resp.StatusCode < 300 && strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
 		_, jsonResp, isRequest, parseErr := mcp.ParseMessage(respBody)
 		if parseErr == nil && !isRequest && jsonResp != nil {
-			var toolName string
+			var (
+				toolName     string
+				invocationID string
+				traceID      string
+			)
 			f.mu.RLock()
 			cStore := f.correlationStore
 			pipeline := f.pipeline
@@ -299,12 +335,20 @@ func (f *Forwarder) ForwardMessage(
 				reqIDStr := fmt.Sprintf("%v", jsonResp.ID)
 				if pending, ok := cStore.GetAndRemove(NewCorrelationKey(clientSessionID, reqIDStr)); ok && pending != nil {
 					toolName = pending.ToolName
+					invocationID = pending.InvocationID
+					traceID = pending.TraceID
 				}
 			}
 
 			respCtx := userCtx
 			if toolName != "" {
 				respCtx = context.WithValue(respCtx, filter.ToolNameContextKey, toolName)
+			}
+			if invocationID != "" {
+				respCtx = context.WithValue(respCtx, filter.InvocationIDContextKey, invocationID)
+			}
+			if traceID != "" {
+				respCtx = context.WithValue(respCtx, filter.TraceIDContextKey, traceID)
 			}
 
 			if pipeline != nil {
@@ -512,6 +556,9 @@ func (f *Forwarder) ProcessOutgoingMessage(data, clientSessionID, targetURL stri
 		if pending.TraceID != "" {
 			userCtx = context.WithValue(userCtx, filter.TraceIDContextKey, pending.TraceID)
 		}
+		if pending.InvocationID != "" {
+			userCtx = context.WithValue(userCtx, filter.InvocationIDContextKey, pending.InvocationID)
+		}
 		if pending.ToolName != "" {
 			userCtx = context.WithValue(userCtx, filter.ToolNameContextKey, pending.ToolName)
 		}
@@ -529,6 +576,47 @@ func (f *Forwarder) ProcessOutgoingMessage(data, clientSessionID, targetURL stri
 
 	respBytes, _ := json.Marshal(filteredResp)
 	return string(respBytes)
+}
+
+func (f *Forwarder) logUpstreamFailure(ctx context.Context, clientSessionID string, reqID any, errMsg string, respBytes []byte) {
+	f.mu.RLock()
+	pipeline := f.pipeline
+	cStore := f.correlationStore
+	f.mu.RUnlock()
+
+	var invocationID, traceID, toolName, agentName string
+	if reqID != nil && cStore != nil {
+		if pending, ok := cStore.GetAndRemove(NewCorrelationKey(clientSessionID, fmt.Sprintf("%v", reqID))); ok && pending != nil {
+			invocationID = pending.InvocationID
+			traceID = pending.TraceID
+			toolName = pending.ToolName
+			agentName = pending.AgentName
+		}
+	}
+	if pipeline == nil {
+		return
+	}
+	if ctx != nil {
+		if invocationID == "" {
+			if v, ok := ctx.Value(filter.InvocationIDContextKey).(string); ok {
+				invocationID = v
+			}
+		}
+		if traceID == "" {
+			if v, ok := ctx.Value(filter.TraceIDContextKey).(string); ok {
+				traceID = v
+			}
+		}
+		if agentName == "" {
+			if v, ok := ctx.Value(filter.AgentNameContextKey).(string); ok {
+				agentName = v
+			}
+		}
+	}
+	if invocationID == "" {
+		return
+	}
+	pipeline.EmitResponseFailure(ctx, invocationID, traceID, agentName, toolName, "forwarder", filter.DecisionError, errMsg, respBytes)
 }
 
 func extractQueryString(urlStr string) string {

@@ -43,6 +43,10 @@ type MaintenanceSettings struct {
 	SessionIdleTimeoutMin int `json:"session_idle_timeout_min"`
 	// CorrelationTTLMin is the retention TTL in minutes for request correlation tracking.
 	CorrelationTTLMin int `json:"correlation_ttl_min"`
+	// AuditRetentionDays is the age threshold in days before audit telemetry records are pruned.
+	AuditRetentionDays int `json:"audit_retention_days"`
+	// RetainLocalPayloads enables unredacted 4-field payload capture inside the local DuckDB vault.
+	RetainLocalPayloads bool `json:"retain_local_payloads"`
 }
 
 // OperationalSettings aggregates all runtime-tunable operational configuration parameters.
@@ -61,7 +65,7 @@ func DefaultOperationalSettings() *OperationalSettings {
 		Limits: LimitsSettings{
 			MaxPayloadBytes:    10 * 1024 * 1024, // 10MB
 			MaxScannerBufferMB: 10,
-			MaxPreviewBytes:    4096,
+			MaxPreviewBytes:    512 * 1024, // 512KB
 		},
 		Timeouts: TimeoutsSettings{
 			ToolExecutionTimeoutSec: 60,
@@ -78,6 +82,8 @@ func DefaultOperationalSettings() *OperationalSettings {
 		Maintenance: MaintenanceSettings{
 			SessionIdleTimeoutMin: 30,
 			CorrelationTTLMin:     60,
+			AuditRetentionDays:    30,
+			RetainLocalPayloads:   true,
 		},
 	}
 }
@@ -109,6 +115,8 @@ func (s *OperationalSettings) Clone() *OperationalSettings {
 		Maintenance: MaintenanceSettings{
 			SessionIdleTimeoutMin: s.Maintenance.SessionIdleTimeoutMin,
 			CorrelationTTLMin:     s.Maintenance.CorrelationTTLMin,
+			AuditRetentionDays:    s.Maintenance.AuditRetentionDays,
+			RetainLocalPayloads:   s.Maintenance.RetainLocalPayloads,
 		},
 	}
 }

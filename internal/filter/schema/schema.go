@@ -8,12 +8,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/agent"
+	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
 	"github.com/FaradAiLab/FaradAiWire/pkg/filter"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
@@ -41,17 +42,22 @@ type SchemaFilter struct {
 	dynamicCapture  bool   // Capture schemas dynamically from tools/list response
 	baselinePinning bool   // Pin first-seen tool schemas and update on changes
 
-	schemaCache      map[string]json.RawMessage // tool_name -> raw JSON schema
-	schemaCacheLower map[string]json.RawMessage // strings.ToLower(tool_name) -> raw JSON schema
-	schemaBaselines  map[string]string          // tool_name -> sha256 hex string
-	duckdbStore      Store                      // Optional persistent DuckDB storage
-	mu               sync.RWMutex
+	schemaCache        map[string]json.RawMessage      // tool_name -> raw JSON schema
+	schemaCacheLower   map[string]json.RawMessage      // strings.ToLower(tool_name) -> raw JSON schema
+	compiledCache      map[string]*gojsonschema.Schema // tool_name -> precompiled JSON schema
+	compiledCacheLower map[string]*gojsonschema.Schema // strings.ToLower(tool_name) -> precompiled JSON schema
+	schemaBaselines    map[string]string               // tool_name -> sha256 hex string
+	duckdbStore        Store                           // Optional persistent DuckDB storage
+	mu                 sync.RWMutex
+	agentRepo          agent.Resolver // Optional per-agent enforcement mode resolver (SEC-023)
+	repoMu             sync.RWMutex
 
-	writeChan chan schemaWriteTask
-	doneChan  chan struct{}
-	wg        sync.WaitGroup
-	closeOnce sync.Once
-	isClosed  atomic.Bool
+	writeChan     chan schemaWriteTask
+	doneChan      chan struct{}
+	wg            sync.WaitGroup
+	closeOnce     sync.Once
+	isClosed      atomic.Bool
+	droppedWrites atomic.Int64
 }
 
 // SetDuckDBStore configures the DuckDB persistence store for tool schemas.
@@ -68,18 +74,68 @@ func (s *SchemaFilter) GetDuckDBStore() Store {
 	return s.duckdbStore
 }
 
+// SetAgentRepository sets the agent repository for per-agent schema validation governance overrides.
+func (s *SchemaFilter) SetAgentRepository(repo agent.Resolver) {
+	s.repoMu.Lock()
+	defer s.repoMu.Unlock()
+	s.agentRepo = repo
+}
+
+// AgentRepository returns the configured agent repository.
+func (s *SchemaFilter) AgentRepository() agent.Resolver {
+	s.repoMu.RLock()
+	defer s.repoMu.RUnlock()
+	return s.agentRepo
+}
+
+func (s *SchemaFilter) resolveValidationMode(ctx context.Context) agent.SchemaValidationMode {
+	agentName := types.GetAgentName(ctx)
+	if agentName == "" {
+		return agent.SchemaValidationEnforce
+	}
+
+	s.repoMu.RLock()
+	repo := s.agentRepo
+	s.repoMu.RUnlock()
+	if repo == nil {
+		return agent.SchemaValidationEnforce
+	}
+
+	agentCfg, err := repo.GetAgentConfig(agentName)
+	if err != nil || agentCfg == nil {
+		return agent.SchemaValidationEnforce
+	}
+	return agentCfg.GetSchemaValidationMode()
+}
+
+// DroppedWrites returns the total count of schema persistence tasks dropped due to write-behind saturation.
+func (s *SchemaFilter) DroppedWrites() int64 {
+	return s.droppedWrites.Load()
+}
+
+func recordSchemaAudit(ctx context.Context, rule string) {
+	if meta := types.GetAuditMetadata(ctx); meta != nil {
+		meta.AuditedRules = append(meta.AuditedRules, rule)
+		if meta.FilterName == "" {
+			meta.FilterName = "schema_validation"
+		}
+	}
+}
+
 // NewSchemaFilter creates a new SchemaFilter instance.
 func NewSchemaFilter(enabled bool, schemasDir string, dynamicCapture bool, baselinePinning bool) *SchemaFilter {
 	f := &SchemaFilter{
-		enabled:          enabled,
-		schemasDir:       schemasDir,
-		dynamicCapture:   dynamicCapture,
-		baselinePinning:  baselinePinning,
-		schemaCache:      make(map[string]json.RawMessage),
-		schemaCacheLower: make(map[string]json.RawMessage),
-		schemaBaselines:  make(map[string]string),
-		writeChan:        make(chan schemaWriteTask, 512),
-		doneChan:         make(chan struct{}),
+		enabled:            enabled,
+		schemasDir:         schemasDir,
+		dynamicCapture:     dynamicCapture,
+		baselinePinning:    baselinePinning,
+		schemaCache:        make(map[string]json.RawMessage),
+		schemaCacheLower:   make(map[string]json.RawMessage),
+		compiledCache:      make(map[string]*gojsonschema.Schema),
+		compiledCacheLower: make(map[string]*gojsonschema.Schema),
+		schemaBaselines:    make(map[string]string),
+		writeChan:          make(chan schemaWriteTask, 512),
+		doneChan:           make(chan struct{}),
 	}
 
 	// Start asynchronous write-behind background worker
@@ -289,10 +345,22 @@ func (s *SchemaFilter) LoadSchemasFromDisk() error {
 		}
 	}
 
+	compiledLoaded := make(map[string]*gojsonschema.Schema, len(loadedCache))
+	for k, v := range loadedCache {
+		if compiled, cErr := gojsonschema.NewSchema(gojsonschema.NewStringLoader(string(v))); cErr == nil {
+			compiledLoaded[k] = compiled
+		}
+	}
+
 	s.mu.Lock()
 	for k, v := range loadedCache {
 		s.schemaCache[k] = v
-		s.schemaCacheLower[strings.ToLower(k)] = v
+		lower := strings.ToLower(k)
+		s.schemaCacheLower[lower] = v
+		if compiled, ok := compiledLoaded[k]; ok {
+			s.compiledCache[k] = compiled
+			s.compiledCacheLower[lower] = compiled
+		}
 	}
 	for k, v := range loadedBaselines {
 		s.schemaBaselines[k] = v
@@ -312,6 +380,11 @@ func (s *SchemaFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mc
 		return req, nil
 	}
 
+	mode := s.resolveValidationMode(ctx)
+	if mode == agent.SchemaValidationOff {
+		return req, nil
+	}
+
 	// Parse tool name and arguments
 	var callParams struct {
 		Name      string          `json:"name"`
@@ -321,10 +394,15 @@ func (s *SchemaFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mc
 		return nil, mcp.NewError(mcp.ErrInvalidParams, "Failed to parse tool call params: "+err.Error(), nil)
 	}
 
+	lowerName := strings.ToLower(callParams.Name)
 	s.mu.RLock()
+	compiled, hasCompiled := s.compiledCache[callParams.Name]
+	if !hasCompiled && lowerName != "" {
+		compiled, hasCompiled = s.compiledCacheLower[lowerName]
+	}
 	schemaRaw, exists := s.schemaCache[callParams.Name]
-	if !exists && callParams.Name != "" {
-		schemaRaw, exists = s.schemaCacheLower[strings.ToLower(callParams.Name)]
+	if !exists && lowerName != "" {
+		schemaRaw, exists = s.schemaCacheLower[lowerName]
 	}
 	s.mu.RUnlock()
 
@@ -333,9 +411,6 @@ func (s *SchemaFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mc
 		return req, nil
 	}
 
-	// Validate arguments against schema
-	schemaLoader := gojsonschema.NewStringLoader(string(schemaRaw))
-
 	// Default to empty object if no arguments are passed
 	argsStr := string(callParams.Arguments)
 	if argsStr == "" || argsStr == "null" {
@@ -343,8 +418,35 @@ func (s *SchemaFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mc
 	}
 	documentLoader := gojsonschema.NewStringLoader(argsStr)
 
-	result, err := gojsonschema.Validate(schemaLoader, documentLoader)
+	var (
+		result *gojsonschema.Result
+		err    error
+	)
+	if hasCompiled && compiled != nil {
+		result, err = compiled.Validate(documentLoader)
+	} else {
+		schemaLoader := gojsonschema.NewStringLoader(string(schemaRaw))
+		if cSchema, cErr := gojsonschema.NewSchema(schemaLoader); cErr == nil {
+			s.mu.Lock()
+			s.compiledCache[callParams.Name] = cSchema
+			if lowerName != "" {
+				s.compiledCacheLower[lowerName] = cSchema
+			}
+			s.mu.Unlock()
+			result, err = cSchema.Validate(documentLoader)
+		} else {
+			err = cErr
+		}
+	}
 	if err != nil {
+		if mode == agent.SchemaValidationAudit {
+			slog.WarnContext(ctx, "Schema validation engine error in audit mode; allowing tool call",
+				slog.String("tool", callParams.Name),
+				slog.String("error", err.Error()),
+			)
+			recordSchemaAudit(ctx, "schema_validation:engine_error:"+callParams.Name)
+			return req, nil
+		}
 		return nil, mcp.NewError(mcp.ErrSchemaValidation, "JSON Schema validation engine error: "+err.Error(), nil)
 	}
 
@@ -352,6 +454,14 @@ func (s *SchemaFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mc
 		var errors []string
 		for _, desc := range result.Errors() {
 			errors = append(errors, desc.String())
+		}
+		if mode == agent.SchemaValidationAudit {
+			slog.WarnContext(ctx, "Schema validation mismatch recorded in audit mode; allowing tool call",
+				slog.String("tool", callParams.Name),
+				slog.Any("errors", errors),
+			)
+			recordSchemaAudit(ctx, "schema_validation:"+callParams.Name)
+			return req, nil
 		}
 		return nil, mcp.NewError(mcp.ErrSchemaValidation, fmt.Sprintf("Tool arguments validation failed: %v", errors), map[string]interface{}{
 			"errors": errors,
@@ -407,6 +517,19 @@ func (s *SchemaFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (
 	}
 
 	var writeTasks []schemaWriteTask
+	toolFileRel := func(name string) string {
+		if strings.EqualFold(name, "mcp_tools") {
+			return "tool_mcp_tools.json"
+		}
+		return name + ".json"
+	}
+
+	compiledUpdates := make(map[string]*gojsonschema.Schema, len(prepared))
+	for _, pt := range prepared {
+		if compiled, cErr := gojsonschema.NewSchema(gojsonschema.NewStringLoader(string(pt.inputSchema))); cErr == nil {
+			compiledUpdates[pt.name] = compiled
+		}
+	}
 
 	// Acquire mutex strictly for in-memory cache/baseline updates
 	s.mu.Lock()
@@ -432,7 +555,7 @@ func (s *SchemaFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (
 					slog.InfoContext(ctx, "Tool schema update/drift detected, updating stored baseline", slog.String("tool", pt.name), slog.String("baseline_hash", baselineHash), slog.String("new_hash", pt.hashStr))
 					s.schemaBaselines[pt.name] = pt.hashStr
 					writeTasks = append(writeTasks, schemaWriteTask{
-						relPath:    pt.name + ".json",
+						relPath:    toolFileRel(pt.name),
 						data:       pt.inputSchema,
 						toolRecord: toolRec,
 					})
@@ -441,21 +564,29 @@ func (s *SchemaFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (
 				s.schemaBaselines[pt.name] = pt.hashStr
 				slog.InfoContext(ctx, "Pinned baseline schema for tool", slog.String("tool", pt.name), slog.String("hash", pt.hashStr))
 				writeTasks = append(writeTasks, schemaWriteTask{
-					relPath:    pt.name + ".json",
+					relPath:    toolFileRel(pt.name),
 					data:       pt.inputSchema,
 					toolRecord: toolRec,
 				})
 			}
 		} else if s.dynamicCapture {
 			writeTasks = append(writeTasks, schemaWriteTask{
-				relPath:    pt.name + ".json",
+				relPath:    toolFileRel(pt.name),
 				data:       pt.inputSchema,
 				toolRecord: toolRec,
 			})
 		}
 
+		lower := strings.ToLower(pt.name)
 		s.schemaCache[pt.name] = pt.inputSchema
-		s.schemaCacheLower[strings.ToLower(pt.name)] = pt.inputSchema
+		s.schemaCacheLower[lower] = pt.inputSchema
+		if compiled, ok := compiledUpdates[pt.name]; ok {
+			s.compiledCache[pt.name] = compiled
+			s.compiledCacheLower[lower] = compiled
+		} else {
+			delete(s.compiledCache, pt.name)
+			delete(s.compiledCacheLower, lower)
+		}
 	}
 	s.mu.Unlock()
 
@@ -476,7 +607,11 @@ func (s *SchemaFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (
 		case <-s.doneChan:
 			return resp, nil
 		default:
-			slog.WarnContext(ctx, "Write-behind buffer saturated, dropped disk persistence", slog.String("path", task.relPath))
+			dropped := s.droppedWrites.Add(1)
+			slog.WarnContext(ctx, "Write-behind buffer saturated, dropped disk persistence",
+				slog.String("path", task.relPath),
+				slog.Int64("dropped_total", dropped),
+			)
 		}
 	}
 
@@ -488,6 +623,8 @@ func (s *SchemaFilter) ClearBaselines() {
 	s.mu.Lock()
 	s.schemaCache = make(map[string]json.RawMessage)
 	s.schemaCacheLower = make(map[string]json.RawMessage)
+	s.compiledCache = make(map[string]*gojsonschema.Schema)
+	s.compiledCacheLower = make(map[string]*gojsonschema.Schema)
 	s.schemaBaselines = make(map[string]string)
 	s.mu.Unlock()
 
@@ -496,7 +633,9 @@ func (s *SchemaFilter) ClearBaselines() {
 		if err == nil {
 			for _, f := range files {
 				if !f.IsDir() && strings.HasSuffix(f.Name(), ".json") {
-					_ = os.Remove(filepath.Join(s.schemasDir, f.Name()))
+					if safePath, pErr := pathguard.ResolveSandboxedPath(s.schemasDir, f.Name()); pErr == nil {
+						_ = os.Remove(safePath)
+					}
 				}
 			}
 		}

@@ -165,7 +165,10 @@ func (s *StdioProxy) runOnce(ctx context.Context, linesCh <-chan []byte) error {
 		fallbackRole = "Developer"
 	}
 
-	userCtx := context.WithValue(ctx, filter.UserContextKey, &filter.UserContext{
+	sessionCtx, sessionCancel := context.WithCancel(ctx)
+	defer sessionCancel()
+
+	userCtx := context.WithValue(sessionCtx, filter.UserContextKey, &filter.UserContext{
 		UserID: fallbackUser,
 		Role:   fallbackRole,
 	})
@@ -179,7 +182,7 @@ func (s *StdioProxy) runOnce(ctx context.Context, linesCh <-chan []byte) error {
 	}
 
 	eventCh := make(chan session.SSEEvent, 128)
-	upSess := s.dialer.Dial(ctx, proto, eventCh, "stdio-proxy-client", nil)
+	upSess := s.dialer.Dial(sessionCtx, proto, eventCh, "stdio-proxy-client", nil)
 	if upSess == nil || !upSess.IsHealthy() {
 		if upSess != nil {
 			upSess.Close()
@@ -219,9 +222,6 @@ func (s *StdioProxy) runOnce(ctx context.Context, linesCh <-chan []byte) error {
 		s.mu.Unlock()
 		upSess.Close()
 	}()
-
-	sessionCtx, sessionCancel := context.WithCancel(ctx)
-	defer sessionCancel()
 
 	// Forward server notifications from eventCh to client stdout
 	sessionWg.Add(1)
@@ -301,11 +301,19 @@ func (s *StdioProxy) handleInboundLine(ctx context.Context, userCtx context.Cont
 			}
 		}
 
+		invocationID := filter.GenerateTraceID()
+		traceID := invocationID
+		if v, ok := userCtx.Value(filter.TraceIDContextKey).(string); ok && v != "" {
+			traceID = v
+		}
+		reqCtx := context.WithValue(userCtx, filter.InvocationIDContextKey, invocationID)
+		reqCtx = context.WithValue(reqCtx, filter.TraceIDContextKey, traceID)
+
 		// Process request filters
 		filteredReq := req
 		if s.pipeline != nil {
 			var mcpErr *mcp.Error
-			filteredReq, mcpErr = s.pipeline.ProcessRequest(userCtx, req)
+			filteredReq, mcpErr = s.pipeline.ProcessRequest(reqCtx, req)
 			if mcpErr != nil {
 				if ctx.Err() != nil {
 					return
@@ -323,6 +331,10 @@ func (s *StdioProxy) handleInboundLine(ctx context.Context, userCtx context.Cont
 				return
 			}
 			errResp := mcp.NewErrorResponse(req.ID, mcp.ErrInternalError, callErr.Error(), nil)
+			if s.pipeline != nil {
+				errBytes, _ := json.Marshal(errResp)
+				s.pipeline.EmitResponseFailure(reqCtx, invocationID, traceID, "", toolName, "stdio", filter.DecisionError, callErr.Error(), errBytes)
+			}
 			_ = s.writeJSON(errResp)
 			return
 		}
@@ -330,14 +342,14 @@ func (s *StdioProxy) handleInboundLine(ctx context.Context, userCtx context.Cont
 		// Process response filters
 		filteredResp := resp
 		if s.pipeline != nil {
-			respCtx := userCtx
+			respCtx := reqCtx
 			if toolName != "" {
 				respCtx = context.WithValue(respCtx, filter.ToolNameContextKey, toolName)
 			}
 			var mcpRespErr *mcp.Error
 			filteredResp, mcpRespErr = s.pipeline.ProcessResponse(respCtx, resp)
 			if mcpRespErr != nil {
-				errResp := mcp.NewErrorResponse(resp.ID, mcpRespErr.Code, mcpRespErr.Message, mcpRespErr.Data)
+				errResp := mcp.NewErrorResponse(req.ID, mcpRespErr.Code, mcpRespErr.Message, mcpRespErr.Data)
 				_ = s.writeJSON(errResp)
 				return
 			}

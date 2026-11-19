@@ -14,6 +14,8 @@ const (
 	UserContextKey = types.UserContextKey
 	// TraceIDContextKey stores the trace ID in the request context.
 	TraceIDContextKey = types.TraceIDContextKey
+	// InvocationIDContextKey stores the unique per-call invocation record ID across request and response phases.
+	InvocationIDContextKey ContextKey = "invocation_id"
 	// ToolNameContextKey stores the tool name in request/response context.
 	ToolNameContextKey = types.ToolNameContextKey
 	// PathTypeContextKey stores the execution path type (FAST_PATH / DEEP_PATH) in context.
@@ -83,4 +85,26 @@ var WithToolName = types.WithToolName
 // GetToolName extracts the active MCP tool name from context, returning "" if not set.
 var GetToolName = types.GetToolName
 
-
+// GetAgentName resolves the active agent profile name from context, supporting typed
+// AgentNameContextKey and legacy string keys ("agent_name", "agent").
+func GetAgentName(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if val := ctx.Value(AgentNameContextKey); val != nil {
+		if s, ok := val.(string); ok && s != "" {
+			return s
+		}
+	}
+	if val := ctx.Value("agent_name"); val != nil {
+		if s, ok := val.(string); ok && s != "" {
+			return s
+		}
+	}
+	if val := ctx.Value("agent"); val != nil {
+		if s, ok := val.(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
+}

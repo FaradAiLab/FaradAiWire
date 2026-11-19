@@ -2,6 +2,7 @@ package settings
 
 import (
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -296,5 +297,49 @@ func TestProbeTimeoutSec_RegistrationAndBounds(t *testing.T) {
 	got, err := ExtractSetting(s, "timeouts.probe_timeout_sec")
 	if err != nil || got != 15 {
 		t.Fatalf("expected ExtractSetting=15, got %v (err=%v)", got, err)
+	}
+}
+
+func TestTelemetryRetentionAndPreviewSettings(t *testing.T) {
+	t.Parallel()
+
+	s := DefaultOperationalSettings()
+	if s.Limits.MaxPreviewBytes != 524288 {
+		t.Fatalf("expected default MaxPreviewBytes=524288, got %d", s.Limits.MaxPreviewBytes)
+	}
+	if s.Maintenance.AuditRetentionDays != 30 {
+		t.Fatalf("expected default AuditRetentionDays=30, got %d", s.Maintenance.AuditRetentionDays)
+	}
+	if !s.Maintenance.RetainLocalPayloads {
+		t.Fatal("expected default RetainLocalPayloads=true")
+	}
+
+	tests := []struct {
+		name    string
+		key     string
+		val     any
+		wantErr bool
+	}{
+		{name: "preview min ok", key: "limits.max_preview_bytes", val: 65536, wantErr: false},
+		{name: "preview max ok", key: "limits.max_preview_bytes", val: 4194304, wantErr: false},
+		{name: "preview below min", key: "limits.max_preview_bytes", val: 4096, wantErr: true},
+		{name: "preview above max", key: "limits.max_preview_bytes", val: 8388608, wantErr: true},
+		{name: "retention min ok", key: "maintenance.audit_retention_days", val: 7, wantErr: false},
+		{name: "retention max ok", key: "maintenance.audit_retention_days", val: 365, wantErr: false},
+		{name: "retention below min", key: "maintenance.audit_retention_days", val: 6, wantErr: true},
+		{name: "retention above max", key: "maintenance.audit_retention_days", val: 366, wantErr: true},
+		{name: "retain local false ok", key: "maintenance.retain_local_payloads", val: false, wantErr: false},
+		{name: "guard threshold NaN rejected", key: "guard.threshold_score", val: math.NaN(), wantErr: true},
+		{name: "guard threshold +Inf rejected", key: "guard.threshold_score", val: math.Inf(1), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := Validate(tc.key, tc.val)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate(%q, %v) err=%v, wantErr=%v", tc.key, tc.val, err, tc.wantErr)
+			}
+		})
 	}
 }

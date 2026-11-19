@@ -72,3 +72,42 @@ func TestFileAuditLogger_NilSafe(t *testing.T) {
 	// Calling LogEvent on nil must not panic
 	nilLogger.LogEvent(&filter.AuditEvent{ID: "test"})
 }
+
+func TestFileAuditLogger_StripsLocalVaultSecrets(t *testing.T) {
+	tempDir := t.TempDir()
+	logPath := filepath.Join(tempDir, "redacted_only.jsonl")
+
+	auditLog, err := logger.NewFileAuditLogger(logPath)
+	if err != nil {
+		t.Fatalf("failed to create audit logger: %v", err)
+	}
+
+	secret := "sk-live-secret-token-99999"
+	auditLog.LogEvent(&filter.AuditEvent{
+		ID:               "evt-secret",
+		Timestamp:        time.Now(),
+		Decision:         filter.DecisionBlocked,
+		FilterName:       "dlp",
+		MatchedRule:      "dlp",
+		Message:          "secret detected",
+		RawPayload:       "[REDACTED - Blocked by dlp: secret detected]",
+		OriginalPayload:  secret,
+		OriginalRequest:  `{"token":"` + secret + `"}`,
+		OriginalResponse: `{"leak":"` + secret + `"}`,
+	})
+	if err := auditLog.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	content := string(raw)
+	if strings.Contains(content, secret) {
+		t.Fatalf("ZERO-DLP BLEED: flat JSONL contained plaintext secret %q", secret)
+	}
+	if !strings.Contains(content, "[REDACTED - Blocked by dlp") {
+		t.Fatalf("expected redaction notice in JSONL, got %s", content)
+	}
+}

@@ -37,6 +37,11 @@ type TelemetryReader interface {
 	QueryAuditLogs(ctx context.Context, filter duckdb.QueryFilter) (*duckdb.QueryResult, error)
 }
 
+// TelemetryDetailReader defines optional single-invocation full payload lookup for expanded console views.
+type TelemetryDetailReader interface {
+	GetAuditLogByID(ctx context.Context, id string) (*duckdb.AuditRecord, error)
+}
+
 // EventBroadcaster defines the multi-client live event stream interface for SSE endpoints.
 type EventBroadcaster interface {
 	Subscribe() (chan []*filter.AuditEvent, func())
@@ -490,8 +495,9 @@ func (a *AdminServer) Handler() http.Handler {
 	mux.HandleFunc("/admin/host/resources", a.handleHostResources)
 	mux.HandleFunc("/admin/slm/probe", a.handleSLMProbe)
 	mux.HandleFunc("/admin/audit-logs", a.handleAuditLogs)
-	mux.HandleFunc("/api/v1/logs/events", a.handleLogEventsStream)
 	mux.HandleFunc("/admin/audit-logs/events", a.handleLogEventsStream)
+	mux.HandleFunc("/admin/audit-logs/", a.handleAuditLogDetail)
+	mux.HandleFunc("/api/v1/logs/events", a.handleLogEventsStream)
 	mux.HandleFunc("/admin/mcp/tools", a.handleMCPTools)
 	mux.HandleFunc("/admin/agents", a.handleAgents)
 	mux.HandleFunc("/admin/agents/", a.handleAgents)

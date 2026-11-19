@@ -28,12 +28,13 @@ func (k CorrelationKey) String() string {
 
 // PendingRequest stores contextual metadata for an in-flight request awaiting its response.
 type PendingRequest struct {
-	UserCtx   *filter.UserContext
-	Context   context.Context // Preserved inbound HTTP request context (r.Context())
-	ToolName  string
-	AgentName string
-	TraceID   string
-	Timestamp time.Time
+	UserCtx      *filter.UserContext
+	Context      context.Context // Preserved inbound HTTP request context (r.Context())
+	ToolName     string
+	AgentName    string
+	TraceID      string
+	InvocationID string
+	Timestamp    time.Time
 }
 
 // CorrelationStore abstracts thread-safe, O(1) request-to-response correlation.

@@ -233,39 +233,7 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := validateToolGovernance(payload.ToolGovernance); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INVALID_GOVERNANCE_MODE",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		if err := validateRetainedGovernance(payload.RetainedGovernance); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INVALID_RETAINED_GOVERNANCE_MODE",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		if err := validateRateLimit(payload.RateLimit); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INVALID_RATE_LIMIT",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		if err := validateLoopProtection(payload.LoopProtection); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INVALID_LOOP_PROTECTION",
-				"message": err.Error(),
-			})
+		if !validateAgentPayload(w, payload) {
 			return
 		}
 
@@ -287,13 +255,16 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 			RetainedGovernance: payload.RetainedGovernance,
 			RateLimit:          payload.RateLimit,
 			LoopProtection:     payload.LoopProtection,
+			SchemaValidation:   payload.SchemaValidation,
+			Guard:              payload.Guard,
 		}
 
 		if err := repo.SaveAgentConfig(agentName, cfg); err != nil {
+			slog.ErrorContext(r.Context(), "Failed to persist new agent configuration", slog.String("agent", agentName), slog.String("error", err.Error()))
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{
 				"error":   "SAVE_FAILED",
-				"message": err.Error(),
+				"message": "Failed to save agent configuration",
 			})
 			return
 		}
@@ -368,39 +339,7 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := validateToolGovernance(payload.ToolGovernance); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INVALID_GOVERNANCE_MODE",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		if err := validateRetainedGovernance(payload.RetainedGovernance); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INVALID_RETAINED_GOVERNANCE_MODE",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		if err := validateRateLimit(payload.RateLimit); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INVALID_RATE_LIMIT",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		if err := validateLoopProtection(payload.LoopProtection); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INVALID_LOOP_PROTECTION",
-				"message": err.Error(),
-			})
+		if !validateAgentPayload(w, payload) {
 			return
 		}
 
@@ -468,22 +407,6 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-
-			// Handle restoration of retained protocols
-			for _, restorePID := range payload.RestoreRetainedProtocols {
-				pidClean := strings.TrimSpace(restorePID)
-				for retainedKey, savedRules := range updatedCfg.RetainedGovernance {
-					if strings.EqualFold(retainedKey, pidClean) {
-						if updatedCfg.ToolGovernance == nil {
-							updatedCfg.ToolGovernance = make(map[string]agent.ToolGovernanceMode, len(savedRules))
-						}
-						for toolName, mode := range savedRules {
-							updatedCfg.ToolGovernance[toolName] = mode
-						}
-						delete(updatedCfg.RetainedGovernance, retainedKey)
-					}
-				}
-			}
 		}
 
 		if payload.EnabledTools != nil {
@@ -512,19 +435,47 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Handle restoration of retained protocols AFTER applying payload.ToolGovernance
+		// so restored rules are merged instead of wiped out by payload replacement.
+		if protocolsUpdated && len(payload.RestoreRetainedProtocols) > 0 {
+			for _, restorePID := range payload.RestoreRetainedProtocols {
+				pidClean := strings.TrimSpace(restorePID)
+				for retainedKey, savedRules := range updatedCfg.RetainedGovernance {
+					if strings.EqualFold(retainedKey, pidClean) {
+						if updatedCfg.ToolGovernance == nil {
+							updatedCfg.ToolGovernance = make(map[string]agent.ToolGovernanceMode, len(savedRules))
+						}
+						for toolName, mode := range savedRules {
+							if _, explicitlySet := updatedCfg.ToolGovernance[toolName]; !explicitlySet {
+								updatedCfg.ToolGovernance[toolName] = mode
+							}
+						}
+						delete(updatedCfg.RetainedGovernance, retainedKey)
+					}
+				}
+			}
+		}
+
 		if payload.RateLimit != nil {
 			updatedCfg.RateLimit = payload.RateLimit
 		}
 		if payload.LoopProtection != nil {
 			updatedCfg.LoopProtection = payload.LoopProtection
 		}
+		if payload.SchemaValidation != nil {
+			updatedCfg.SchemaValidation = payload.SchemaValidation
+		}
+		if payload.Guard != nil {
+			updatedCfg.Guard = payload.Guard
+		}
 
 		// SaveAgentConfig automatically archives prior state to archive/<timestamp>/
 		if err := repo.SaveAgentConfig(agentName, updatedCfg); err != nil {
+			slog.ErrorContext(r.Context(), "Failed to update agent configuration", slog.String("agent", agentName), slog.String("error", err.Error()))
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{
 				"error":   "UPDATE_FAILED",
-				"message": err.Error(),
+				"message": "Failed to update agent configuration",
 			})
 			return
 		}
@@ -606,10 +557,11 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := repo.DeleteAgent(agentName); err != nil {
+			slog.ErrorContext(r.Context(), "Failed to delete agent configuration", slog.String("agent", agentName), slog.String("error", err.Error()))
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{
 				"error":   "DELETE_FAILED",
-				"message": err.Error(),
+				"message": "Failed to delete agent configuration",
 			})
 			return
 		}
@@ -637,4 +589,29 @@ func (a *AdminServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 			"message": "Method not allowed",
 		})
 	}
+}
+
+func validateAgentPayload(w http.ResponseWriter, payload AgentPayload) bool {
+	checks := []struct {
+		code string
+		err  error
+	}{
+		{"INVALID_GOVERNANCE_MODE", validateToolGovernance(payload.ToolGovernance)},
+		{"INVALID_RETAINED_GOVERNANCE_MODE", validateRetainedGovernance(payload.RetainedGovernance)},
+		{"INVALID_RATE_LIMIT", validateRateLimit(payload.RateLimit)},
+		{"INVALID_LOOP_PROTECTION", validateLoopProtection(payload.LoopProtection)},
+		{"INVALID_SCHEMA_VALIDATION", validateSchemaValidation(payload.SchemaValidation)},
+		{"INVALID_GUARD_OVERRIDE", validateGuardOverride(payload.Guard)},
+	}
+	for _, c := range checks {
+		if c.err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":   c.code,
+				"message": c.err.Error(),
+			})
+			return false
+		}
+	}
+	return true
 }

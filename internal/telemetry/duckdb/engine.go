@@ -15,6 +15,7 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	_ "github.com/marcboeker/go-duckdb"
 )
 
@@ -34,6 +35,7 @@ type Engine struct {
 	db            *sql.DB
 	ownedDB       bool
 	cfg           Config
+	settingsCache atomic.Pointer[settings.Cache]
 	eventChan     chan eventOrBarrier
 	done          chan struct{}
 	wg            sync.WaitGroup
@@ -45,13 +47,13 @@ type Engine struct {
 // New creates and initializes a new embedded DuckDB telemetry engine.
 func New(cfg Config) (*Engine, error) {
 	if cfg.RetentionDays <= 0 {
-		cfg.RetentionDays = 14
+		cfg.RetentionDays = 30
 	}
 	if cfg.MaxSizeBytes <= 0 {
 		cfg.MaxSizeBytes = 1024 * 1024 * 1024 // 1 GB
 	}
 	if cfg.MaxPayloadBytes <= 0 {
-		cfg.MaxPayloadBytes = 64 * 1024 // 64 KB
+		cfg.MaxPayloadBytes = 512 * 1024 // 512 KB
 	}
 	if cfg.BufferSize <= 0 {
 		cfg.BufferSize = 4096
@@ -92,7 +94,7 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("failed to initialize duckdb schema: %w", err)
 	}
 
-	// Start retention maintenance worker
+	// Start retention maintenance worker (bind live SettingsCache BEFORE initial sweep!)
 	engine.retention = NewRetentionCleaner(
 		db,
 		cfg.DBPath,
@@ -100,6 +102,9 @@ func New(cfg Config) (*Engine, error) {
 		cfg.MaxSizeBytes,
 		24*time.Hour,
 	)
+	if cfg.SettingsCache != nil {
+		engine.SetSettingsCache(cfg.SettingsCache)
+	}
 	engine.retention.Start()
 
 	// Start background write-behind worker
@@ -115,13 +120,13 @@ func NewWithDB(db *sql.DB, cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("shared *sql.DB cannot be nil")
 	}
 	if cfg.RetentionDays <= 0 {
-		cfg.RetentionDays = 14
+		cfg.RetentionDays = 30
 	}
 	if cfg.MaxSizeBytes <= 0 {
 		cfg.MaxSizeBytes = 1024 * 1024 * 1024 // 1 GB
 	}
 	if cfg.MaxPayloadBytes <= 0 {
-		cfg.MaxPayloadBytes = 64 * 1024 // 64 KB
+		cfg.MaxPayloadBytes = 512 * 1024 // 512 KB
 	}
 	if cfg.BufferSize <= 0 {
 		cfg.BufferSize = 4096
@@ -143,7 +148,7 @@ func NewWithDB(db *sql.DB, cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("failed to initialize telemetry duckdb schema: %w", err)
 	}
 
-	// Start retention maintenance worker
+	// Start retention maintenance worker (bind live SettingsCache BEFORE initial sweep!)
 	engine.retention = NewRetentionCleaner(
 		db,
 		cfg.DBPath,
@@ -151,6 +156,9 @@ func NewWithDB(db *sql.DB, cfg Config) (*Engine, error) {
 		cfg.MaxSizeBytes,
 		24*time.Hour,
 	)
+	if cfg.SettingsCache != nil {
+		engine.SetSettingsCache(cfg.SettingsCache)
+	}
 	engine.retention.Start()
 
 	// Start background write-behind worker
@@ -166,17 +174,25 @@ func (e *Engine) initSchema() error {
 	CREATE TABLE IF NOT EXISTS tool_audit_logs (
 		id VARCHAR PRIMARY KEY,
 		timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		trace_id VARCHAR,
 		agent_name VARCHAR NOT NULL,
 		release_version VARCHAR NOT NULL,
 		tool_name VARCHAR NOT NULL,
 		caller_role VARCHAR DEFAULT 'default',
 		decision VARCHAR NOT NULL,
+		request_decision VARCHAR,
+		response_decision VARCHAR,
 		matched_rule VARCHAR,
+		error_message TEXT,
 		latency_ms DOUBLE NOT NULL,
 		input_size_bytes INTEGER,
 		output_size_bytes INTEGER,
 		raw_payload_preview TEXT,
 		original_payload_preview TEXT,
+		original_request TEXT,
+		request TEXT,
+		original_response TEXT,
+		response TEXT,
 		integrity_hash VARCHAR NOT NULL
 	);
 
@@ -190,8 +206,47 @@ func (e *Engine) initSchema() error {
 		return err
 	}
 
-	// Idempotently ensure original_payload_preview column exists in existing DuckDB files
-	_, _ = e.db.Exec("ALTER TABLE tool_audit_logs ADD COLUMN original_payload_preview TEXT;")
+	// Idempotently ensure extended columns exist in existing DuckDB files
+	alterColumns := []string{
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS original_payload_preview TEXT;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS trace_id VARCHAR;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS request_decision VARCHAR;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS response_decision VARCHAR;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS error_message TEXT;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS original_request TEXT;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS request TEXT;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS original_response TEXT;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS response TEXT;",
+	}
+	for _, stmt := range alterColumns {
+		if _, aErr := e.db.Exec(stmt); aErr != nil {
+			slog.Debug("Optional audit schema migration statement note", slog.String("stmt", stmt), slog.String("info", aErr.Error()))
+		}
+	}
+	_, _ = e.db.Exec("CREATE INDEX IF NOT EXISTS idx_tool_audit_logs_trace_id ON tool_audit_logs(trace_id);")
+
+	// Append-only egress completion table avoids DuckDB ART primary-key UPDATE limitations
+	respSchema := `
+	CREATE TABLE IF NOT EXISTS tool_audit_responses (
+		invocation_id VARCHAR NOT NULL,
+		trace_id VARCHAR,
+		timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		response_decision VARCHAR,
+		matched_rule VARCHAR,
+		error_message TEXT,
+		latency_ms DOUBLE NOT NULL DEFAULT 0,
+		output_size_bytes INTEGER,
+		raw_payload_preview TEXT,
+		original_payload_preview TEXT,
+		original_response TEXT,
+		response TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_tool_audit_responses_inv ON tool_audit_responses(invocation_id);
+	CREATE INDEX IF NOT EXISTS idx_tool_audit_responses_ts ON tool_audit_responses(timestamp);
+	`
+	if _, err := e.db.Exec(respSchema); err != nil {
+		return fmt.Errorf("failed to initialize tool_audit_responses table: %w", err)
+	}
 	return nil
 }
 
@@ -201,6 +256,31 @@ func (e *Engine) DB() *sql.DB {
 		return nil
 	}
 	return e.db
+}
+
+// SetSettingsCache attaches an atomic operational settings cache to the telemetry engine
+// and its retention cleaner so preview ceilings and retention days update without restarts.
+func (e *Engine) SetSettingsCache(cache *settings.Cache) {
+	if e == nil {
+		return
+	}
+	e.settingsCache.Store(cache)
+	if e.retention != nil {
+		e.retention.SetSettingsCache(cache)
+	}
+}
+
+func (e *Engine) effectiveMaxPayloadBytes() int {
+	limit := e.cfg.MaxPayloadBytes
+	if cache := e.settingsCache.Load(); cache != nil {
+		if s := cache.Get(); s != nil && s.Limits.MaxPreviewBytes >= 65536 {
+			limit = s.Limits.MaxPreviewBytes
+		}
+	}
+	if limit <= 0 {
+		limit = 512 * 1024
+	}
+	return limit
 }
 
 // LogEvent implements filter.AuditLogger. It places the event onto a bounded, buffered channel.
@@ -214,8 +294,12 @@ func (e *Engine) LogEvent(event *filter.AuditEvent) {
 	case e.eventChan <- eventOrBarrier{event: event}:
 	default:
 		// Queue saturated: drop event to protect proxy latency SLA
-		atomic.AddUint64(&e.droppedEvents, 1)
-		slog.Warn("DuckDB telemetry channel buffer saturated, dropped event to preserve proxy latency")
+		dropped := atomic.AddUint64(&e.droppedEvents, 1)
+		if dropped == 1 || dropped == 100 || dropped%1000 == 0 {
+			slog.Warn("DuckDB telemetry channel buffer saturated, dropped event to preserve proxy latency",
+				slog.Uint64("dropped_total", dropped),
+			)
+		}
 	}
 }
 
@@ -299,7 +383,120 @@ func generateUUID() string {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// flushBatch inserts a batch of audit events into DuckDB using a transaction.
+// boundAuditField enforces maxLen truncation on stored telemetry payloads while avoiding double truncation.
+func boundAuditField(val string, maxLen int) string {
+	if val == "" || maxLen <= 0 {
+		return val
+	}
+	if len(val) > maxLen && !strings.Contains(val, "[TRUNCATED - Total Size:") {
+		truncated, _ := TruncateString(val, maxLen)
+		return truncated
+	}
+	return val
+}
+
+func mergeMatchedRules(existingRule, newRule string) string {
+	if existingRule == "" {
+		return newRule
+	}
+	if newRule == "" || newRule == existingRule {
+		return existingRule
+	}
+	return existingRule + "," + newRule
+}
+
+type normalizedEventFields struct {
+	id           string
+	ts           time.Time
+	traceID      string
+	agentName    string
+	releaseVer   string
+	toolName     string
+	callerRole   string
+	decision     string
+	reqDecision  string
+	respDecision string
+	matchedRule  string
+	errorMsg     string
+	preview      string
+	origPreview  string
+	origReq      string
+	req          string
+	origResp     string
+	resp         string
+}
+
+func (e *Engine) normalizeEvent(ev *filter.AuditEvent, maxBytes int) normalizedEventFields {
+	id := ev.ID
+	if id == "" {
+		id = generateUUID()
+	}
+	ts := ev.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	agentName := ev.AgentName
+	if agentName == "" {
+		agentName = "default"
+	}
+	releaseVer := ev.ReleaseVersion
+	if releaseVer == "" {
+		releaseVer = config.GetVersion()
+	}
+	toolName := ev.ToolName
+	if toolName == "" {
+		toolName = ev.Method
+	}
+	callerRole := ev.CallerRole
+	if callerRole == "" && ev.User != nil {
+		callerRole = ev.User.Role
+	}
+	if callerRole == "" {
+		callerRole = "default"
+	}
+	decision := ev.Decision
+	if decision == "" {
+		decision = filter.DecisionAllowed
+	}
+	matchedRule := ev.MatchedRule
+	if matchedRule == "" {
+		matchedRule = ev.FilterName
+	}
+	errorMsg := ev.ErrorMessage
+	if errorMsg == "" && (strings.EqualFold(decision, filter.DecisionBlocked) || strings.EqualFold(decision, filter.DecisionCritical)) {
+		errorMsg = ev.Message
+	}
+
+	return normalizedEventFields{
+		id:           id,
+		ts:           ts,
+		traceID:      ev.TraceID,
+		agentName:    agentName,
+		releaseVer:   releaseVer,
+		toolName:     toolName,
+		callerRole:   callerRole,
+		decision:     decision,
+		reqDecision:  ev.RequestDecision,
+		respDecision: ev.ResponseDecision,
+		matchedRule:  matchedRule,
+		errorMsg:     errorMsg,
+		preview:      boundAuditField(ev.RawPayload, maxBytes),
+		origPreview:  boundAuditField(ev.OriginalPayload, maxBytes),
+		origReq:      boundAuditField(ev.OriginalRequest, maxBytes),
+		req:          boundAuditField(ev.Request, maxBytes),
+		origResp:     boundAuditField(ev.OriginalResponse, maxBytes),
+		resp:         boundAuditField(ev.Response, maxBytes),
+	}
+}
+
+func nullableText(v string) interface{} {
+	if v == "" {
+		return nil
+	}
+	return v
+}
+
+// flushBatch inserts or upserts a batch of audit events into DuckDB using a transaction.
 func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 	if len(batch) == 0 {
 		return nil
@@ -314,100 +511,198 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx, `
+	insertStmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO tool_audit_logs (
-			id, timestamp, agent_name, release_version, tool_name, caller_role,
-			decision, matched_rule, latency_ms, input_size_bytes, output_size_bytes,
-			raw_payload_preview, original_payload_preview, integrity_hash
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			id, timestamp, trace_id, agent_name, release_version, tool_name, caller_role,
+			decision, request_decision, response_decision, matched_rule, error_message,
+			latency_ms, input_size_bytes, output_size_bytes,
+			raw_payload_preview, original_payload_preview,
+			original_request, request, original_response, response,
+			integrity_hash
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert statement: %w", err)
 	}
-	defer stmt.Close()
+	defer insertStmt.Close()
+
+	insertRespStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO tool_audit_responses (
+			invocation_id, trace_id, timestamp, response_decision, matched_rule,
+			error_message, latency_ms, output_size_bytes,
+			raw_payload_preview, original_payload_preview, original_response, response
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare response insert statement: %w", err)
+	}
+	defer insertRespStmt.Close()
+
+	maxBytes := e.effectiveMaxPayloadBytes()
+	seenIDs := make(map[string]struct{}, len(batch))
+	seenTraces := make(map[string]string, len(batch))
 
 	for _, ev := range batch {
-		id := ev.ID
-		if id == "" {
-			id = generateUUID()
+		if ev == nil {
+			continue
 		}
+		nf := e.normalizeEvent(ev, maxBytes)
 
-		ts := ev.Timestamp
-		if ts.IsZero() {
-			ts = time.Now()
-		}
-
-		agentName := ev.AgentName
-		if agentName == "" {
-			agentName = "default"
-		}
-
-		releaseVer := ev.ReleaseVersion
-		if releaseVer == "" {
-			releaseVer = config.GetVersion()
-		}
-
-		toolName := ev.ToolName
-		if toolName == "" {
-			toolName = ev.Method
-		}
-
-		callerRole := ev.CallerRole
-		if callerRole == "" && ev.User != nil {
-			callerRole = ev.User.Role
-		}
-		if callerRole == "" {
-			callerRole = "default"
-		}
-
-		decision := ev.Decision
-		if decision == "" {
-			decision = "ALLOW"
-		}
-
-		matchedRule := ev.MatchedRule
-		if matchedRule == "" {
-			matchedRule = ev.FilterName
-		}
-
-		preview := ev.RawPayload
-		if len(preview) > e.cfg.MaxPayloadBytes && !strings.Contains(preview, "[TRUNCATED - Total Size:") {
-			preview, _ = TruncateString(preview, e.cfg.MaxPayloadBytes)
-		}
-
-		origPreview := ev.OriginalPayload
-		if len(origPreview) > e.cfg.MaxPayloadBytes && !strings.Contains(origPreview, "[TRUNCATED - Total Size:") {
-			origPreview, _ = TruncateString(origPreview, e.cfg.MaxPayloadBytes)
+		if ev.Phase == filter.AuditPhaseResponse && (ev.ID != "" || nf.traceID != "") {
+			var invID string
+			if ev.ID != "" {
+				if _, ok := seenIDs[ev.ID]; ok {
+					invID = ev.ID
+				}
+			}
+			if invID == "" && nf.traceID != "" {
+				if mappedID, ok := seenTraces[nf.traceID]; ok {
+					invID = mappedID
+				}
+			}
+			if invID == "" {
+				invID = e.findExistingInvocationIDInTx(ctx, tx, ev.ID, nf.traceID)
+			}
+			if invID != "" {
+				respDec := nf.respDecision
+				if respDec == "" {
+					respDec = nf.decision
+				}
+				if _, rErr := insertRespStmt.ExecContext(ctx,
+					invID,
+					nullableText(nf.traceID),
+					nf.ts,
+					nullableText(respDec),
+					nullableText(nf.matchedRule),
+					nullableText(nf.errorMsg),
+					ev.LatencyMs,
+					ev.OutputBytes,
+					nullableText(nf.preview),
+					nullableText(nf.origPreview),
+					nullableText(nf.origResp),
+					nullableText(nf.resp),
+				); rErr != nil {
+					slog.WarnContext(ctx, "Failed to insert response completion record", slog.String("error", rErr.Error()))
+				} else {
+					continue
+				}
+			}
 		}
 
 		hash := ev.IntegrityHash
 		if hash == "" {
-			hash = ComputeIntegrityHash(id, ts, agentName, toolName, callerRole, decision, ev.LatencyMs, preview)
+			hash = ComputeInvocationIntegrityHash(
+				nf.id, nf.ts, nf.agentName, nf.toolName, nf.callerRole,
+				nf.decision, ev.LatencyMs,
+				nf.preview, nf.origReq, nf.req, nf.origResp, nf.resp,
+			)
 		}
 
-		_, err := stmt.ExecContext(ctx,
-			id,
-			ts,
-			agentName,
-			releaseVer,
-			toolName,
-			callerRole,
-			decision,
-			matchedRule,
+		_, err := insertStmt.ExecContext(ctx,
+			nf.id,
+			nf.ts,
+			nullableText(nf.traceID),
+			nf.agentName,
+			nf.releaseVer,
+			nf.toolName,
+			nf.callerRole,
+			nf.decision,
+			nullableText(nf.reqDecision),
+			nullableText(nf.respDecision),
+			nullableText(nf.matchedRule),
+			nullableText(nf.errorMsg),
 			ev.LatencyMs,
 			ev.InputBytes,
 			ev.OutputBytes,
-			preview,
-			origPreview,
+			nf.preview,
+			nullableText(nf.origPreview),
+			nullableText(nf.origReq),
+			nullableText(nf.req),
+			nullableText(nf.origResp),
+			nullableText(nf.resp),
 			hash,
 		)
 		if err != nil {
-			slog.Warn("Failed to execute row insert in telemetry batch", slog.String("error", err.Error()))
+			slog.WarnContext(ctx, "Failed to execute row insert in telemetry batch", slog.String("error", err.Error()))
+		} else {
+			seenIDs[nf.id] = struct{}{}
+			if nf.traceID != "" {
+				seenTraces[nf.traceID] = nf.id
+			}
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit telemetry batch: %w", err)
+	}
+	return nil
 }
+
+func (e *Engine) findExistingInvocationIDInTx(ctx context.Context, tx *sql.Tx, id, traceID string) string {
+	var rowID string
+	if id != "" {
+		if err := tx.QueryRowContext(ctx, "SELECT id FROM tool_audit_logs WHERE id = ? LIMIT 1", id).Scan(&rowID); err == nil && rowID != "" {
+			return rowID
+		}
+	}
+	if traceID != "" {
+		if err := tx.QueryRowContext(ctx, "SELECT id FROM tool_audit_logs WHERE trace_id = ? ORDER BY timestamp DESC LIMIT 1", traceID).Scan(&rowID); err == nil && rowID != "" {
+			return rowID
+		}
+	}
+	return ""
+}
+
+const consolidatedAuditCTE = `
+WITH latest_resp AS (
+	SELECT DISTINCT ON (invocation_id)
+		invocation_id, response_decision, matched_rule, error_message,
+		latency_ms, output_size_bytes, raw_payload_preview, original_payload_preview,
+		original_response, response
+	FROM tool_audit_responses
+	ORDER BY invocation_id, timestamp DESC
+),
+consolidated AS (
+	SELECT
+		l.id,
+		l.timestamp,
+		l.trace_id,
+		l.agent_name,
+		l.release_version,
+		l.tool_name,
+		l.caller_role,
+		CASE
+			WHEN r.invocation_id IS NULL THEN l.decision
+			WHEN 'CRITICAL' IN (UPPER(COALESCE(NULLIF(l.request_decision, ''), l.decision)), UPPER(COALESCE(r.response_decision, ''))) THEN 'CRITICAL'
+			WHEN 'BLOCKED' IN (UPPER(COALESCE(NULLIF(l.request_decision, ''), l.decision)), UPPER(COALESCE(r.response_decision, ''))) THEN 'BLOCKED'
+			WHEN 'ERROR' IN (UPPER(COALESCE(NULLIF(l.request_decision, ''), l.decision)), UPPER(COALESCE(r.response_decision, ''))) THEN 'ERROR'
+			WHEN 'MASKED' IN (UPPER(COALESCE(NULLIF(l.request_decision, ''), l.decision)), UPPER(COALESCE(r.response_decision, ''))) THEN 'MASKED'
+			WHEN 'AUDIT' IN (UPPER(COALESCE(NULLIF(l.request_decision, ''), l.decision)), UPPER(COALESCE(r.response_decision, ''))) THEN 'AUDIT'
+			WHEN 'ALLOWED' IN (UPPER(COALESCE(NULLIF(l.request_decision, ''), l.decision)), UPPER(COALESCE(r.response_decision, ''))) THEN 'ALLOWED'
+			ELSE COALESCE(NULLIF(r.response_decision, ''), l.decision)
+		END AS decision,
+		l.request_decision,
+		COALESCE(NULLIF(r.response_decision, ''), l.response_decision) AS response_decision,
+		CASE
+			WHEN COALESCE(l.matched_rule, '') = '' THEN COALESCE(r.matched_rule, '')
+			WHEN COALESCE(r.matched_rule, '') = '' OR r.matched_rule = l.matched_rule THEN l.matched_rule
+			ELSE l.matched_rule || ',' || r.matched_rule
+		END AS matched_rule,
+		COALESCE(NULLIF(r.error_message, ''), l.error_message) AS error_message,
+		l.latency_ms + COALESCE(r.latency_ms, 0) AS latency_ms,
+		l.input_size_bytes,
+		CASE WHEN r.output_size_bytes IS NOT NULL AND r.output_size_bytes > 0 THEN r.output_size_bytes ELSE l.output_size_bytes END AS output_size_bytes,
+		COALESCE(NULLIF(r.raw_payload_preview, ''), l.raw_payload_preview) AS raw_payload_preview,
+		COALESCE(l.original_payload_preview, r.original_payload_preview) AS original_payload_preview,
+		l.original_request,
+		l.request,
+		COALESCE(NULLIF(r.original_response, ''), l.original_response) AS original_response,
+		COALESCE(NULLIF(r.response, ''), l.response) AS response,
+		l.integrity_hash
+	FROM tool_audit_logs l
+	LEFT JOIN latest_resp r ON r.invocation_id = l.id
+)
+`
 
 // QueryAuditLogs retrieves filtered, paginated audit records from DuckDB.
 func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResult, error) {
@@ -430,6 +725,10 @@ func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResul
 		whereClauses = append(whereClauses, "tool_name = ?")
 		args = append(args, strings.TrimSpace(f.ToolName))
 	}
+	if strings.TrimSpace(f.TraceID) != "" {
+		whereClauses = append(whereClauses, "trace_id = ?")
+		args = append(args, strings.TrimSpace(f.TraceID))
+	}
 	if f.Since != nil {
 		whereClauses = append(whereClauses, "timestamp >= ?")
 		args = append(args, *f.Since)
@@ -445,7 +744,7 @@ func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResul
 	}
 
 	// 1. Query total count
-	countQuery := "SELECT COUNT(*) FROM tool_audit_logs " + whereSQL
+	countQuery := consolidatedAuditCTE + "SELECT COUNT(*) FROM consolidated " + whereSQL
 	var total int64
 	if err := e.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("failed to count audit logs: %w", err)
@@ -464,15 +763,31 @@ func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResul
 		offset = 0
 	}
 
+	selectCols := `
+		id, timestamp, trace_id, agent_name, release_version, tool_name, caller_role,
+		decision, request_decision, response_decision, matched_rule, error_message,
+		latency_ms, input_size_bytes, output_size_bytes,
+		raw_payload_preview, original_payload_preview,
+		original_request, request, original_response, response,
+		integrity_hash`
+	if f.SummaryOnly {
+		selectCols = `
+			id, timestamp, trace_id, agent_name, release_version, tool_name, caller_role,
+			decision, request_decision, response_decision, matched_rule, error_message,
+			latency_ms, input_size_bytes, output_size_bytes,
+			LEFT(COALESCE(raw_payload_preview, ''), 4096), '',
+			'', '', '', '',
+			integrity_hash`
+	}
+
 	querySQL := fmt.Sprintf(`
-		SELECT id, timestamp, agent_name, release_version, tool_name, caller_role,
-		       decision, matched_rule, latency_ms, input_size_bytes, output_size_bytes,
-		       raw_payload_preview, original_payload_preview, integrity_hash
-		FROM tool_audit_logs
+		%s
+		SELECT %s
+		FROM consolidated
 		%s
 		ORDER BY timestamp DESC
 		LIMIT ? OFFSET ?
-	`, whereSQL)
+	`, consolidatedAuditCTE, selectCols, whereSQL)
 
 	queryArgs := append(args, limit, offset)
 	rows, err := e.db.QueryContext(ctx, querySQL, queryArgs...)
@@ -483,59 +798,21 @@ func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResul
 
 	var records []AuditRecord
 	for rows.Next() {
-		var r AuditRecord
-		var matchedRule sql.NullString
-		var inputBytes, outputBytes sql.NullInt32
-		var rawPreview, origPreview sql.NullString
-
-		if err := rows.Scan(
-			&r.ID,
-			&r.Timestamp,
-			&r.AgentName,
-			&r.ReleaseVersion,
-			&r.ToolName,
-			&r.CallerRole,
-			&r.Decision,
-			&matchedRule,
-			&r.LatencyMs,
-			&inputBytes,
-			&outputBytes,
-			&rawPreview,
-			&origPreview,
-			&r.IntegrityHash,
-		); err != nil {
-			return nil, fmt.Errorf("failed to scan audit log row: %w", err)
+		r, scanErr := scanAuditRecord(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("failed to scan audit log row: %w", scanErr)
 		}
-
-		if matchedRule.Valid {
-			r.MatchedRule = matchedRule.String
+		if !f.SummaryOnly && r.ResponseDecision != "" {
+			r.IntegrityHash = ComputeInvocationIntegrityHash(
+				r.ID, r.Timestamp, r.AgentName, r.ToolName, r.CallerRole,
+				r.Decision, r.LatencyMs, r.RawPayloadPreview,
+				r.OriginalRequest, r.Request, r.OriginalResponse, r.Response,
+			)
 		}
-		if inputBytes.Valid {
-			r.InputSizeBytes = int(inputBytes.Int32)
-		}
-		if outputBytes.Valid {
-			r.OutputSizeBytes = int(outputBytes.Int32)
-		}
-		if rawPreview.Valid {
-			r.RawPayloadPreview = rawPreview.String
-		}
-		if origPreview.Valid {
-			r.OriginalPayloadPreview = origPreview.String
-		}
-
-		// Populate UI compatibility attributes
-		r.Method = r.ToolName
-		r.Filter = r.MatchedRule
-		if r.Filter == "" {
-			r.Filter = "security"
-		}
-		r.Reason = r.MatchedRule
-		r.UserContext = map[string]interface{}{
-			"user_role": r.CallerRole,
-			"user_id":   r.AgentName,
-		}
-
 		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed iterating audit log rows: %w", err)
 	}
 
 	return &QueryResult{
@@ -544,6 +821,140 @@ func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResul
 		Limit:  limit,
 		Offset: offset,
 	}, nil
+}
+
+// GetAuditLogByID retrieves a single complete Tool Invocation Record (including all
+// 4 payload lifecycle snapshots) by record ID or trace ID.
+func (e *Engine) GetAuditLogByID(ctx context.Context, id string) (*AuditRecord, error) {
+	if e == nil || e.db == nil {
+		return nil, fmt.Errorf("telemetry engine not initialized")
+	}
+	cleanID := strings.TrimSpace(id)
+	if cleanID == "" {
+		return nil, fmt.Errorf("audit log id cannot be empty")
+	}
+
+	querySQL := consolidatedAuditCTE + `
+		SELECT id, timestamp, trace_id, agent_name, release_version, tool_name, caller_role,
+		       decision, request_decision, response_decision, matched_rule, error_message,
+		       latency_ms, input_size_bytes, output_size_bytes,
+		       raw_payload_preview, original_payload_preview,
+		       original_request, request, original_response, response,
+		       integrity_hash
+		FROM consolidated
+		WHERE id = ? OR trace_id = ?
+		ORDER BY timestamp DESC
+		LIMIT 1
+	`
+	row := e.db.QueryRowContext(ctx, querySQL, cleanID, cleanID)
+	rec, err := scanAuditRecord(row)
+	if err != nil {
+		return nil, err
+	}
+	if rec.ResponseDecision != "" {
+		rec.IntegrityHash = ComputeInvocationIntegrityHash(
+			rec.ID, rec.Timestamp, rec.AgentName, rec.ToolName, rec.CallerRole,
+			rec.Decision, rec.LatencyMs, rec.RawPayloadPreview,
+			rec.OriginalRequest, rec.Request, rec.OriginalResponse, rec.Response,
+		)
+	}
+	return &rec, nil
+}
+
+type auditRowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanAuditRecord(row auditRowScanner) (AuditRecord, error) {
+	var r AuditRecord
+	var (
+		traceID, reqDec, respDec, matchedRule, errMsg sql.NullString
+		inputBytes, outputBytes                       sql.NullInt32
+		rawPreview, origPreview                       sql.NullString
+		origReq, sentReq, origResp, finalResp         sql.NullString
+	)
+
+	if err := row.Scan(
+		&r.ID,
+		&r.Timestamp,
+		&traceID,
+		&r.AgentName,
+		&r.ReleaseVersion,
+		&r.ToolName,
+		&r.CallerRole,
+		&r.Decision,
+		&reqDec,
+		&respDec,
+		&matchedRule,
+		&errMsg,
+		&r.LatencyMs,
+		&inputBytes,
+		&outputBytes,
+		&rawPreview,
+		&origPreview,
+		&origReq,
+		&sentReq,
+		&origResp,
+		&finalResp,
+		&r.IntegrityHash,
+	); err != nil {
+		return AuditRecord{}, err
+	}
+
+	if traceID.Valid {
+		r.TraceID = traceID.String
+	}
+	if reqDec.Valid {
+		r.RequestDecision = reqDec.String
+	}
+	if respDec.Valid {
+		r.ResponseDecision = respDec.String
+	}
+	if matchedRule.Valid {
+		r.MatchedRule = matchedRule.String
+	}
+	if errMsg.Valid {
+		r.ErrorMessage = errMsg.String
+	}
+	if inputBytes.Valid {
+		r.InputSizeBytes = int(inputBytes.Int32)
+	}
+	if outputBytes.Valid {
+		r.OutputSizeBytes = int(outputBytes.Int32)
+	}
+	if rawPreview.Valid {
+		r.RawPayloadPreview = rawPreview.String
+	}
+	if origPreview.Valid {
+		r.OriginalPayloadPreview = origPreview.String
+	}
+	if origReq.Valid {
+		r.OriginalRequest = origReq.String
+	}
+	if sentReq.Valid {
+		r.Request = sentReq.String
+	}
+	if origResp.Valid {
+		r.OriginalResponse = origResp.String
+	}
+	if finalResp.Valid {
+		r.Response = finalResp.String
+	}
+
+	r.Method = r.ToolName
+	r.Filter = r.MatchedRule
+	if r.Filter == "" {
+		r.Filter = "security"
+	}
+	r.Reason = r.MatchedRule
+	if r.ErrorMessage != "" && (strings.EqualFold(r.Decision, "BLOCKED") || strings.EqualFold(r.Decision, "CRITICAL")) {
+		r.Reason = r.ErrorMessage
+	}
+	r.UserContext = map[string]interface{}{
+		"user_role": r.CallerRole,
+		"user_id":   r.AgentName,
+	}
+	return r, nil
 }
 
 // RetentionCleaner returns the underlying retention cleaner instance.
