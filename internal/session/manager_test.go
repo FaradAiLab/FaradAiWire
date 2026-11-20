@@ -48,6 +48,8 @@ func (m *MockRepo) ListAgents() ([]string, error) {
 	return list, nil
 }
 
+func (m *MockRepo) ListAgentSnapshots() ([]agent.AgentSnapshot, error) { return nil, nil }
+
 func (m *MockRepo) GetDefaultAgent() (*agent.RouteConfig, error) {
 	for _, cfg := range m.configs {
 		return cfg, nil

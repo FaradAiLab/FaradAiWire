@@ -49,10 +49,10 @@ func TestResolveEffectiveSettings(t *testing.T) {
 	baseCfg.Filters.HITL.TimeoutSeconds = 45
 
 	overrides := map[string]string{
-		"guard.threshold_score":    "0.30",
-		"limits.max_payload_bytes": "20971520", // 20MB
-		"invalid.corrupted_key":    "xyz",      // Should be ignored
-		"timeouts.idle_timeout_sec": "999999",  // Out of bounds, should be ignored
+		"guard.threshold_score":     "0.30",
+		"limits.max_payload_bytes":  "20971520", // 20MB
+		"invalid.corrupted_key":     "xyz",      // Should be ignored
+		"timeouts.idle_timeout_sec": "999999",   // Out of bounds, should be ignored
 	}
 
 	effective := ResolveEffectiveSettings(baseCfg, overrides)

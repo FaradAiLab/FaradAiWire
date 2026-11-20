@@ -264,6 +264,86 @@ func TestFSRepository_ListAgents(t *testing.T) {
 	}
 }
 
+func TestFSRepository_ListAgentSnapshots(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create reserved directories that must always be skipped even if they have config.json
+	for _, reserved := range []string{"archive", "agents", "temp"} {
+		dir := filepath.Join(tmpDir, reserved, "current")
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir reserved %s: %v", reserved, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"agent_name":"`+reserved+`"}`), 0644); err != nil {
+			t.Fatalf("write reserved config %s: %v", reserved, err)
+		}
+	}
+
+	// Create agent-zeta with config and manifest
+	zetaDir := filepath.Join(tmpDir, "agent-zeta", "current")
+	if err := os.MkdirAll(zetaDir, 0755); err != nil {
+		t.Fatalf("mkdir zeta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(zetaDir, "config.json"), []byte(`{"agent_name":"agent-zeta","routing_mode":"aggregated"}`), 0644); err != nil {
+		t.Fatalf("write zeta config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(zetaDir, "tools_manifest.json"), []byte(`[{"name":"ping","canonical_name":"p__ping"}]`), 0644); err != nil {
+		t.Fatalf("write zeta manifest: %v", err)
+	}
+
+	// Create agent-alpha with config only (no manifest)
+	alphaDir := filepath.Join(tmpDir, "agent-alpha", "current")
+	if err := os.MkdirAll(alphaDir, 0755); err != nil {
+		t.Fatalf("mkdir alpha: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(alphaDir, "config.json"), []byte(`{"agent_name":"agent-alpha","routing_mode":"direct"}`), 0644); err != nil {
+		t.Fatalf("write alpha config: %v", err)
+	}
+
+	repo := NewFSRepository(tmpDir)
+	// Prime cache for agent-alpha
+	if _, err := repo.GetAgentConfig("agent-alpha"); err != nil {
+		t.Fatalf("prime cache failed: %v", err)
+	}
+
+	snapshots, err := repo.ListAgentSnapshots()
+	if err != nil {
+		t.Fatalf("ListAgentSnapshots failed: %v", err)
+	}
+
+	var gotNames []string
+	var zetaSnap, alphaSnap *AgentSnapshot
+	for i := range snapshots {
+		snap := &snapshots[i]
+		if snap.Name == "archive" || snap.Name == "agents" || snap.Name == "temp" {
+			t.Fatalf("reserved directory %q leaked into snapshots", snap.Name)
+		}
+		gotNames = append(gotNames, snap.Name)
+		if snap.Name == "agent-zeta" {
+			zetaSnap = snap
+		}
+		if snap.Name == "agent-alpha" {
+			alphaSnap = snap
+		}
+	}
+
+	if alphaSnap == nil || zetaSnap == nil {
+		t.Fatalf("expected agent-alpha and agent-zeta in snapshots, got %v", gotNames)
+	}
+	if alphaSnap.Config.RoutingMode != "direct" || len(alphaSnap.Manifest) != 0 {
+		t.Fatalf("unexpected agent-alpha snapshot: %+v", alphaSnap)
+	}
+	if zetaSnap.Config.RoutingMode != "aggregated" || len(zetaSnap.Manifest) != 1 || zetaSnap.Manifest[0].CanonicalName != "p__ping" {
+		t.Fatalf("unexpected agent-zeta snapshot: %+v", zetaSnap)
+	}
+
+	// Confirm sorted order
+	for i := 1; i < len(gotNames); i++ {
+		if gotNames[i-1] >= gotNames[i] {
+			t.Fatalf("expected snapshots sorted alphabetically, got %v", gotNames)
+		}
+	}
+}
+
 func TestFSRepository_SaveAgentManifest(t *testing.T) {
 	tmpDir := setupTestAgentsDir(t)
 	defer os.RemoveAll(tmpDir)

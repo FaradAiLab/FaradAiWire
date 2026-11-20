@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
@@ -23,6 +24,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/schema"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
+	"github.com/FaradAiLab/FaradAiWire/internal/mcpprobe"
 	"github.com/FaradAiLab/FaradAiWire/internal/middleware"
 	"github.com/FaradAiLab/FaradAiWire/internal/policy"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
@@ -49,9 +51,42 @@ type EventBroadcaster interface {
 	DroppedCount() uint64
 }
 
+// AuditEventLogger records administrative configuration mutation audit events.
+type AuditEventLogger interface {
+	LogEvent(event *filter.AuditEvent)
+}
+
+// AdminDependencies groups all runtime dependencies injected into AdminServer at startup.
+type AdminDependencies struct {
+	Config               *config.Config
+	ConfigProvider       *config.YAMLConfigProvider
+	AgentRepo            agent.Repository
+	ProtocolStore        protocol.Store
+	KeyStore             auth.KeyStore
+	GuardCatalog         guard.CatalogStore
+	GuardManager         guard.Manager
+	GuardInstaller       guard.ModelInstaller
+	GuardHITL            *guard.HITLDispatcher
+	PolicyStore          policy.Store
+	PolicyCompiler       *policy.Compiler
+	SchemaStore          schema.Store
+	SettingsStore        settings.Store
+	SettingsCache        *settings.Cache
+	TelemetryEngine      TelemetryReader
+	EventBroker          EventBroadcaster
+	AuditLoggers         []AuditEventLogger
+	Pipeline             *filter.Pipeline
+	SafeHTTPClient       *http.Client
+	ReloadFunc           func() error
+	ReloadConfigFunc     func(*config.Config) error
+	SchemaClearFunc      func()
+	ActiveSessionChecker func(agentName string) bool
+}
+
 // AdminServer manages gateway configuration, inspection, diff previews, approval, and live telemetry.
 type AdminServer struct {
-	cfg                  *config.Config
+	cfgPtr               atomic.Pointer[config.Config]
+	pipelinePtr          atomic.Pointer[filter.Pipeline]
 	cfgProvider          *config.YAMLConfigProvider
 	agentRepo            agent.Repository
 	reloadFunc           func() error
@@ -59,11 +94,13 @@ type AdminServer struct {
 	schemaClear          func()
 	telemetryEngine      TelemetryReader
 	eventBroker          EventBroadcaster
+	auditLoggers         []AuditEventLogger
+	serverMu             sync.Mutex
 	server               *http.Server
+	safeClientMu         sync.Mutex
 	safeHTTPClient       *http.Client
 	safeHTTPClientCustom bool
 	safeHTTPClientOpts   transport.SafeTransportOptions
-	mu                   sync.RWMutex
 	configMutMu          sync.Mutex
 	keyStore             auth.KeyStore
 	protocolStore        protocol.Store
@@ -74,7 +111,6 @@ type AdminServer struct {
 	policyStore          policy.Store
 	policyCompiler       *policy.Compiler
 	schemaStore          schema.Store
-	pipeline             *filter.Pipeline
 	settingsStore        settings.Store
 	settingsCache        *settings.Cache
 	wsHub                *WSHub
@@ -83,23 +119,48 @@ type AdminServer struct {
 	closed               bool
 }
 
-// NewAdminServer creates a new AdminServer instance.
-func NewAdminServer(cfg *config.Config, reloadFunc func() error, schemaClear func()) *AdminServer {
+// NewAdminServer creates a configured AdminServer pre-wired with explicit runtime dependencies.
+func NewAdminServer(deps AdminDependencies) *AdminServer {
 	hub := NewWSHub()
-	if cfg != nil && len(cfg.Security.CORSAllowedOrigins) > 0 {
-		hub.SetAllowedOrigins(cfg.Security.CORSAllowedOrigins)
+	if deps.Config != nil && len(deps.Config.Security.CORSAllowedOrigins) > 0 {
+		hub.SetAllowedOrigins(deps.Config.Security.CORSAllowedOrigins)
 	}
 	s := &AdminServer{
-		cfg:         cfg,
-		reloadFunc:  reloadFunc,
-		schemaClear: schemaClear,
-		wsHub:       hub,
+		cfgProvider:          deps.ConfigProvider,
+		agentRepo:            deps.AgentRepo,
+		protocolStore:        deps.ProtocolStore,
+		keyStore:             deps.KeyStore,
+		guardCatalog:         deps.GuardCatalog,
+		guardManager:         deps.GuardManager,
+		guardInstaller:       deps.GuardInstaller,
+		guardHITL:            deps.GuardHITL,
+		policyStore:          deps.PolicyStore,
+		policyCompiler:       deps.PolicyCompiler,
+		schemaStore:          deps.SchemaStore,
+		settingsStore:        deps.SettingsStore,
+		settingsCache:        deps.SettingsCache,
+		telemetryEngine:      deps.TelemetryEngine,
+		eventBroker:          deps.EventBroker,
+		auditLoggers:         slices.Clone(deps.AuditLoggers),
+		reloadFunc:           deps.ReloadFunc,
+		reloadConfigFunc:     deps.ReloadConfigFunc,
+		schemaClear:          deps.SchemaClearFunc,
+		activeSessionChecker: deps.ActiveSessionChecker,
+		wsHub:                hub,
+	}
+	s.cfgPtr.Store(deps.Config)
+	s.pipelinePtr.Store(deps.Pipeline)
+	if deps.SafeHTTPClient != nil {
+		s.safeHTTPClient = deps.SafeHTTPClient
+		s.safeHTTPClientCustom = true
+	}
+
+	if deps.GuardInstaller != nil && hub != nil {
+		wireGuardInstallerProgress(deps.GuardInstaller, hub)
 	}
 
 	hub.SetOnConnect(func(client *wsClient) {
-		s.mu.RLock()
-		hitl := s.guardHITL
-		s.mu.RUnlock()
+		hitl := s.getGuardHITL()
 		if hitl != nil {
 			for _, req := range hitl.ListPending() {
 				hub.SendDirect(client, map[string]interface{}{
@@ -125,10 +186,7 @@ func NewAdminServer(cfg *config.Config, reloadFunc func() error, schemaClear fun
 			Approved bool   `json:"approved"`
 		}
 		if err := json.Unmarshal(payload, &msg); err == nil && msg.Type == "HITL_RESPOND" && msg.CallID != "" {
-			s.mu.RLock()
-			hitl := s.guardHITL
-			s.mu.RUnlock()
-			if hitl != nil {
+			if hitl := s.getGuardHITL(); hitl != nil {
 				hitl.Resolve(msg.CallID, msg.Approved)
 			}
 		}
@@ -137,135 +195,42 @@ func NewAdminServer(cfg *config.Config, reloadFunc func() error, schemaClear fun
 	return s
 }
 
-// SetTelemetryEngine sets the embedded DuckDB telemetry engine for querying audit records.
-func (a *AdminServer) SetTelemetryEngine(engine TelemetryReader) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.telemetryEngine = engine
-}
-
-// SetEventBroker sets the event broker for streaming audit events via SSE.
-func (a *AdminServer) SetEventBroker(broker EventBroadcaster) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.eventBroker = broker
-}
-
-// SetConfigProvider sets the configuration provider for saving runtime config.
-func (a *AdminServer) SetConfigProvider(p *config.YAMLConfigProvider) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.cfgProvider = p
-}
-
-// SetAgentRepository sets the agent repository for caching and manifest lookups.
-func (a *AdminServer) SetAgentRepository(repo agent.Repository) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.agentRepo = repo
-}
-
-// SetKeyStore sets the API Key storage manager.
-func (a *AdminServer) SetKeyStore(store auth.KeyStore) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.keyStore = store
-}
-
-// SetProtocolStore sets the protocol catalog store.
-func (a *AdminServer) SetProtocolStore(store protocol.Store) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.protocolStore = store
-}
-
-// SetGuardCatalog sets the DuckDB guard model catalog store.
-func (a *AdminServer) SetGuardCatalog(catalog guard.CatalogStore) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.guardCatalog = catalog
-}
-
-// SetSettingsStore sets the persistent DuckDB settings store.
-func (a *AdminServer) SetSettingsStore(store settings.Store) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.settingsStore = store
-}
-
-// SetSettingsCache sets the active atomic operational settings cache.
-func (a *AdminServer) SetSettingsCache(cache *settings.Cache) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.settingsCache = cache
-}
-
-// SetReloadConfigFunc registers an in-memory pipeline reload hook that accepts
-// an updated Config snapshot without re-reading config.yaml from disk.
-func (a *AdminServer) SetReloadConfigFunc(fn func(*config.Config) error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.reloadConfigFunc = fn
-}
-
-// SetGuardManager sets the active AI Guard stdio process manager.
-func (a *AdminServer) SetGuardManager(mgr guard.Manager) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.guardManager = mgr
-}
-
-// SetGuardInstaller sets the environment and model installer.
-func (a *AdminServer) SetGuardInstaller(installer guard.ModelInstaller) {
-	a.mu.Lock()
-	a.guardInstaller = installer
-	hub := a.wsHub
-	a.mu.Unlock()
-
-	if installer != nil && hub != nil {
-		installer.SetOnProgress(func(p guard.InstallProgress) {
-			hub.Broadcast(map[string]interface{}{
-				"type":       "GUARD_INSTALL_PROGRESS",
-				"model_id":   p.ModelID,
-				"status":     string(p.Status),
-				"step":       string(p.Step),
-				"progress":   p.Progress,
-				"message":    p.Message,
-				"error":      p.Error,
-				"updated_at": p.UpdatedAt.Format(time.RFC3339),
-			})
+func wireGuardInstallerProgress(installer guard.ModelInstaller, hub *WSHub) {
+	installer.SetOnProgress(func(p guard.InstallProgress) {
+		hub.Broadcast(map[string]interface{}{
+			"type":       "GUARD_INSTALL_PROGRESS",
+			"model_id":   p.ModelID,
+			"status":     string(p.Status),
+			"step":       string(p.Step),
+			"progress":   p.Progress,
+			"message":    p.Message,
+			"error":      p.Error,
+			"updated_at": p.UpdatedAt.Format(time.RFC3339),
 		})
-	}
+	})
 }
 
-// SetGuardHITL sets the HITL dispatcher for resolving interactive approvals.
-func (a *AdminServer) SetGuardHITL(d *guard.HITLDispatcher) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.guardHITL = d
+func (a *AdminServer) getGuardHITL() *guard.HITLDispatcher {
+	return a.guardHITL
 }
 
-// SetConfig updates the active configuration safely on the AdminServer.
+func (a *AdminServer) getSettingsCache() *settings.Cache {
+	return a.settingsCache
+}
+
+func (a *AdminServer) getAuditLoggers() []AuditEventLogger {
+	return a.auditLoggers
+}
+
+// SetConfig updates the active configuration atomically on the AdminServer.
 func (a *AdminServer) SetConfig(cfg *config.Config) {
-	a.mu.Lock()
-	a.cfg = cfg
-	var stale *http.Client
-	if !a.safeHTTPClientCustom {
-		stale = a.safeHTTPClient
-		a.safeHTTPClient = nil
-	}
-	a.mu.Unlock()
-	if stale != nil {
-		stale.CloseIdleConnections()
-	}
+	a.cfgPtr.Store(cfg)
+	a.invalidateSafeHTTPClient()
 }
 
 // Config returns the active configuration snapshot safely.
 func (a *AdminServer) Config() *config.Config {
-	a.mu.RLock()
-	cfg := a.cfg
-	a.mu.RUnlock()
-	return cfg
+	return a.cfgPtr.Load()
 }
 
 func safeTransportOptsEqual(a, b transport.SafeTransportOptions) bool {
@@ -275,13 +240,13 @@ func safeTransportOptsEqual(a, b transport.SafeTransportOptions) bool {
 }
 
 func (a *AdminServer) invalidateSafeHTTPClient() {
-	a.mu.Lock()
+	a.safeClientMu.Lock()
 	var stale *http.Client
 	if !a.safeHTTPClientCustom {
 		stale = a.safeHTTPClient
 		a.safeHTTPClient = nil
 	}
-	a.mu.Unlock()
+	a.safeClientMu.Unlock()
 	if stale != nil {
 		stale.CloseIdleConnections()
 	}
@@ -291,47 +256,30 @@ func (a *AdminServer) invalidateSafeHTTPClient() {
 // kept synchronized with active cfg.Security.SSRFProtection and timeouts.probe_timeout_sec.
 func (a *AdminServer) SafeHTTPClient() *http.Client {
 	timeout := a.probeTimeout()
+	cfg := a.Config()
 
-	a.mu.RLock()
-	custom := a.safeHTTPClientCustom
-	client := a.safeHTTPClient
-	cfg := a.cfg
-	curOpts := a.safeHTTPClientOpts
-	a.mu.RUnlock()
-
-	if custom && client != nil {
-		return client
+	a.safeClientMu.Lock()
+	if a.safeHTTPClientCustom && a.safeHTTPClient != nil {
+		c := a.safeHTTPClient
+		a.safeClientMu.Unlock()
+		return c
 	}
 
 	wantOpts := transport.DefaultSafeOptions()
 	if cfg != nil {
 		wantOpts = transport.OptionsFromConfig(cfg.Security.SSRFProtection)
 	}
-
-	if client != nil && client.Timeout == timeout && safeTransportOptsEqual(curOpts, wantOpts) {
-		return client
-	}
-
-	a.mu.Lock()
-	if a.safeHTTPClientCustom && a.safeHTTPClient != nil {
-		c := a.safeHTTPClient
-		a.mu.Unlock()
-		return c
-	}
-	wantOpts = transport.DefaultSafeOptions()
-	if a.cfg != nil {
-		wantOpts = transport.OptionsFromConfig(a.cfg.Security.SSRFProtection)
-	}
 	if a.safeHTTPClient != nil && a.safeHTTPClient.Timeout == timeout && safeTransportOptsEqual(a.safeHTTPClientOpts, wantOpts) {
 		c := a.safeHTTPClient
-		a.mu.Unlock()
+		a.safeClientMu.Unlock()
 		return c
 	}
+
 	stale := a.safeHTTPClient
 	a.safeHTTPClient = transport.NewSafeHTTPClient(wantOpts, timeout)
 	a.safeHTTPClientOpts = wantOpts
 	c := a.safeHTTPClient
-	a.mu.Unlock()
+	a.safeClientMu.Unlock()
 
 	if stale != nil {
 		stale.CloseIdleConnections()
@@ -339,48 +287,24 @@ func (a *AdminServer) SafeHTTPClient() *http.Client {
 	return c
 }
 
-// SetSafeHTTPClient sets the safe HTTP client for probing and egress.
-func (a *AdminServer) SetSafeHTTPClient(client *http.Client) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.safeHTTPClient = client
-	a.safeHTTPClientCustom = client != nil
-}
-
-// SetPipeline sets the security filter pipeline for dynamic filter injection and rewiring.
+// SetPipeline sets the security filter pipeline atomically for dynamic filter injection and rewiring.
 func (a *AdminServer) SetPipeline(p *filter.Pipeline) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.pipeline = p
+	a.pipelinePtr.Store(p)
 }
 
-// GetPipeline returns the active security filter pipeline.
+// GetPipeline returns the active security filter pipeline atomically.
 func (a *AdminServer) GetPipeline() *filter.Pipeline {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.pipeline
+	return a.pipelinePtr.Load()
 }
 
 // WSHub returns the WebSocket hub.
 func (a *AdminServer) WSHub() *WSHub {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
 	return a.wsHub
-}
-
-// SetActiveSessionChecker sets the callback for checking whether an agent has active client sessions.
-func (a *AdminServer) SetActiveSessionChecker(checker func(agentName string) bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.activeSessionChecker = checker
 }
 
 // probeTimeout resolves the active MCP probe timeout from settings cache, defaulting to 5s.
 func (a *AdminServer) probeTimeout() time.Duration {
-	a.mu.RLock()
-	sCache := a.settingsCache
-	a.mu.RUnlock()
-	if sCache != nil {
+	if sCache := a.settingsCache; sCache != nil {
 		if active := sCache.Get(); active != nil && active.Timeouts.ProbeTimeoutSec > 0 {
 			return time.Duration(active.Timeouts.ProbeTimeoutSec) * time.Second
 		}
@@ -393,27 +317,13 @@ const (
 	defaultPackageStdioProbeTimeout = 120 * time.Second
 )
 
-func isPackageRunnerCommand(command string) bool {
-	base := strings.TrimSpace(command)
-	if idx := strings.LastIndexAny(base, `/\`); idx >= 0 {
-		base = base[idx+1:]
-	}
-	base = strings.ToLower(strings.TrimSuffix(base, ".exe"))
-	switch base {
-	case "uvx", "uv", "npx", "bunx", "pnpm", "yarn", "pipx", "docker", "podman":
-		return true
-	default:
-		return false
-	}
-}
-
 // stdioProbeTimeout resolves the timeout for local stdio MCP probes.
 // Subprocess package launchers (uvx, npx, pipx, docker) can exceed 30s on
 // cold-start runtime/package downloads (e.g. fetching CPython + wheels), so
 // they floor at 120s while other stdio probes floor at 30s.
 func (a *AdminServer) stdioProbeTimeout(command string) time.Duration {
 	floor := defaultStdioProbeTimeout
-	if isPackageRunnerCommand(command) {
+	if mcpprobe.IsPackageRunnerCommand(command) {
 		floor = defaultPackageStdioProbeTimeout
 	}
 	if t := a.probeTimeout(); t > floor {
@@ -427,119 +337,140 @@ func (a *AdminServer) stdioProbeTimeout(command string) time.Duration {
 // returns HTTP 403 Forbidden with {"error": "FORBIDDEN_MANAGED_MODE", "message": "Policy editing is locked: Gateway is managed by organization."}.
 func (a *AdminServer) withMutationGuard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		a.mu.RLock()
-		cfg := a.cfg
-		a.mu.RUnlock()
+		cfg := a.Config()
 		if cfg != nil && cfg.IsManaged() {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "FORBIDDEN_MANAGED_MODE",
-				"message": "Policy editing is locked: Gateway is managed by organization.",
-			})
+			writeError(w, http.StatusForbidden, "FORBIDDEN_MANAGED_MODE", "Policy editing is locked: Gateway is managed by organization.")
 			return
 		}
 		next(w, r)
 	}
 }
 
-// withWriteMutationGuard enforces MANAGED-mode lockouts only on mutating HTTP methods
-// so read-only GET/HEAD queries (such as GET /admin/settings) remain accessible.
-func (a *AdminServer) withWriteMutationGuard(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
-			next(w, r)
-			return
-		}
-		a.withMutationGuard(next)(w, r)
-	}
-}
-
 // Handler builds and returns the configured HTTP handler with security headers and CORS middleware applied.
 func (a *AdminServer) Handler() http.Handler {
-	mux := http.NewServeMux()
+	apiMux := http.NewServeMux()
+
+	// Embedded static dashboard UI & assets under /admin/*
+	apiMux.Handle("GET /admin/assets/", http.StripPrefix("/admin", web.Handler()))
+	registerExactMethods(apiMux, "/admin/dashboard", a.handleDashboard, http.MethodGet)
+
+	// Runtime inspection and local telemetry endpoints (zero-auth localhost access)
+	registerExactMethods(apiMux, "/admin/status", a.handleStatus, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/host/resources", a.handleHostResources, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/guards/probe", a.handleGuardProbe, http.MethodGet, http.MethodPost)
+	registerExactMethods(apiMux, "/admin/audit-logs", a.handleAuditLogs, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/audit-logs/events", a.handleLogEventsStream, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/audit-logs/{id}", a.handleAuditLogDetail, http.MethodGet)
+	registerExactMethods(apiMux, "/api/v1/logs/events", a.handleLogEventsStream, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/mcp/tools", a.handleMCPTools, http.MethodGet)
+
+	// Agent lifecycle & DLP governance routes (Go 1.22+ ServeMux method + path routing)
+	apiMux.HandleFunc("GET /admin/agents", a.handleListAgents)
+	apiMux.HandleFunc("POST /admin/agents", a.withMutationGuard(a.handleCreateAgent))
+	apiMux.HandleFunc("DELETE /admin/agents", a.withMutationGuard(a.handleDeleteAgent))
+	registerExactMethods(apiMux, "/admin/agents/archives", a.handleAgentArchives, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/agents/sync-tools", a.withMutationGuard(a.handleAgentSyncTools), http.MethodPost)
+	registerExactMethods(apiMux, "/admin/agents/rollback", a.withMutationGuard(a.handleAgentRollback), http.MethodPost)
+	apiMux.HandleFunc("GET /admin/agents/{name}", a.handleGetAgent)
+	apiMux.HandleFunc("PUT /admin/agents/{name}", a.withMutationGuard(a.handleUpdateAgent))
+	apiMux.HandleFunc("DELETE /admin/agents/{name}", a.withMutationGuard(a.handleDeleteAgent))
+	apiMux.HandleFunc("GET /admin/agents/{name}/dlp", a.handleGetAgentDLP)
+	apiMux.HandleFunc("PUT /admin/agents/{name}/dlp", a.withMutationGuard(a.handleUpdateAgentDLP))
+
+	// Protocol catalog & probing routes
+	apiMux.HandleFunc("GET /admin/protocols", a.handleListProtocols)
+	apiMux.HandleFunc("POST /admin/protocols", a.withMutationGuard(a.handleCreateProtocol))
+	apiMux.HandleFunc("DELETE /admin/protocols", a.withMutationGuard(a.handleDeleteProtocol))
+	registerExactMethods(apiMux, "/admin/protocols/presets", a.handleProtocolPresets, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/protocols/probe", a.handleProtocolProbe, http.MethodPost)
+	apiMux.HandleFunc("GET /admin/protocols/{id}", a.handleGetProtocol)
+	apiMux.HandleFunc("PUT /admin/protocols/{id}", a.withMutationGuard(a.handleUpdateProtocol))
+	apiMux.HandleFunc("DELETE /admin/protocols/{id}", a.withMutationGuard(a.handleDeleteProtocol))
+
+	// Operational settings, configuration toggles & runtime reload routes
+	apiMux.HandleFunc("GET /admin/settings", a.getSettings)
+	apiMux.HandleFunc("POST /admin/settings", a.withMutationGuard(a.updateSettings))
+	apiMux.HandleFunc("PUT /admin/settings", a.withMutationGuard(a.updateSettings))
+	registerExactMethods(apiMux, "/admin/settings/reset", a.withMutationGuard(a.handleSettingsReset), http.MethodPost)
+	registerExactMethods(apiMux, "/admin/config/toggle", a.withMutationGuard(a.handleConfigToggle), http.MethodPost)
+	registerExactMethods(apiMux, "/admin/guards/configure", a.withMutationGuard(a.handleGuardConfigure), http.MethodPost)
+	registerExactMethods(apiMux, "/api/reload", a.handleReload, http.MethodPost)
+	registerExactMethods(apiMux, "/admin/reload", a.handleReload, http.MethodPost)
+
+	// Self-service API keys
+	apiMux.HandleFunc("GET /admin/api-keys", a.handleListAPIKeys)
+	apiMux.HandleFunc("POST /admin/api-keys", a.withMutationGuard(a.handleCreateAPIKey))
+	apiMux.HandleFunc("DELETE /admin/api-keys", a.withMutationGuard(a.handleRevokeAPIKey))
+	apiMux.HandleFunc("GET /admin/api-keys/{id}", a.handleGetAPIKey)
+	apiMux.HandleFunc("DELETE /admin/api-keys/{id}", a.withMutationGuard(a.handleRevokeAPIKey))
+
+	// Guard catalog, lifecycle & HITL routes
+	registerExactMethods(apiMux, "/admin/guards/status", a.handleGuardStatus, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/guards/hitl/pending", a.handleHITLPending, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/guards/hitl/respond", a.handleHITLRespond, http.MethodPost)
+	registerExactMethods(apiMux, "/admin/guards/models", a.handleListGuardModels, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/guards/models/deactivate", a.withMutationGuard(a.handleGuardDeactivateGlobal), http.MethodPost)
+	apiMux.HandleFunc("GET /admin/guards/models/{id}", a.handleGetGuardModel)
+	apiMux.HandleFunc("DELETE /admin/guards/models/{id}", a.withMutationGuard(a.handleDeleteGuardModel))
+	registerExactMethods(apiMux, "/admin/guards/models/{id}/connect", a.withMutationGuard(a.handleGuardConnect), http.MethodPost)
+	registerExactMethods(apiMux, "/admin/guards/models/{id}/activate", a.withMutationGuard(a.handleGuardActivate), http.MethodPost)
+	registerExactMethods(apiMux, "/admin/guards/models/{id}/deactivate", a.withMutationGuard(a.handleGuardDeactivateModel), http.MethodPost)
+	registerExactMethods(apiMux, "/admin/guards/models/{id}/policy", a.withMutationGuard(a.handleGuardPolicyUpdate), http.MethodPost, http.MethodPut)
+	registerExactMethods(apiMux, "/admin/guards/models/{id}/install", a.withMutationGuard(a.handleGuardInstall), http.MethodPost)
+	registerExactMethods(apiMux, "/admin/guards/models/{id}/progress", a.handleGuardInstallProgress, http.MethodGet)
+
+	// DLP pattern rules, policy packs, recommendation & dry-run preview routes
+	apiMux.HandleFunc("GET /admin/dlp/rules", a.handleListDlpRules)
+	apiMux.HandleFunc("POST /admin/dlp/rules", a.withMutationGuard(a.handleCreateDlpRule))
+	apiMux.HandleFunc("GET /admin/dlp/rules/{id}", a.handleGetDlpRule)
+	apiMux.HandleFunc("PUT /admin/dlp/rules/{id}", a.withMutationGuard(a.handleUpdateDlpRule))
+	apiMux.HandleFunc("DELETE /admin/dlp/rules/{id}", a.withMutationGuard(a.handleDeleteDlpRule))
+	apiMux.HandleFunc("GET /admin/policy-packs", a.handleListPolicyPacks)
+	apiMux.HandleFunc("POST /admin/policy-packs", a.withMutationGuard(a.handleCreatePolicyPack))
+	registerExactMethods(apiMux, "/admin/policy-packs/recommend", a.handlePolicyRecommend, http.MethodPost)
+	registerExactMethods(apiMux, "/admin/policy-packs/preview", a.handlePolicyPreview, http.MethodPost)
+	registerExactMethods(apiMux, "/admin/policies/preview", a.handlePolicyPreview, http.MethodPost)
+	apiMux.HandleFunc("GET /admin/policy-packs/{id}", a.handleGetPolicyPack)
+	apiMux.HandleFunc("PUT /admin/policy-packs/{id}", a.withMutationGuard(a.handleUpdatePolicyPack))
+	apiMux.HandleFunc("DELETE /admin/policy-packs/{id}", a.withMutationGuard(a.handleDeletePolicyPack))
+
+	// Captured tool schema baselines
+	registerExactMethods(apiMux, "/admin/schemas", a.handleListSchemas, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/schemas/clear", a.withMutationGuard(a.handleClearSchemas), http.MethodPost)
+	registerExactMethods(apiMux, "/admin/schemas/{tool}", a.handleGetSchema, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/schemas/{tool}/pin", a.withMutationGuard(a.handlePinSchema), http.MethodPost)
 
 	// blockedOnAdmin lists MCP protocol paths that must never be served on the admin port.
 	// These are strictly proxy-only endpoints; serving them here would violate port segregation.
 	blockedOnAdmin := []string{"/sse", "/message", "/mcp"}
+	apiHandler := withJSONMethodNotAllowed(apiMux)
 
-	// Root handler redirects to embedded admin dashboard, or serves static Vite assets and SPA routes
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/admin/dashboard", http.StatusFound)
 			return
 		}
-		// Block MCP protocol endpoints on the admin port (strict port segregation)
 		for _, blocked := range blockedOnAdmin {
 			if r.URL.Path == blocked || strings.HasPrefix(r.URL.Path, blocked+"/") {
 				http.NotFound(w, r)
 				return
 			}
 		}
-		// Vite assets & client-side routes fallback (non-admin, non-api)
-		if !strings.HasPrefix(r.URL.Path, "/admin") && !strings.HasPrefix(r.URL.Path, "/api") {
-			web.Handler().ServeHTTP(w, r)
+		if r.URL.Path == "/ws" {
+			a.handleWebSocket(w, r)
 			return
 		}
-		http.NotFound(w, r)
+		if strings.HasPrefix(r.URL.Path, "/admin") || strings.HasPrefix(r.URL.Path, "/api") {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
+		// Vite assets & client-side SPA routes fallback
+		web.Handler().ServeHTTP(w, r)
 	})
 
-	// Public static dashboard UI (React SPA)
-	mux.HandleFunc("/admin/dashboard", a.handleDashboard)
-	// Embedded static assets (Vite bundle)
-	mux.Handle("/assets/", web.Handler())
-	mux.Handle("/admin/assets/", http.StripPrefix("/admin", web.Handler()))
+	var h http.Handler = a.withAdminSecurity(rootHandler)
 
-	// Runtime inspection and local telemetry endpoints (zero-auth localhost access)
-	mux.HandleFunc("/admin/status", a.handleStatus)
-	mux.HandleFunc("/admin/host/resources", a.handleHostResources)
-	mux.HandleFunc("/admin/guards/probe", a.handleGuardProbe)
-	mux.HandleFunc("/admin/audit-logs", a.handleAuditLogs)
-	mux.HandleFunc("/admin/audit-logs/events", a.handleLogEventsStream)
-	mux.HandleFunc("/admin/audit-logs/", a.handleAuditLogDetail)
-	mux.HandleFunc("/api/v1/logs/events", a.handleLogEventsStream)
-	mux.HandleFunc("/admin/mcp/tools", a.handleMCPTools)
-	mux.HandleFunc("/admin/agents", a.handleAgents)
-	mux.HandleFunc("/admin/agents/", a.handleAgents)
-	mux.HandleFunc("/admin/agents/archives", a.handleAgentArchives)
-	mux.HandleFunc("/admin/settings", a.withWriteMutationGuard(a.handleSettings))
-	mux.HandleFunc("/admin/settings/reset", a.withMutationGuard(a.handleSettingsReset))
-	mux.HandleFunc("/admin/api-keys", a.handleAPIKeys)
-	mux.HandleFunc("/admin/api-keys/", a.handleAPIKeys)
-	mux.HandleFunc("/admin/protocols", a.handleProtocols)
-	mux.HandleFunc("/admin/protocols/", a.handleProtocols)
-	mux.HandleFunc("/admin/protocols/presets", a.handleProtocolPresets)
-	mux.HandleFunc("/admin/protocols/probe", a.handleProtocolProbe)
-	mux.HandleFunc("/admin/guards/models", a.handleGuardModels)
-	mux.HandleFunc("/admin/guards/models/", a.handleGuardModels)
-	mux.HandleFunc("/admin/guards/status", a.handleGuardStatus)
-	mux.HandleFunc("/admin/guards/hitl/respond", a.handleHITLRespond)
-	mux.HandleFunc("/admin/guards/hitl/pending", a.handleHITLPending)
-	mux.HandleFunc("/admin/dlp/rules", a.handleDlpRules)
-	mux.HandleFunc("/admin/dlp/rules/", a.handleDlpRules)
-	mux.HandleFunc("/admin/policy-packs", a.handlePolicyPacks)
-	mux.HandleFunc("/admin/policy-packs/", a.handlePolicyPacks)
-	mux.HandleFunc("/admin/policy-packs/recommend", a.handlePolicyRecommend)
-	mux.HandleFunc("/admin/policies/preview", a.handlePolicyPreview)
-	mux.HandleFunc("/admin/policy-packs/preview", a.handlePolicyPreview)
-	mux.HandleFunc("/ws", a.handleWebSocket)
-	mux.HandleFunc("/api/reload", a.handleReload)
-	mux.HandleFunc("/admin/reload", a.handleReload)
-	mux.HandleFunc("/admin/schemas", a.handleSchemas)
-	mux.HandleFunc("/admin/schemas/", a.handleSchemas)
-
-	// Mutating endpoints (guarded by withMutationGuard against managed enterprise mode modifications)
-	mux.HandleFunc("/admin/guards/configure", a.withMutationGuard(a.handleGuardConfigure))
-	mux.HandleFunc("/admin/schemas/clear", a.withMutationGuard(a.handleClearSchemas))
-	mux.HandleFunc("/admin/config/toggle", a.withMutationGuard(a.handleConfigToggle))
-	mux.HandleFunc("/admin/agents/sync-tools", a.withMutationGuard(a.handleAgentSyncTools))
-	mux.HandleFunc("/admin/agents/rollback", a.withMutationGuard(a.handleAgentRollback))
-
-	var h http.Handler = a.withAdminSecurity(mux)
-
-	a.mu.RLock()
-	cfg := a.cfg
-	a.mu.RUnlock()
+	cfg := a.Config()
 
 	if cfg != nil && cfg.Security.RateLimiting.Enabled != nil && *cfg.Security.RateLimiting.Enabled {
 		rlCfg := cfg.GetHTTPRateLimitConfig()
@@ -641,9 +572,7 @@ func isDisallowedCSRFContentType(mediaType string) bool {
 
 func (a *AdminServer) withAdminSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		a.mu.RLock()
-		cfg := a.cfg
-		a.mu.RUnlock()
+		cfg := a.Config()
 
 		var allowedOrigins []string
 		adminHost := "127.0.0.1"
@@ -719,9 +648,7 @@ func (a *AdminServer) StartTasks(ctx context.Context) {
 // Explicit admin_host / FARADAI_WIRE_ADMIN_HOST opts into custom interfaces;
 // otherwise standalone mode enforces loopback ("127.0.0.1") per ADR-0028.
 func (a *AdminServer) ListenAddr() string {
-	a.mu.RLock()
-	cfg := a.cfg
-	a.mu.RUnlock()
+	cfg := a.Config()
 
 	adminPort := config.DefaultAdminPort
 	if cfg != nil {
@@ -737,9 +664,7 @@ func (a *AdminServer) Start(ctx context.Context) error {
 	adminHost, portStr, _ := net.SplitHostPort(addr)
 	adminPort, _ := strconv.Atoi(portStr)
 
-	a.mu.RLock()
-	cfg := a.cfg
-	a.mu.RUnlock()
+	cfg := a.Config()
 
 	adminToken := resolveConfiguredAdminToken()
 	if !isLoopbackHost(adminHost) && adminToken == "" {
@@ -753,9 +678,9 @@ func (a *AdminServer) Start(ctx context.Context) error {
 	}
 
 	handler := a.Handler()
-	a.mu.Lock()
+	a.serverMu.Lock()
 	if a.closed {
-		a.mu.Unlock()
+		a.serverMu.Unlock()
 		return nil
 	}
 	a.server = &http.Server{
@@ -765,7 +690,7 @@ func (a *AdminServer) Start(ctx context.Context) error {
 		IdleTimeout:       120 * time.Second,
 	}
 	server := a.server
-	a.mu.Unlock()
+	a.serverMu.Unlock()
 
 	errCh := make(chan error, 1)
 	if cfg != nil && cfg.AdminTLS.Enabled {
@@ -804,10 +729,10 @@ func (a *AdminServer) Start(ctx context.Context) error {
 func (a *AdminServer) Shutdown(ctx context.Context) error {
 	var shutdownErr error
 	a.shutdownOnce.Do(func() {
-		a.mu.Lock()
+		a.serverMu.Lock()
 		a.closed = true
 		server := a.server
-		a.mu.Unlock()
+		a.serverMu.Unlock()
 
 		if server != nil {
 			slog.Info("Shutting down admin server")
@@ -819,7 +744,7 @@ func (a *AdminServer) Shutdown(ctx context.Context) error {
 
 // Server returns the underlying active http.Server instance if started (useful for timeout assertions).
 func (a *AdminServer) Server() *http.Server {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+	a.serverMu.Lock()
+	defer a.serverMu.Unlock()
 	return a.server
 }

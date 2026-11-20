@@ -16,7 +16,7 @@ import (
 	_ "github.com/marcboeker/go-duckdb"
 )
 
-func setupTestAdminServerWithGuards(t *testing.T) (*AdminServer, guard.CatalogStore, func()) {
+func setupTestAdminServerWithGuards(t *testing.T, opts ...func(*AdminDependencies)) (*AdminServer, guard.CatalogStore, func()) {
 	t.Helper()
 	db, err := sql.Open("duckdb", ":memory:")
 	if err != nil {
@@ -40,8 +40,18 @@ func setupTestAdminServerWithGuards(t *testing.T) (*AdminServer, guard.CatalogSt
 		RuntimeMode: config.RuntimeModeStandalone,
 	}
 
-	server := NewAdminServer(cfg, func() error { return nil }, func() {})
-	server.SetGuardCatalog(cat)
+	deps := AdminDependencies{
+		Config:          cfg,
+		ReloadFunc:      func() error { return nil },
+		SchemaClearFunc: func() {},
+		GuardCatalog:    cat,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&deps)
+		}
+	}
+	server := NewAdminServer(deps)
 
 	cleanup := func() {
 		db.Close()
@@ -183,7 +193,11 @@ func TestGuardEndpoints_ServiceUnavailable(t *testing.T) {
 		RuntimeMode: config.RuntimeModeStandalone,
 	}
 	// Admin server with nil catalog
-	server := NewAdminServer(cfg, func() error { return nil }, func() {})
+	server := NewAdminServer(AdminDependencies{
+		Config:          cfg,
+		ReloadFunc:      func() error { return nil },
+		SchemaClearFunc: func() {},
+	})
 	handler := server.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/guards/models", nil)
@@ -199,9 +213,11 @@ type mockGuardManager struct {
 	status guard.ProcessStatus
 }
 
-func (m *mockGuardManager) Start(ctx context.Context, model *guard.Model) error                     { return nil }
-func (m *mockGuardManager) StartScript(ctx context.Context, scriptPath string, modelID string) error { return nil }
-func (m *mockGuardManager) Stop(ctx context.Context) error                                         { return nil }
+func (m *mockGuardManager) Start(ctx context.Context, model *guard.Model) error { return nil }
+func (m *mockGuardManager) StartScript(ctx context.Context, scriptPath string, modelID string) error {
+	return nil
+}
+func (m *mockGuardManager) Stop(ctx context.Context) error { return nil }
 func (m *mockGuardManager) CallInspect(ctx context.Context, req *guard.InspectionRequest) (*guard.InspectionResult, error) {
 	return nil, nil
 }
@@ -233,16 +249,20 @@ func TestGuardEndpoints_Status(t *testing.T) {
 
 	// 2. Mock manager active state
 	now := time.Now()
-	server.SetGuardManager(&mockGuardManager{
-		status: guard.ProcessStatus{
-			Running:      true,
-			ModelID:      "qwen3guard",
-			PID:          4242,
-			MemoryRSSMB:  48.5,
-			HealthStatus: "HEALTHY",
-			StartedAt:    &now,
-		},
+	server, _, cleanup = setupTestAdminServerWithGuards(t, func(d *AdminDependencies) {
+		d.GuardManager = &mockGuardManager{
+			status: guard.ProcessStatus{
+				Running:      true,
+				ModelID:      "qwen3guard",
+				PID:          4242,
+				MemoryRSSMB:  48.5,
+				HealthStatus: "HEALTHY",
+				StartedAt:    &now,
+			},
+		}
 	})
+	defer cleanup()
+	handler = server.Handler()
 
 	reqActive := httptest.NewRequest(http.MethodGet, "/admin/guards/status", nil)
 	recActive := httptest.NewRecorder()
@@ -313,19 +333,19 @@ func (m *mockGuardInstaller) GetProgress(modelID string) (guard.InstallProgress,
 	return guard.InstallProgress{}, false
 }
 func (m *mockGuardInstaller) SetOnProgress(cb func(guard.InstallProgress)) {}
-func (m *mockGuardInstaller) VenvDir() string                               { return "/tmp/.venv" }
-func (m *mockGuardInstaller) ModelsDir() string                             { return "/tmp/models" }
+func (m *mockGuardInstaller) VenvDir() string                              { return "/tmp/.venv" }
+func (m *mockGuardInstaller) ModelsDir() string                            { return "/tmp/models" }
 
 func TestGuardEndpoints_Install_And_Uninstall(t *testing.T) {
-	server, _, cleanup := setupTestAdminServerWithGuards(t)
-	defer cleanup()
-
 	mockInst := &mockGuardInstaller{
 		installed:   make(map[string]bool),
 		installing:  make(map[string]bool),
 		uninstalled: make(map[string]bool),
 	}
-	server.SetGuardInstaller(mockInst)
+	server, _, cleanup := setupTestAdminServerWithGuards(t, func(d *AdminDependencies) {
+		d.GuardInstaller = mockInst
+	})
+	defer cleanup()
 	handler := server.Handler()
 
 	// 1. POST /admin/guards/models/qwen3guard/install returns 202 Accepted
@@ -386,16 +406,16 @@ func TestGuardEndpoints_Install_And_Uninstall(t *testing.T) {
 }
 
 func TestGuardEndpoints_HITL_RespondAndPending(t *testing.T) {
-	server, _, cleanup := setupTestAdminServerWithGuards(t)
-	defer cleanup()
-
 	dispatcher := guard.NewHITLDispatcher(guard.HITLDispatcherConfig{
 		Timeout:       5 * time.Second,
 		DisableTTY:    true,
 		AllowRESTOnly: true,
-		WSHub:         server.WSHub(),
 	})
-	server.SetGuardHITL(dispatcher)
+	server, _, cleanup := setupTestAdminServerWithGuards(t, func(d *AdminDependencies) {
+		d.GuardHITL = dispatcher
+	})
+	defer cleanup()
+	dispatcher.SetWSHub(server.WSHub())
 
 	handler := server.Handler()
 
@@ -538,11 +558,12 @@ func (m *mockHotSwapManager) IsRunning() bool {
 }
 
 func TestGuardEndpoints_Activate_And_Deactivate(t *testing.T) {
-	server, cat, cleanup := setupTestAdminServerWithGuards(t)
+	mgr := &mockHotSwapManager{}
+	server, cat, cleanup := setupTestAdminServerWithGuards(t, func(d *AdminDependencies) {
+		d.GuardManager = mgr
+	})
 	defer cleanup()
 
-	mgr := &mockHotSwapManager{}
-	server.SetGuardManager(mgr)
 	handler := server.Handler()
 
 	ctx := context.Background()
@@ -753,7 +774,15 @@ func TestGuardEndpoints_ConnectModel(t *testing.T) {
 }
 
 func TestGuardEndpoints_DeactivateNonActiveModel_PreservesActiveRunningModel(t *testing.T) {
-	server, cat, cleanup := setupTestAdminServerWithGuards(t)
+	mockMgr := &mockGuardManager{
+		status: guard.ProcessStatus{
+			Running: true,
+			ModelID: "laya-mlx",
+		},
+	}
+	server, cat, cleanup := setupTestAdminServerWithGuards(t, func(d *AdminDependencies) {
+		d.GuardManager = mockMgr
+	})
 	defer cleanup()
 
 	ctx := context.Background()
@@ -761,15 +790,6 @@ func TestGuardEndpoints_DeactivateNonActiveModel_PreservesActiveRunningModel(t *
 	if err := cat.SetActive(ctx, "laya-mlx", true); err != nil {
 		t.Fatalf("failed to set laya-mlx active: %v", err)
 	}
-
-	// Fake manager running laya-mlx
-	mockMgr := &mockGuardManager{
-		status: guard.ProcessStatus{
-			Running: true,
-			ModelID: "laya-mlx",
-		},
-	}
-	server.SetGuardManager(mockMgr)
 
 	handler := server.Handler()
 
@@ -791,6 +811,3 @@ func TestGuardEndpoints_DeactivateNonActiveModel_PreservesActiveRunningModel(t *
 		t.Fatalf("expected laya-mlx to remain active, got %+v", active)
 	}
 }
-
-
-

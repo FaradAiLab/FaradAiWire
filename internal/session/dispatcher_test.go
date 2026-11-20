@@ -118,6 +118,8 @@ func (m *mockDispatcherRepo) ListAgents() ([]string, error) {
 	return nil, nil
 }
 
+func (m *mockDispatcherRepo) ListAgentSnapshots() ([]agent.AgentSnapshot, error) { return nil, nil }
+
 func (m *mockDispatcherRepo) GetDefaultAgent() (*agent.RouteConfig, error) {
 	return nil, nil
 }

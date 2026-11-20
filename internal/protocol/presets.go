@@ -80,7 +80,7 @@ func GetPresets() []PresetMetadata {
 			Name:            "Sentry Error & Performance",
 			Description:     "Query production stack traces, issue frequencies, error trends, and release telemetry.",
 			Category:        "devops",
-			Type:        "stdio",
+			Type:            "stdio",
 			Command:         "mcp-sentry",
 			Args:            []string{},
 			EnvRequirements: []string{"SENTRY_AUTH_TOKEN"},
@@ -119,7 +119,7 @@ func GetPresets() []PresetMetadata {
 			Category:    "data",
 			Type:        "stdio",
 			Command:     "npx",
-			Args:            []string{"-y", "@modelcontextprotocol/server-filesystem", "."},
+			Args:        []string{"-y", "@modelcontextprotocol/server-filesystem", "."},
 			Icon:        "folder",
 			DocURL:      "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
 		},
@@ -265,4 +265,3 @@ func GetPresets() []PresetMetadata {
 func GetPresetsCatalog() []PresetMetadata {
 	return GetPresets()
 }
-

@@ -1,6 +1,6 @@
 //go:build windows
 
-package admin
+package mcpprobe
 
 import (
 	"os/exec"

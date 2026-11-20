@@ -40,6 +40,8 @@ func (m *mockAggregatorRepo) ListAgents() ([]string, error) {
 	return list, nil
 }
 
+func (m *mockAggregatorRepo) ListAgentSnapshots() ([]AgentSnapshot, error) { return nil, nil }
+
 func (m *mockAggregatorRepo) GetDefaultAgent() (*RouteConfig, error) {
 	if def, ok := m.configs["default"]; ok {
 		return def, nil

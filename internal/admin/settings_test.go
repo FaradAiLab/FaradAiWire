@@ -63,14 +63,17 @@ func setupTestAdminSettings(t *testing.T) (*AdminServer, *settings.DuckDBStore, 
 		RuntimeMode: config.RuntimeModeStandalone,
 	}
 
-	server := NewAdminServer(cfg, func() error { return nil }, func() {})
-	server.SetSettingsStore(store)
-	server.SetSettingsCache(cache)
-
 	logger := &mockAuditLogger{}
-	server.mu.Lock()
-	server.telemetryEngine = &mockTelemetryWithLogger{mockAuditLogger: logger}
-	server.mu.Unlock()
+	telemetry := &mockTelemetryWithLogger{mockAuditLogger: logger}
+	server := NewAdminServer(AdminDependencies{
+		Config:          cfg,
+		ReloadFunc:      func() error { return nil },
+		SchemaClearFunc: func() {},
+		SettingsStore:   store,
+		SettingsCache:   cache,
+		TelemetryEngine: telemetry,
+		AuditLoggers:    []AuditEventLogger{telemetry},
+	})
 
 	return server, store, cache, logger
 }
@@ -288,7 +291,11 @@ filters:
 		RuntimeMode: config.RuntimeModeStandalone,
 		ConfigPath:  configPath,
 	}
-	server := NewAdminServer(cfg, func() error { return nil }, func() {})
+	server := NewAdminServer(AdminDependencies{
+		Config:          cfg,
+		ReloadFunc:      func() error { return nil },
+		SchemaClearFunc: func() {},
+	})
 	handler := server.Handler()
 
 	// Toggle prefill_block to false
@@ -360,20 +367,24 @@ func TestConfigToggle_PersistsToDuckDBAndUsesReloadConfig(t *testing.T) {
 	var inMemoryReloadCalled int
 
 	var server *AdminServer
-	server = NewAdminServer(cfg, func() error {
-		diskReloadCalled++
-		// Simulate disk load that would revert if invoked by toggle
-		reloaded := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
-		reloaded.Filters.PrefillBlock.Enabled = true
-		reloaded.Filters.DLP.Enabled = true
-		server.SetConfig(reloaded)
-		return nil
-	}, func() {})
-	server.SetSettingsStore(store)
-	server.SetReloadConfigFunc(func(nextCfg *config.Config) error {
-		inMemoryReloadCalled++
-		server.SetConfig(nextCfg)
-		return nil
+	server = NewAdminServer(AdminDependencies{
+		Config: cfg,
+		ReloadFunc: func() error {
+			diskReloadCalled++
+			// Simulate disk load that would revert if invoked by toggle
+			reloaded := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+			reloaded.Filters.PrefillBlock.Enabled = true
+			reloaded.Filters.DLP.Enabled = true
+			server.SetConfig(reloaded)
+			return nil
+		},
+		SchemaClearFunc: func() {},
+		SettingsStore:   store,
+		ReloadConfigFunc: func(nextCfg *config.Config) error {
+			inMemoryReloadCalled++
+			server.SetConfig(nextCfg)
+			return nil
+		},
 	})
 
 	handler := server.Handler()
@@ -423,8 +434,10 @@ func TestConfigToggle_StoreErrorFailsClosed(t *testing.T) {
 	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
 	cfg.Filters.DLP.Enabled = true
 
-	server := NewAdminServer(cfg, nil, nil)
-	server.SetSettingsStore(&failingFilterStore{})
+	server := NewAdminServer(AdminDependencies{
+		Config:        cfg,
+		SettingsStore: &failingFilterStore{},
+	})
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/config/toggle", bytes.NewReader([]byte(`{"filter":"dlp","enabled":false}`)))
 	req.Header.Set("Content-Type", "application/json")
@@ -456,18 +469,22 @@ func TestConfigToggle_ResetFilterToBaseline(t *testing.T) {
 
 	var server *AdminServer
 	var reloadCalled int
-	server = NewAdminServer(cfg, func() error {
-		reloadCalled++
-		// Simulate disk load with dlp=true
-		base := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
-		base.Filters.DLP.Enabled = true
-		server.SetConfig(base)
-		return nil
-	}, func() {})
-	server.SetSettingsStore(store)
-	server.SetReloadConfigFunc(func(nextCfg *config.Config) error {
-		server.SetConfig(nextCfg)
-		return nil
+	server = NewAdminServer(AdminDependencies{
+		Config: cfg,
+		ReloadFunc: func() error {
+			reloadCalled++
+			// Simulate disk load with dlp=true
+			base := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+			base.Filters.DLP.Enabled = true
+			server.SetConfig(base)
+			return nil
+		},
+		SchemaClearFunc: func() {},
+		SettingsStore:   store,
+		ReloadConfigFunc: func(nextCfg *config.Config) error {
+			server.SetConfig(nextCfg)
+			return nil
+		},
 	})
 	handler := server.Handler()
 
@@ -504,11 +521,13 @@ func TestStatus_GuardRespectsConfigFlagEvenWhenRunnerWarm(t *testing.T) {
 	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
 	cfg.Filters.Guard.Enabled = false
 
-	server := NewAdminServer(cfg, nil, nil)
-	server.SetGuardManager(&mockGuardManager{
-		status: guard.ProcessStatus{
-			Running: true,
-			ModelID: "qwen3guard",
+	server := NewAdminServer(AdminDependencies{
+		Config: cfg,
+		GuardManager: &mockGuardManager{
+			status: guard.ProcessStatus{
+				Running: true,
+				ModelID: "qwen3guard",
+			},
 		},
 	})
 
@@ -540,7 +559,7 @@ func TestSettingsAPI_UpdateRejectsFilterKeys(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
-	server := NewAdminServer(cfg, nil, nil)
+	server := NewAdminServer(AdminDependencies{Config: cfg})
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/settings", bytes.NewReader([]byte(`{"key":"filters.dlp","value":false}`)))
 	req.Header.Set("Content-Type", "application/json")
@@ -558,7 +577,7 @@ func TestConfigToggle_MissingEnabledAndReloadError(t *testing.T) {
 	t.Run("MissingEnabledReturns400", func(t *testing.T) {
 		t.Parallel()
 		cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
-		server := NewAdminServer(cfg, nil, nil)
+		server := NewAdminServer(AdminDependencies{Config: cfg})
 
 		req := httptest.NewRequest(http.MethodPost, "/admin/config/toggle", bytes.NewReader([]byte(`{"filter":"dlp"}`)))
 		req.Header.Set("Content-Type", "application/json")
@@ -587,10 +606,12 @@ func TestConfigToggle_MissingEnabledAndReloadError(t *testing.T) {
 
 		cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
 		cfg.Filters.DLP.Enabled = true
-		server := NewAdminServer(cfg, nil, nil)
-		server.SetSettingsStore(store)
-		server.SetReloadConfigFunc(func(*config.Config) error {
-			return errors.New("simulated pipeline failure")
+		server := NewAdminServer(AdminDependencies{
+			Config:        cfg,
+			SettingsStore: store,
+			ReloadConfigFunc: func(*config.Config) error {
+				return errors.New("simulated pipeline failure")
+			},
 		})
 
 		req := httptest.NewRequest(http.MethodPost, "/admin/config/toggle", bytes.NewReader([]byte(`{"filter":"dlp","enabled":false}`)))
@@ -622,12 +643,15 @@ func TestConfigToggle_ConcurrentRequests_RaceFree(t *testing.T) {
 	}
 
 	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
-	server := NewAdminServer(cfg, nil, nil)
-	server.SetSettingsStore(store)
-	server.SetSettingsCache(settings.NewCache(nil))
-	server.SetReloadConfigFunc(func(next *config.Config) error {
-		server.SetConfig(next)
-		return nil
+	var server *AdminServer
+	server = NewAdminServer(AdminDependencies{
+		Config:        cfg,
+		SettingsStore: store,
+		SettingsCache: settings.NewCache(nil),
+		ReloadConfigFunc: func(next *config.Config) error {
+			server.SetConfig(next)
+			return nil
+		},
 	})
 
 	handler := server.Handler()
@@ -665,8 +689,10 @@ func TestSettings_ManagedMode_AllowsGET_BlocksMutations(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{RuntimeMode: config.RuntimeModeManaged}
-	server := NewAdminServer(cfg, nil, nil)
-	server.SetSettingsCache(settings.NewCache(nil))
+	server := NewAdminServer(AdminDependencies{
+		Config:        cfg,
+		SettingsCache: settings.NewCache(nil),
+	})
 	handler := server.Handler()
 
 	getReq := httptest.NewRequest(http.MethodGet, "/admin/settings", nil)
@@ -701,13 +727,16 @@ func TestSettings_LegacyValidationAndProbeTimeoutSec(t *testing.T) {
 	}
 
 	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone, PollIntervalSeconds: 30}
-	server := NewAdminServer(cfg, nil, nil)
-	server.SetSettingsStore(store)
 	cache := settings.NewCache(settings.DefaultOperationalSettings())
-	server.SetSettingsCache(cache)
-	server.SetReloadConfigFunc(func(next *config.Config) error {
-		server.SetConfig(next)
-		return nil
+	var server *AdminServer
+	server = NewAdminServer(AdminDependencies{
+		Config:        cfg,
+		SettingsStore: store,
+		SettingsCache: cache,
+		ReloadConfigFunc: func(next *config.Config) error {
+			server.SetConfig(next)
+			return nil
+		},
 	})
 	handler := server.Handler()
 
@@ -767,9 +796,11 @@ func TestAgents_MaskSecrets_HydrateEnvOnPUT_AndArchivePerms(t *testing.T) {
 		AgentsDir:    agentsDir,
 		ProtocolsDir: protosDir,
 	}
-	server := NewAdminServer(cfg, nil, nil)
-	server.SetAgentRepository(repo)
-	server.SetProtocolStore(pStore)
+	server := NewAdminServer(AdminDependencies{
+		Config:        cfg,
+		AgentRepo:     repo,
+		ProtocolStore: pStore,
+	})
 	handler := server.Handler()
 
 	// 1. GET masks secrets in response while keeping disk unmasked
@@ -854,7 +885,7 @@ func BenchmarkHandleStatus(b *testing.B) {
 		ListenPort:  8090,
 		AdminPort:   8095,
 	}
-	server := NewAdminServer(cfg, nil, nil)
+	server := NewAdminServer(AdminDependencies{Config: cfg})
 	handler := server.Handler()
 	req := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
 
@@ -934,10 +965,12 @@ func TestSettingsResetAndToggle_RollbackDuckDBOnReloadFailure(t *testing.T) {
 
 		cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
 		cfg.Filters.DLP.Enabled = true
-		server := NewAdminServer(cfg, nil, nil)
-		server.SetSettingsStore(store)
-		server.SetReloadConfigFunc(func(*config.Config) error {
-			return errors.New("reload failed")
+		server := NewAdminServer(AdminDependencies{
+			Config:        cfg,
+			SettingsStore: store,
+			ReloadConfigFunc: func(*config.Config) error {
+				return errors.New("reload failed")
+			},
 		})
 
 		req := httptest.NewRequest(http.MethodPost, "/admin/config/toggle", bytes.NewReader([]byte(`{"filter":"dlp","enabled":false}`)))
@@ -971,10 +1004,12 @@ func TestSettingsResetAndToggle_RollbackDuckDBOnReloadFailure(t *testing.T) {
 
 		cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
 		cfg.Filters.DLP.Enabled = false
-		server := NewAdminServer(cfg, nil, nil)
-		server.SetSettingsStore(store)
-		server.SetReloadConfigFunc(func(*config.Config) error {
-			return errors.New("reload failed")
+		server := NewAdminServer(AdminDependencies{
+			Config:        cfg,
+			SettingsStore: store,
+			ReloadConfigFunc: func(*config.Config) error {
+				return errors.New("reload failed")
+			},
 		})
 
 		req := httptest.NewRequest(http.MethodPost, "/admin/settings/reset", bytes.NewReader([]byte(`{"key":"filters.dlp"}`)))

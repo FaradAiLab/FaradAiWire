@@ -115,15 +115,11 @@ func TestStandaloneGateway_ZeroEgress(t *testing.T) {
 		HotReload:   false,
 	}
 
+	egressTracker := &egressRecordingTransport{}
 	provider := &mockConfigProvider{cfg: cfg}
-	srv, err := gateway.NewServer(cfg, provider)
+	srv, err := gateway.NewServer(cfg, provider, gateway.WithAdminSafeHTTPClient(&http.Client{Transport: egressTracker}))
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
-	}
-
-	egressTracker := &egressRecordingTransport{}
-	if srv.AdminServer() != nil {
-		srv.AdminServer().SetSafeHTTPClient(&http.Client{Transport: egressTracker})
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

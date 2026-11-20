@@ -14,294 +14,152 @@ import (
 )
 
 func (a *AdminServer) getGuardCatalog() guard.CatalogStore {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
 	return a.guardCatalog
 }
 
 func (a *AdminServer) getGuardManager() guard.Manager {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
 	return a.guardManager
 }
 
 func (a *AdminServer) getGuardInstaller() guard.ModelInstaller {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
 	return a.guardInstaller
 }
 
-// handleGuardStatus reports the runtime status of the child AI Guard stdio subprocess.
-// Endpoint:
-//   GET /admin/guards/status
-func (a *AdminServer) handleGuardStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", "GET")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "METHOD_NOT_ALLOWED",
-			"message": "Only GET method is supported for guard status",
-		})
+func (a *AdminServer) requireGuardCatalog(w http.ResponseWriter) guard.CatalogStore {
+	catalog := a.getGuardCatalog()
+	if catalog == nil {
+		writeError(w, http.StatusServiceUnavailable, "GUARD_CATALOG_UNAVAILABLE", "Guard model catalog is not initialized or database is unavailable")
+		return nil
+	}
+	return catalog
+}
+
+func requireValidGuardModelID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	modelID := strings.TrimSpace(r.PathValue("id"))
+	if err := pathguard.ValidateSafeIdentifier(modelID); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_MODEL_ID", "Invalid model ID format: "+err.Error())
+		return "", false
+	}
+	return modelID, true
+}
+
+func writeCatalogGetError(w http.ResponseWriter, modelID string, err error) {
+	if errors.Is(err, guard.ErrModelNotFound) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("Guard model '%s' not found", modelID))
 		return
 	}
+	writeError(w, http.StatusInternalServerError, "CATALOG_GET_FAILED", err.Error())
+}
 
-	w.Header().Set("Content-Type", "application/json")
+// handleGuardStatus reports the runtime status of the child AI Guard stdio subprocess (GET /admin/guards/status).
+func (a *AdminServer) handleGuardStatus(w http.ResponseWriter, r *http.Request) {
 	mgr := a.getGuardManager()
 	if mgr == nil {
-		json.NewEncoder(w).Encode(guard.ProcessStatus{
+		writeJSON(w, http.StatusOK, guard.ProcessStatus{
 			Running:      false,
 			HealthStatus: "STOPPED",
 		})
 		return
 	}
 
-	status := mgr.Status()
-	json.NewEncoder(w).Encode(status)
+	writeJSON(w, http.StatusOK, mgr.Status())
 }
 
-// handleGuardModels manages administrative query and lifecycle endpoints for Guard Models.
-// Endpoints:
-//   GET    /admin/guards/models               -> List all catalog models with metrics
-//   GET    /admin/guards/models/{id}          -> Retrieve single model specification
-//   POST   /admin/guards/models/{id}/install  -> Trigger asynchronous runtime bootstrap and model staging
-//   GET    /admin/guards/models/{id}/progress -> Check installation progress
-//   POST   /admin/guards/models/{id}/activate -> Zero-downtime hot-swap and process activation
-//   POST   /admin/guards/models/deactivate    -> Deactivate active model; switch to L1-Only mode
-//   POST   /admin/guards/models/{id}/deactivate -> Deactivate specific model
-//   POST   /admin/guards/models/{id}/policy   -> Configure threat enforcement policy and critical tools
-//   DELETE /admin/guards/models/{id}          -> Purge model weights and revert state to NOT_INSTALLED
-func (a *AdminServer) handleGuardModels(w http.ResponseWriter, r *http.Request) {
-	catalog := a.getGuardCatalog()
+// handleListGuardModels lists all catalog guard models with runtime metrics (GET /admin/guards/models).
+func (a *AdminServer) handleListGuardModels(w http.ResponseWriter, r *http.Request) {
+	catalog := a.requireGuardCatalog(w)
 	if catalog == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "GUARD_CATALOG_UNAVAILABLE",
-			"message": "Guard model catalog is not initialized or database is unavailable",
-		})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	relPath := strings.TrimPrefix(r.URL.Path, "/admin/guards/models")
-	relPath = strings.Trim(relPath, "/")
-
-	// 1. List all models: GET /admin/guards/models
-	if relPath == "" {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", "GET")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "METHOD_NOT_ALLOWED",
-				"message": "Only GET method is supported for catalog browsing",
-			})
-			return
-		}
-
-		models, err := catalog.List(r.Context())
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "CATALOG_QUERY_FAILED",
-				"message": err.Error(),
-			})
-			return
-		}
-		if models == nil {
-			models = make([]*guard.Model, 0)
-		}
-
-		if r.URL.Query().Get("format") == "array" {
-			json.NewEncoder(w).Encode(models)
-			return
-		}
-
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"models": models,
-		})
+	models, err := catalog.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "CATALOG_QUERY_FAILED", err.Error())
 		return
 	}
-
-	// 2. Global deactivate route: POST /admin/guards/models/deactivate
-	if relPath == "deactivate" {
-		a.handleGuardDeactivateGlobal(w, r, catalog)
-		return
+	if models == nil {
+		models = make([]*guard.Model, 0)
 	}
 
-	// 3. Model connect route: POST /admin/guards/models/{id}/connect
-	if strings.HasSuffix(relPath, "/connect") {
-		modelID := strings.TrimSuffix(relPath, "/connect")
-		modelID = strings.Trim(modelID, "/")
-		a.handleGuardConnect(w, r, catalog, modelID)
+	if r.URL.Query().Get("format") == "array" {
+		writeJSON(w, http.StatusOK, models)
 		return
 	}
-
-	// 4. Model activate route: POST /admin/guards/models/{id}/activate
-	if strings.HasSuffix(relPath, "/activate") {
-		modelID := strings.TrimSuffix(relPath, "/activate")
-		modelID = strings.Trim(modelID, "/")
-		a.handleGuardActivate(w, r, catalog, modelID)
-		return
-	}
-
-	// 5. Specific model deactivate route: POST /admin/guards/models/{id}/deactivate
-	if strings.HasSuffix(relPath, "/deactivate") {
-		modelID := strings.TrimSuffix(relPath, "/deactivate")
-		modelID = strings.Trim(modelID, "/")
-		a.handleGuardDeactivateModel(w, r, catalog, modelID)
-		return
-	}
-
-	// 6. Action Policy Drawer route: POST/PUT /admin/guards/models/{id}/policy
-	if strings.HasSuffix(relPath, "/policy") {
-		a.handleGuardPolicyUpdate(w, r, catalog, relPath)
-		return
-	}
-
-	// 7. Handle /install and /progress sub-routes
-	if strings.HasSuffix(relPath, "/install") || strings.HasSuffix(relPath, "/progress") {
-		a.handleGuardInstallOrProgress(w, r, catalog, relPath)
-		return
-	}
-
-	// 8. Direct model endpoints: GET /admin/guards/models/{id} or DELETE /admin/guards/models/{id}
-	if err := pathguard.ValidateSafeIdentifier(relPath); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "INVALID_MODEL_ID",
-			"message": "Invalid model ID format: " + err.Error(),
-		})
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		m, err := catalog.Get(r.Context(), relPath)
-		if err != nil {
-			if errors.Is(err, guard.ErrModelNotFound) {
-				w.WriteHeader(http.StatusNotFound)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "NOT_FOUND",
-					"message": fmt.Sprintf("Guard model '%s' not found in catalog", relPath),
-				})
-				return
-			}
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "CATALOG_GET_FAILED",
-				"message": err.Error(),
-			})
-			return
-		}
-		json.NewEncoder(w).Encode(m)
-		return
-
-	case http.MethodDelete:
-		installer := a.getGuardInstaller()
-		if installer == nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INSTALLER_UNAVAILABLE",
-				"message": "Guard model installer is not initialized",
-			})
-			return
-		}
-
-		mgr := a.getGuardManager()
-		if mgr != nil && mgr.Status().ModelID == relPath && mgr.IsRunning() {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = mgr.Stop(stopCtx)
-			cancel()
-		}
-
-		if err := installer.Uninstall(r.Context(), relPath); err != nil {
-			if errors.Is(err, guard.ErrModelNotFound) {
-				w.WriteHeader(http.StatusNotFound)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "NOT_FOUND",
-					"message": fmt.Sprintf("Guard model '%s' not found", relPath),
-				})
-				return
-			}
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "UNINSTALL_FAILED",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		hub := a.WSHub()
-		if hub != nil {
-			hub.Broadcast(map[string]interface{}{
-				"type":            "GUARD_STATUS_CHANGED",
-				"active_model_id": "",
-				"running":         false,
-			})
-			hub.Broadcast(map[string]interface{}{
-				"type":     "GUARD_MODEL_UPDATED",
-				"model_id": relPath,
-			})
-		}
-
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":   "NOT_INSTALLED",
-			"model_id": relPath,
-			"message":  fmt.Sprintf("Model '%s' uninstalled and weights purged", relPath),
-		})
-		return
-
-	default:
-		w.Header().Set("Allow", "GET, DELETE")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "METHOD_NOT_ALLOWED",
-			"message": "Only GET and DELETE methods are supported for model details",
-		})
-		return
-	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"models": models})
 }
 
-// handleGuardPolicyUpdate handles threat policy configuration for a model.
-// POST/PUT /admin/guards/models/{id}/policy
-func (a *AdminServer) handleGuardPolicyUpdate(w http.ResponseWriter, r *http.Request, catalog guard.CatalogStore, relPath string) {
-	if r.Method != http.MethodPost && r.Method != http.MethodPut {
-		w.Header().Set("Allow", "POST, PUT")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "METHOD_NOT_ALLOWED",
-			"message": "Only POST and PUT methods are supported for policy configuration",
-		})
+// handleGetGuardModel retrieves a single guard model specification (GET /admin/guards/models/{id}).
+func (a *AdminServer) handleGetGuardModel(w http.ResponseWriter, r *http.Request) {
+	catalog := a.requireGuardCatalog(w)
+	if catalog == nil {
+		return
+	}
+	modelID, ok := requireValidGuardModelID(w, r)
+	if !ok {
 		return
 	}
 
-	modelID := strings.TrimSuffix(relPath, "/policy")
-	modelID = strings.Trim(modelID, "/")
-	if err := pathguard.ValidateSafeIdentifier(modelID); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "INVALID_MODEL_ID",
-			"message": "Invalid model ID format: " + err.Error(),
-		})
-		return
-	}
-
-	_, err := catalog.Get(r.Context(), modelID)
+	m, err := catalog.Get(r.Context(), modelID)
 	if err != nil {
+		writeCatalogGetError(w, modelID, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleDeleteGuardModel purges guard model weights and reverts state to NOT_INSTALLED (DELETE /admin/guards/models/{id}).
+func (a *AdminServer) handleDeleteGuardModel(w http.ResponseWriter, r *http.Request) {
+	if a.requireGuardCatalog(w) == nil {
+		return
+	}
+	modelID, ok := requireValidGuardModelID(w, r)
+	if !ok {
+		return
+	}
+
+	installer := a.getGuardInstaller()
+	if installer == nil {
+		writeError(w, http.StatusServiceUnavailable, "INSTALLER_UNAVAILABLE", "Guard model installer is not initialized")
+		return
+	}
+
+	mgr := a.getGuardManager()
+	if mgr != nil && mgr.Status().ModelID == modelID {
+		stopRunningGuardManager(mgr)
+	}
+
+	if err := installer.Uninstall(r.Context(), modelID); err != nil {
 		if errors.Is(err, guard.ErrModelNotFound) {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "NOT_FOUND",
-				"message": fmt.Sprintf("Guard model '%s' not found", modelID),
-			})
+			writeError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("Guard model '%s' not found", modelID))
 			return
 		}
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "CATALOG_GET_FAILED",
-			"message": err.Error(),
-		})
+		writeError(w, http.StatusInternalServerError, "UNINSTALL_FAILED", err.Error())
+		return
+	}
+
+	a.broadcastGuardStatus("", false, nil)
+	a.broadcastGuardModelUpdated(modelID)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":   "NOT_INSTALLED",
+		"model_id": modelID,
+		"message":  fmt.Sprintf("Model '%s' uninstalled and weights purged", modelID),
+	})
+}
+
+// handleGuardPolicyUpdate configures threat enforcement policy and critical tools (POST/PUT /admin/guards/models/{id}/policy).
+func (a *AdminServer) handleGuardPolicyUpdate(w http.ResponseWriter, r *http.Request) {
+	catalog := a.requireGuardCatalog(w)
+	if catalog == nil {
+		return
+	}
+	modelID, ok := requireValidGuardModelID(w, r)
+	if !ok {
+		return
+	}
+
+	if _, err := catalog.Get(r.Context(), modelID); err != nil {
+		writeCatalogGetError(w, modelID, err)
 		return
 	}
 
@@ -309,13 +167,8 @@ func (a *AdminServer) handleGuardPolicyUpdate(w http.ResponseWriter, r *http.Req
 		DefaultAction string   `json:"default_action"`
 		CriticalTools []string `json:"critical_tools"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
-	if err := json.NewDecoder(r.Body).Decode(&polReq); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "INVALID_JSON",
-			"message": "Failed to parse action policy JSON payload: " + err.Error(),
-		})
+	if err := decodeJSON(w, r, maxSmallAdminBodyBytes, &polReq); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse action policy JSON payload: "+err.Error())
 		return
 	}
 
@@ -323,15 +176,12 @@ func (a *AdminServer) handleGuardPolicyUpdate(w http.ResponseWriter, r *http.Req
 		polReq.DefaultAction = string(guard.ThreatActionHITL)
 	}
 
-	var sanitizedTools []string
+	sanitizedTools := make([]string, 0, len(polReq.CriticalTools))
 	for _, tool := range polReq.CriticalTools {
 		trimmed := strings.TrimSpace(tool)
 		if trimmed != "" && len(trimmed) <= 128 {
 			sanitizedTools = append(sanitizedTools, trimmed)
 		}
-	}
-	if sanitizedTools == nil {
-		sanitizedTools = []string{}
 	}
 
 	critJSON, err := json.Marshal(sanitizedTools)
@@ -340,26 +190,25 @@ func (a *AdminServer) handleGuardPolicyUpdate(w http.ResponseWriter, r *http.Req
 	}
 
 	if err := catalog.UpdatePolicy(r.Context(), modelID, guard.ThreatAction(polReq.DefaultAction), string(critJSON)); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "POLICY_UPDATE_FAILED",
-			"message": err.Error(),
-		})
+		writeError(w, http.StatusInternalServerError, "POLICY_UPDATE_FAILED", err.Error())
 		return
 	}
 
-	hub := a.WSHub()
-	if hub != nil {
-		hub.Broadcast(map[string]interface{}{
-			"type":     "GUARD_MODEL_UPDATED",
-			"model_id": modelID,
-		})
-	}
+	a.broadcastGuardModelUpdated(modelID)
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":         "updated",
 		"model_id":       modelID,
 		"default_action": polReq.DefaultAction,
 		"critical_tools": sanitizedTools,
 	})
+}
+
+func stopRunningGuardManager(mgr guard.Manager) {
+	if mgr == nil || !mgr.IsRunning() {
+		return
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = mgr.Stop(stopCtx)
 }

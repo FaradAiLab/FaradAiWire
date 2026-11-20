@@ -518,10 +518,14 @@ func TestServer_AdminReload_Integration(t *testing.T) {
 	}
 
 	// Create admin server with the server's Reload hook
-	adminSrv := admin.NewAdminServer(initialCfg, func() error {
-		return srv.Reload()
-	}, func() {
-		srv.Pipeline().ClearBaselines()
+	adminSrv := admin.NewAdminServer(admin.AdminDependencies{
+		Config: initialCfg,
+		ReloadFunc: func() error {
+			return srv.Reload()
+		},
+		SchemaClearFunc: func() {
+			srv.Pipeline().ClearBaselines()
+		},
 	})
 	handler := adminSrv.Handler()
 

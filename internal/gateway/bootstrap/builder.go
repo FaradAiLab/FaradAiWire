@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/logger"
 	"github.com/FaradAiLab/FaradAiWire/internal/mcpconfig"
 	"github.com/FaradAiLab/FaradAiWire/internal/policy"
+	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
 	"github.com/FaradAiLab/FaradAiWire/internal/proxy"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
 	"github.com/FaradAiLab/FaradAiWire/internal/settings"
@@ -48,6 +50,7 @@ type Dependencies struct {
 	Pipeline        *filter.Pipeline
 	Router          *adaptive.Router
 	AgentRepo       agent.Repository
+	ProtocolStore   protocol.Store
 	SessionMgr      *session.Manager
 	KeyStore        auth.KeyStore
 	GuardManager    guard.Manager
@@ -146,6 +149,8 @@ type Callbacks struct {
 	OnReload         func() error
 	OnReloadConfig   func(*config.Config) error
 	OnClearBaselines func()
+	SafeHTTPClient   *http.Client
+	GuardManager     guard.Manager
 }
 
 // Build constructs and wires all Gateway subsystems according to the provided configuration.
@@ -330,6 +335,36 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	agentsDir := cfg.GetAgentsDir()
 	agentRepo := agent.NewFSRepository(agentsDir, "/etc/faradaiwire/agents")
 	deps.AgentRepo = agentRepo
+
+	protocolsDir := cfg.GetProtocolsDir()
+	protocolStore, pErr := protocol.NewFSStore(protocolsDir)
+	if pErr != nil {
+		slog.Warn("Failed to initialize protocol store", slog.String("dir", protocolsDir), slog.String("error", pErr.Error()))
+	} else {
+		protocolStore.SetAgentUsageChecker(func(protocolID string) ([]string, error) {
+			snapshots, err := agentRepo.ListAgentSnapshots()
+			if err != nil {
+				return nil, err
+			}
+			var inUse []string
+			for _, snap := range snapshots {
+				for _, p := range snap.Config.Protocols {
+					if strings.EqualFold(p.ID, protocolID) || strings.EqualFold(p.Name, protocolID) {
+						inUse = append(inUse, snap.Name)
+						break
+					}
+				}
+			}
+			return inUse, nil
+		})
+		if protocolsDir == "./protocols" || protocolsDir == "protocols" {
+			_ = protocolStore.EnsureGitIgnore(".")
+		} else if cleanWireDir := filepath.Clean(config.DefaultFaradAiWireDir()); filepath.Clean(protocolsDir) == filepath.Join(cleanWireDir, "protocols") {
+			_ = protocolStore.EnsureGitIgnore(cleanWireDir)
+		}
+		deps.ProtocolStore = protocolStore
+	}
+
 	sessionMgr := session.NewManager(agentRepo, &http.Client{Timeout: 0})
 	if deps.SettingsCache != nil {
 		sessionMgr.SetSettingsCache(deps.SettingsCache)
@@ -346,15 +381,20 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	deps.KeyStore = keyStore
 
 	// 10. Decoupled AI Guard HTTP Inference Provider Client
-	httpCfg := guard.DefaultHTTPProviderConfig()
-	if cfg.Filters.Guard.Discovery.CustomURL != "" {
-		httpCfg.BaseURL = cfg.Filters.Guard.Discovery.CustomURL
-	} else if cfg.Filters.Guard.Discovery.Mode == "docker" && cfg.Filters.Guard.Discovery.DockerURL != "" {
-		httpCfg.BaseURL = cfg.Filters.Guard.Discovery.DockerURL
-	} else if cfg.Filters.Guard.Discovery.OllamaURL != "" {
-		httpCfg.BaseURL = cfg.Filters.Guard.Discovery.OllamaURL
+	var guardManager guard.Manager
+	if len(cb) > 0 && cb[0].GuardManager != nil {
+		guardManager = cb[0].GuardManager
+	} else {
+		httpCfg := guard.DefaultHTTPProviderConfig()
+		if cfg.Filters.Guard.Discovery.CustomURL != "" {
+			httpCfg.BaseURL = cfg.Filters.Guard.Discovery.CustomURL
+		} else if cfg.Filters.Guard.Discovery.Mode == "docker" && cfg.Filters.Guard.Discovery.DockerURL != "" {
+			httpCfg.BaseURL = cfg.Filters.Guard.Discovery.DockerURL
+		} else if cfg.Filters.Guard.Discovery.OllamaURL != "" {
+			httpCfg.BaseURL = cfg.Filters.Guard.Discovery.OllamaURL
+		}
+		guardManager = guard.NewHTTPProvider(httpCfg)
 	}
-	guardManager := guard.NewHTTPProvider(httpCfg)
 	deps.GuardManager = guardManager
 
 	// 11. Dual-Channel HITL Safety Dispatcher (GUARD-005)
@@ -444,50 +484,68 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	}
 
 	if cfg.AdminPort > 0 || cfg.IsStandalone() || adminPort > 0 {
-		adminSrv := admin.NewAdminServer(cfg, reloadHook, clearBaselinesHook)
-		adminSrv.SetKeyStore(keyStore)
-		adminSrv.SetAgentRepository(agentRepo)
-		adminSrv.SetActiveSessionChecker(sessionMgr.HasActiveSessions)
-		if deps.TelemetryEngine != nil {
-			adminSrv.SetTelemetryEngine(deps.TelemetryEngine)
+		var safeClient *http.Client
+		if len(cb) > 0 {
+			safeClient = cb[0].SafeHTTPClient
 		}
-		if deps.EventBroker != nil {
-			adminSrv.SetEventBroker(deps.EventBroker)
+		var yamlProv *config.YAMLConfigProvider
+		if p, ok := provider.(*config.YAMLConfigProvider); ok {
+			yamlProv = p
 		}
-		if deps.GuardCatalog != nil {
-			adminSrv.SetGuardCatalog(deps.GuardCatalog)
-		}
+		var adminSrv *admin.AdminServer
+		var policyCompiler *policy.Compiler
 		if deps.PolicyStore != nil {
-			adminSrv.SetPolicyStore(deps.PolicyStore)
 			reloader := dlp.ReloaderFunc(func(agentName string) {
+				if adminSrv == nil {
+					return
+				}
 				if activePipe := adminSrv.GetPipeline(); activePipe != nil {
 					if dlpFilter, ok := activePipe.GetFilter("dlp").(*dlp.DLPFilter); ok && dlpFilter != nil {
 						dlpFilter.ReloadAgentDLP(agentName)
 					}
 				}
 			})
-			adminSrv.SetPolicyCompiler(policy.NewCompiler(deps.PolicyStore, policy.WithReloader(reloader)))
+			policyCompiler = policy.NewCompiler(deps.PolicyStore, policy.WithReloader(reloader))
 		}
-		if deps.SchemaStore != nil {
-			adminSrv.SetSchemaStore(deps.SchemaStore)
+		var auditLoggers []admin.AuditEventLogger
+		if deps.TelemetryEngine != nil {
+			auditLoggers = append(auditLoggers, deps.TelemetryEngine)
 		}
-		if deps.SettingsStore != nil {
-			adminSrv.SetSettingsStore(deps.SettingsStore)
+		if deps.EventBroker != nil {
+			auditLoggers = append(auditLoggers, deps.EventBroker)
 		}
-		if deps.SettingsCache != nil {
-			adminSrv.SetSettingsCache(deps.SettingsCache)
-		}
-		if yamlProv, ok := provider.(*config.YAMLConfigProvider); ok {
-			adminSrv.SetConfigProvider(yamlProv)
-		}
-		adminSrv.SetGuardManager(guardManager)
-		adminSrv.SetGuardHITL(hitlDispatcher)
-		if reloadConfigHook != nil {
-			adminSrv.SetReloadConfigFunc(reloadConfigHook)
-		}
-		adminSrv.SetPipeline(pipe)
-		adminSrv.SetGuardInstaller(guardInstaller)
 
+		adminDeps := admin.AdminDependencies{
+			Config:               cfg,
+			ConfigProvider:       yamlProv,
+			AgentRepo:            agentRepo,
+			ProtocolStore:        deps.ProtocolStore,
+			KeyStore:             keyStore,
+			GuardCatalog:         deps.GuardCatalog,
+			GuardManager:         guardManager,
+			GuardInstaller:       guardInstaller,
+			GuardHITL:            hitlDispatcher,
+			PolicyStore:          deps.PolicyStore,
+			PolicyCompiler:       policyCompiler,
+			SchemaStore:          deps.SchemaStore,
+			SettingsStore:        deps.SettingsStore,
+			SettingsCache:        deps.SettingsCache,
+			AuditLoggers:         auditLoggers,
+			Pipeline:             pipe,
+			SafeHTTPClient:       safeClient,
+			ReloadFunc:           reloadHook,
+			ReloadConfigFunc:     reloadConfigHook,
+			SchemaClearFunc:      clearBaselinesHook,
+			ActiveSessionChecker: sessionMgr.HasActiveSessions,
+		}
+		if deps.TelemetryEngine != nil {
+			adminDeps.TelemetryEngine = deps.TelemetryEngine
+		}
+		if deps.EventBroker != nil {
+			adminDeps.EventBroker = deps.EventBroker
+		}
+
+		adminSrv = admin.NewAdminServer(adminDeps)
 		if adminSrv.WSHub() != nil {
 			hitlDispatcher.SetWSHub(adminSrv.WSHub())
 		}

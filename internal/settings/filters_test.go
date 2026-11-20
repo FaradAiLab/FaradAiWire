@@ -3,6 +3,7 @@ package settings
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"testing"
 
 	_ "github.com/marcboeker/go-duckdb"
@@ -284,6 +285,88 @@ func TestApplyFilterToggleToConfig_SchemaDirIndependentHydration(t *testing.T) {
 	}
 	if cfg.Filters.SchemaValidation.BaselinePinning {
 		t.Fatal("expected BaselinePinning not to be forced on when already partially initialized")
+	}
+}
+
+func TestOrderedFilterNames_MatchesFilterRegistry(t *testing.T) {
+	t.Parallel()
+
+	names := OrderedFilterNames()
+	if len(names) != len(FilterRegistry) {
+		t.Fatalf("OrderedFilterNames len=%d != FilterRegistry len=%d", len(names), len(FilterRegistry))
+	}
+	seen := make(map[string]bool, len(names))
+	for _, n := range names {
+		if seen[n] {
+			t.Fatalf("duplicate name %q in OrderedFilterNames", n)
+		}
+		seen[n] = true
+		if !IsSupportedFilterName(n) {
+			t.Fatalf("OrderedFilterNames entry %q missing from FilterRegistry", n)
+		}
+	}
+	// Returned slice must be safe from caller mutation.
+	names[0] = "mutated"
+	if OrderedFilterNames()[0] == "mutated" {
+		t.Fatal("expected OrderedFilterNames to return a cloned slice")
+	}
+}
+
+func TestBuildFilterStatusSummary(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil config returns all false and empty active filters", func(t *testing.T) {
+		t.Parallel()
+		summary := BuildFilterStatusSummary(nil)
+		if len(summary.ActiveFilters) != 0 {
+			t.Fatalf("expected 0 active filters for nil cfg, got %v", summary.ActiveFilters)
+		}
+		if len(summary.ConfigStates) != len(FilterRegistry) {
+			t.Fatalf("expected %d config states, got %d", len(FilterRegistry), len(summary.ConfigStates))
+		}
+		for _, v := range summary.ConfigStates {
+			if v {
+				t.Fatal("expected all ConfigStates false for nil cfg")
+			}
+		}
+	})
+
+	t.Run("tracks pipeline filters in active_filters and excludes injection_scanner", func(t *testing.T) {
+		t.Parallel()
+		cfg := &config.Config{
+			Filters: config.FiltersConfig{
+				PrefillBlock:     config.PrefillBlockConfig{Enabled: true},
+				DLP:              config.DLPConfig{Enabled: true},
+				Guard:            config.GuardConfig{Enabled: true},
+				InjectionScanner: config.InjectionScannerConfig{Enabled: true},
+			},
+		}
+		summary := BuildFilterStatusSummary(cfg)
+		wantActive := []string{"prefill_block", "dlp", "guard"}
+		if !slices.Equal(summary.ActiveFilters, wantActive) {
+			t.Fatalf("ActiveFilters = %v, want %v", summary.ActiveFilters, wantActive)
+		}
+		if !summary.ConfigStates["injection_scanner"] {
+			t.Fatal("expected ConfigStates[injection_scanner] = true")
+		}
+	})
+}
+
+func TestApplyRuntimeToggle(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{}
+	if isFilter, ok := ApplyRuntimeToggle(cfg, "dlp", true); !isFilter || !ok || !cfg.Filters.DLP.Enabled {
+		t.Fatalf("expected dlp filter toggle to succeed: isFilter=%v ok=%v enabled=%v", isFilter, ok, cfg.Filters.DLP.Enabled)
+	}
+	if isFilter, ok := ApplyRuntimeToggle(cfg, "auto_sync_mcp", true); isFilter || !ok || !cfg.AutoSyncMCP {
+		t.Fatalf("expected auto_sync_mcp legacy toggle to succeed: isFilter=%v ok=%v val=%v", isFilter, ok, cfg.AutoSyncMCP)
+	}
+	if isFilter, ok := ApplyRuntimeToggle(cfg, "auto_update_policies", true); isFilter || !ok || !cfg.AutoUpdatePolicies {
+		t.Fatalf("expected auto_update_policies legacy toggle to succeed: isFilter=%v ok=%v val=%v", isFilter, ok, cfg.AutoUpdatePolicies)
+	}
+	if isFilter, ok := ApplyRuntimeToggle(cfg, "unknown_setting", true); isFilter || ok {
+		t.Fatalf("expected unknown key to fail: isFilter=%v ok=%v", isFilter, ok)
 	}
 }
 

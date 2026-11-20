@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,29 +18,21 @@ import (
 )
 
 func (a *AdminServer) handleClearSchemas(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	if a.schemaClear != nil {
 		a.schemaClear()
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
+	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "success",
 		"message": "Pinned schema baselines successfully cleared",
 	})
 }
 
 func (a *AdminServer) handleMCPTools(w http.ResponseWriter, r *http.Request) {
-	a.mu.RLock()
 	var schemasDir string
-	if a.cfg != nil {
-		schemasDir = a.cfg.Filters.SchemaValidation.SchemasDir
+	if cfg := a.Config(); cfg != nil {
+		schemasDir = cfg.Filters.SchemaValidation.SchemasDir
 	}
-	a.mu.RUnlock()
 	if schemasDir == "" {
 		schemasDir = filepath.Join(config.DefaultFaradAiWireDir(), "schemas")
 	}
@@ -59,44 +50,35 @@ func (a *AdminServer) handleMCPTools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-
 	var req struct {
 		FilterName string `json:"filter_name"`
 		Filter     string `json:"filter"`
 		Enabled    *bool  `json:"enabled"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if err := decodeJSON(w, r, maxSmallAdminBodyBytes, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid request body")
 		return
 	}
 	if req.FilterName == "" && req.Filter != "" {
 		req.FilterName = req.Filter
 	}
 	if req.Enabled == nil {
-		http.Error(w, "Missing required boolean field: enabled", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Missing required boolean field: enabled")
 		return
 	}
 	enabled := *req.Enabled
 
 	isFilter := settings.IsSupportedFilterName(req.FilterName)
-	isLegacyToggle := req.FilterName == "auto_sync_mcp" || req.FilterName == "auto_update_policies"
+	isLegacyToggle := settings.IsLegacyToggleName(req.FilterName)
 	if !isFilter && !isLegacyToggle {
-		http.Error(w, "Unknown setting/filter: "+req.FilterName, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Unknown setting/filter: "+req.FilterName)
 		return
 	}
 
 	a.configMutMu.Lock()
 	defer a.configMutMu.Unlock()
 
-	a.mu.RLock()
 	sStore := a.settingsStore
-	a.mu.RUnlock()
 
 	filterKey := settings.FilterKeyPrefix + req.FilterName
 	ctx := r.Context()
@@ -110,24 +92,18 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 		prevOverride, hadOverride, getErr = sStore.Get(ctx, filterKey)
 		if getErr != nil {
 			slog.ErrorContext(ctx, "Failed to read prior filter toggle from DuckDB", slog.String("filter", req.FilterName), slog.String("error", getErr.Error()))
-			http.Error(w, fmt.Sprintf("Failed to read current state for filter %q", req.FilterName), http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to read current state for filter %q", req.FilterName))
 			return
 		}
 		if err := sStore.Set(ctx, filterKey, strconv.FormatBool(enabled)); err != nil {
 			slog.ErrorContext(ctx, "Failed to persist filter toggle to DuckDB", slog.String("filter", req.FilterName), slog.String("error", err.Error()))
-			http.Error(w, fmt.Sprintf("Failed to persist filter toggle %q", req.FilterName), http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to persist filter toggle %q", req.FilterName))
 			return
 		}
 	}
 
 	nextCfg := a.cloneAndMutateConfig(func(c *config.Config) {
-		if isFilter {
-			settings.ApplyFilterToggleToConfig(c, req.FilterName, enabled)
-		} else if req.FilterName == "auto_sync_mcp" {
-			c.AutoSyncMCP = enabled
-		} else if req.FilterName == "auto_update_policies" {
-			c.AutoUpdatePolicies = enabled
-		}
+		settings.ApplyRuntimeToggle(c, req.FilterName, enabled)
 	})
 
 	// Trigger runtime reload in memory without touching config.yaml on disk (ADR-0053 / ADR-0054)
@@ -146,7 +122,7 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 				slog.ErrorContext(ctx, "Failed to roll back DuckDB filter override after reload error", slog.String("key", filterKey), slog.String("error", rbErr.Error()))
 			}
 		}
-		http.Error(w, fmt.Sprintf("Failed to reload configuration after toggling %q: %v", req.FilterName, err), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to reload configuration after toggling %q: %v", req.FilterName, err))
 		return
 	}
 
@@ -161,8 +137,7 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 		User:       a.extractUserContext(r),
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":      "success",
 		"filter":      req.FilterName,
 		"filter_name": req.FilterName,
@@ -171,31 +146,18 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// handleSettings handles self-describing metadata retrieval and validated updates for operational settings.
-func (a *AdminServer) handleSettings(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		a.getSettings(w, r)
-	case http.MethodPost, http.MethodPut:
-		a.updateSettings(w, r)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
 // getSettings returns self-describing operational settings metadata, active values, and override status.
 func (a *AdminServer) getSettings(w http.ResponseWriter, r *http.Request) {
-	a.mu.RLock()
 	sStore := a.settingsStore
 	sCache := a.settingsCache
+
 	var pollInterval int
 	var autoSyncMCP, autoUpdatePolicies bool
-	if a.cfg != nil {
-		pollInterval = a.cfg.PollIntervalSeconds
-		autoSyncMCP = a.cfg.AutoSyncMCP
-		autoUpdatePolicies = a.cfg.AutoUpdatePolicies
+	if cfg := a.Config(); cfg != nil {
+		pollInterval = cfg.PollIntervalSeconds
+		autoSyncMCP = cfg.AutoSyncMCP
+		autoUpdatePolicies = cfg.AutoUpdatePolicies
 	}
-	a.mu.RUnlock()
 
 	var overrides map[string]string
 	if sStore != nil {
@@ -239,8 +201,7 @@ func (a *AdminServer) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(categories)
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"status":                "success",
 		"categories":            categories,
 		"settings":              items,
@@ -252,21 +213,17 @@ func (a *AdminServer) getSettings(w http.ResponseWriter, r *http.Request) {
 
 // updateSettings validates inputs against the registry and persists overrides into DuckDB and cache.
 func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-
 	var payload map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "Invalid JSON payload: "+err.Error(), http.StatusBadRequest)
+	if err := decodeJSON(w, r, maxAdminBodyBytes, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid JSON payload: "+err.Error())
 		return
 	}
 
 	a.configMutMu.Lock()
 	defer a.configMutMu.Unlock()
 
-	a.mu.RLock()
 	sStore := a.settingsStore
 	sCache := a.settingsCache
-	a.mu.RUnlock()
 
 	toUpdate := make(map[string]any)
 
@@ -301,7 +258,7 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 		pollFloat, ok := rawPoll.(float64)
 		pollInt := int(pollFloat)
 		if !ok || float64(pollInt) != pollFloat || pollInt < 1 || pollInt > 86400 {
-			http.Error(w, "Invalid poll_interval_seconds: must be an integer between 1 and 86400", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid poll_interval_seconds: must be an integer between 1 and 86400")
 			return
 		}
 		setPollInterval = true
@@ -311,7 +268,7 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if rawSync, present := payload["auto_sync_mcp"]; present {
 		b, ok := rawSync.(bool)
 		if !ok {
-			http.Error(w, "Invalid auto_sync_mcp: must be a boolean", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid auto_sync_mcp: must be a boolean")
 			return
 		}
 		setAutoSyncMCP = true
@@ -321,7 +278,7 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if rawUpdatePol, present := payload["auto_update_policies"]; present {
 		b, ok := rawUpdatePol.(bool)
 		if !ok {
-			http.Error(w, "Invalid auto_update_policies: must be a boolean", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid auto_update_policies: must be a boolean")
 			return
 		}
 		setAutoUpdatePol = true
@@ -330,14 +287,14 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(toUpdate) == 0 && !hasLegacy {
-		http.Error(w, "No valid setting keys found in request payload", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "No valid setting keys found in request payload")
 		return
 	}
 
 	// Fail-closed validation against registry schema and bounds
 	for k, v := range toUpdate {
 		if err := settings.Validate(k, v); err != nil {
-			http.Error(w, fmt.Sprintf("Validation failed for %q: %v", k, err), http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", fmt.Sprintf("Validation failed for %q: %v", k, err))
 			return
 		}
 	}
@@ -362,7 +319,7 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 		prevOverrides, getErr = sStore.GetAll(ctx)
 		if getErr != nil {
 			slog.ErrorContext(ctx, "Failed to read prior settings from DuckDB", slog.String("error", getErr.Error()))
-			http.Error(w, fmt.Sprintf("Database error reading current settings: %v", getErr), http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Database error reading current settings: %v", getErr))
 			return
 		}
 	}
@@ -386,7 +343,7 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 			if err := sStore.Set(ctx, k, strVal); err != nil {
 				slog.ErrorContext(ctx, "Failed to persist setting to DuckDB", slog.String("key", k), slog.String("error", err.Error()))
 				rollbackPersisted()
-				http.Error(w, fmt.Sprintf("Database error updating %q: %v", k, err), http.StatusInternalServerError)
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Database error updating %q: %v", k, err))
 				return
 			}
 			appliedKeys = append(appliedKeys, k)
@@ -421,7 +378,7 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 		if err := a.applyConfigReload(nextCfg); err != nil {
 			slog.ErrorContext(ctx, "Failed to reload config after legacy settings update", slog.String("error", err.Error()))
 			rollbackPersisted()
-			http.Error(w, fmt.Sprintf("Failed to reload configuration after settings update: %v", err), http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to reload configuration after settings update: %v", err))
 			return
 		}
 	}
@@ -445,8 +402,7 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 		a.invalidateSafeHTTPClient()
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"status":   "success",
 		"message":  "Settings updated successfully",
 		"updated":  toUpdate,
@@ -512,41 +468,33 @@ func rollbackDuckDBSettings(reqCtx context.Context, sStore settings.Store, appli
 
 // handleSettingsReset removes an override from DuckDB and reverts to the config.yaml baseline default.
 func (a *AdminServer) handleSettingsReset(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		Key string `json:"key"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON payload: "+err.Error(), http.StatusBadRequest)
+	if err := decodeJSON(w, r, maxSmallAdminBodyBytes, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid JSON payload: "+err.Error())
 		return
 	}
 
 	if req.Key == "" {
-		http.Error(w, "Setting key is required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Setting key is required")
 		return
 	}
 
 	meta, exists := settings.LookupMeta(req.Key)
 	if !exists {
-		http.Error(w, fmt.Sprintf("Unknown setting key: %q", req.Key), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", fmt.Sprintf("Unknown setting key: %q", req.Key))
 		return
 	}
 
 	a.configMutMu.Lock()
 	defer a.configMutMu.Unlock()
 
-	a.mu.RLock()
 	sStore := a.settingsStore
 	sCache := a.settingsCache
-	cfg := a.cfg
 	cfgProv := a.cfgProvider
 	reloadFn := a.reloadFunc
-	a.mu.RUnlock()
+	cfg := a.Config()
 
 	ctx := r.Context()
 	var (
@@ -558,12 +506,12 @@ func (a *AdminServer) handleSettingsReset(w http.ResponseWriter, r *http.Request
 		prevVal, hadOverride, getErr = sStore.Get(ctx, req.Key)
 		if getErr != nil {
 			slog.ErrorContext(ctx, "Failed to read setting override before reset", slog.String("key", req.Key), slog.String("error", getErr.Error()))
-			http.Error(w, fmt.Sprintf("Failed to read current state for %q", req.Key), http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to read current state for %q", req.Key))
 			return
 		}
 		if err := sStore.Delete(ctx, req.Key); err != nil {
 			slog.ErrorContext(ctx, "Failed to delete setting override from DuckDB", slog.String("key", req.Key), slog.String("error", err.Error()))
-			http.Error(w, fmt.Sprintf("Failed to reset setting %q", req.Key), http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to reset setting %q", req.Key))
 			return
 		}
 	}
@@ -597,7 +545,7 @@ func (a *AdminServer) handleSettingsReset(w http.ResponseWriter, r *http.Request
 				}
 				rbCancel()
 			}
-			http.Error(w, fmt.Sprintf("Failed to reload configuration after resetting %q: %v", req.Key, reloadErr), http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to reload configuration after resetting %q: %v", req.Key, reloadErr))
 			return
 		}
 	} else {
@@ -608,7 +556,7 @@ func (a *AdminServer) handleSettingsReset(w http.ResponseWriter, r *http.Request
 			overrides, gErr = sStore.GetAll(ctx)
 			if gErr != nil {
 				slog.ErrorContext(ctx, "Failed to reload remaining overrides from DuckDB after reset", slog.String("key", req.Key), slog.String("error", gErr.Error()))
-				http.Error(w, fmt.Sprintf("Failed to recompute settings after resetting %q: %v", req.Key, gErr), http.StatusInternalServerError)
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to recompute settings after resetting %q: %v", req.Key, gErr))
 				return
 			}
 		}
@@ -632,8 +580,7 @@ func (a *AdminServer) handleSettingsReset(w http.ResponseWriter, r *http.Request
 		User:       a.extractUserContext(r),
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "success",
 		"message": fmt.Sprintf("Setting %q reset to baseline default successfully", req.Key),
 		"key":     req.Key,
@@ -658,51 +605,30 @@ func (a *AdminServer) extractUserContext(r *http.Request) *filter.UserContext {
 	}
 }
 
-// logAuditEvent delivers an AuditEvent to the DuckDB telemetry engine and event broker.
+// logAuditEvent delivers an AuditEvent to registered audit event loggers.
 func (a *AdminServer) logAuditEvent(event *filter.AuditEvent) {
 	if event == nil {
 		return
 	}
-	a.mu.RLock()
-	te := a.telemetryEngine
-	eb := a.eventBroker
-	a.mu.RUnlock()
-
-	type eventLogger interface {
-		LogEvent(event *filter.AuditEvent)
-	}
-
-	if el, ok := te.(eventLogger); ok && el != nil {
-		el.LogEvent(event)
-	}
-	if el, ok := eb.(eventLogger); ok && el != nil {
-		el.LogEvent(event)
+	for _, logger := range a.getAuditLoggers() {
+		if logger != nil {
+			logger.LogEvent(event)
+		}
 	}
 }
 
 // handleReload triggers an atomic hot-reload of configuration and filter pipeline.
 func (a *AdminServer) handleReload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		r.Body = http.MaxBytesReader(w, r.Body, maxAdminBodyBytes)
 	}
 
 	a.configMutMu.Lock()
 	defer a.configMutMu.Unlock()
 
-	a.mu.RLock()
-	reloadFn := a.reloadFunc
-	a.mu.RUnlock()
-
-	if reloadFn != nil {
-		if err := reloadFn(); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	if a.reloadFunc != nil {
+		if err := a.reloadFunc(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 				"status":  "error",
 				"message": "Reload failed: " + err.Error(),
 			})
@@ -710,8 +636,7 @@ func (a *AdminServer) handleReload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "success",
 		"message": "Gateway successfully reloaded",
 	})

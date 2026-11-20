@@ -1,113 +1,30 @@
 package admin
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/FaradAiLab/FaradAiWire/internal/config"
+	"github.com/FaradAiLab/FaradAiWire/internal/mcpprobe"
 	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
 	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 )
 
-func (a *AdminServer) getProtocolsDir() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.getProtocolsDirLocked()
-}
-
-func (a *AdminServer) getProtocolsDirLocked() string {
-	if a.cfg != nil && a.cfg.ProtocolsDir != "" {
-		return a.cfg.ProtocolsDir
-	}
-	return (&config.Config{}).GetProtocolsDir()
-}
-
 func (a *AdminServer) getProtocolStore() protocol.Store {
-	a.mu.RLock()
-	store := a.protocolStore
-	a.mu.RUnlock()
-	if store != nil {
-		return store
-	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.protocolStore != nil {
-		return a.protocolStore
-	}
-
-	protocolsDir := a.getProtocolsDirLocked()
-	newStore, err := protocol.NewFSStore(protocolsDir)
-	if err != nil {
-		slog.Error("failed to initialize protocol store", "dir", protocolsDir, "error", err)
-		return nil
-	}
-	a.protocolStore = newStore
-
-	// Connect referential integrity callback to agent repository
-	newStore.SetAgentUsageChecker(func(protocolID string) ([]string, error) {
-		repo := a.getAgentRepository()
-		if repo == nil {
-			return nil, nil
-		}
-		agentNames, err := repo.ListAgents()
-		if err != nil {
-			return nil, err
-		}
-		var inUse []string
-		for _, name := range agentNames {
-			if name == "archive" || name == "agents" || name == "temp" {
-				continue
-			}
-			cfg, err := repo.GetAgentConfig(name)
-			if err != nil || cfg == nil {
-				continue
-			}
-			for _, p := range cfg.Protocols {
-				if strings.EqualFold(p.ID, protocolID) || strings.EqualFold(p.Name, protocolID) {
-					inUse = append(inUse, name)
-					break
-				}
-			}
-		}
-		return inUse, nil
-	})
-
-	if protocolsDir == "./protocols" || protocolsDir == "protocols" {
-		_ = newStore.EnsureGitIgnore(".")
-	} else if cleanWireDir := filepath.Clean(config.DefaultFaradAiWireDir()); filepath.Clean(protocolsDir) == filepath.Join(cleanWireDir, "protocols") {
-		_ = newStore.EnsureGitIgnore(cleanWireDir)
-	}
-	a.protocolStore = newStore
 	return a.protocolStore
 }
 
-// handleProtocolPresets returns the curated Top 20 industry-standard MCP presets.
-// Endpoint: GET /admin/protocols/presets
+// handleProtocolPresets returns the curated Top 20 industry-standard MCP presets (GET /admin/protocols/presets).
 func (a *AdminServer) handleProtocolPresets(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "METHOD_NOT_ALLOWED",
-			"message": "Only GET method is supported for presets",
-		})
-		return
-	}
-
-	presets := protocol.GetPresetsCatalog()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"presets": presets,
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"presets": protocol.GetPresetsCatalog(),
 	})
 }
 
@@ -131,20 +48,8 @@ func hydrateProbeSecrets(req *ProbeProtocolRequest, store protocol.Store) {
 	if existing == nil {
 		return
 	}
-	if req.AuthToken == "" || strings.Contains(req.AuthToken, "••••••") {
-		req.AuthToken = existing.AuthToken
-	}
-	if len(req.Headers) == 0 {
-		req.Headers = existing.Headers
-		return
-	}
-	for k, v := range req.Headers {
-		if strings.Contains(v, "••••••") {
-			if orig, ok := existing.Headers[k]; ok {
-				req.Headers[k] = orig
-			}
-		}
-	}
+	req.AuthToken = protocol.PreserveMaskedSecret(req.AuthToken, existing.AuthToken, true)
+	req.Headers = protocol.MergeMaskedHeaders(req.Headers, existing.Headers, true)
 }
 
 func probeMatchesStoredDestination(req *ProbeProtocolRequest, p *protocol.Protocol) bool {
@@ -193,25 +98,9 @@ func matchStoredProtocol(store protocol.Store, req *ProbeProtocolRequest) *proto
 // handleProtocolProbe executes an active SSRF-safe connection test and tool discovery against an MCP endpoint.
 // Endpoint: POST /admin/protocols/probe
 func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "METHOD_NOT_ALLOWED",
-			"message": "Only POST method is supported for protocol probe",
-		})
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
 	var req ProbeProtocolRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "BAD_REQUEST",
-			"message": "Invalid request body: " + err.Error(),
-		})
+	if err := decodeJSON(w, r, maxAdminBodyBytes, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid request body: "+err.Error())
 		return
 	}
 
@@ -234,31 +123,16 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 	switch reqType {
 	case "stdio":
 		if strings.TrimSpace(req.Command) == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "BAD_REQUEST",
-				"message": "Command is required for stdio protocol probe",
-			})
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Command is required for stdio protocol probe")
 			return
 		}
 	case "sse", "http":
 		if strings.TrimSpace(req.URL) == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "BAD_REQUEST",
-				"message": "URL is required for SSE protocol probe",
-			})
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "URL is required for SSE protocol probe")
 			return
 		}
 	default:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "BAD_REQUEST",
-			"message": fmt.Sprintf("Unsupported protocol type '%s'. Must be 'stdio' or 'sse'", req.Type),
-		})
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", fmt.Sprintf("Unsupported protocol type '%s'. Must be 'stdio' or 'sse'", req.Type))
 		return
 	}
 
@@ -271,17 +145,25 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 	runProbe := func(onProgress func(string)) ([]map[string]interface{}, string, error) {
 		switch reqType {
 		case "stdio":
-			tools, err := ProbeAndDiscoverMCPToolsStdioWithProgress(ctx, req.Command, req.Args, req.Env, onProgress)
+			tools, err := mcpprobe.ProbeStdio(ctx, mcpprobe.StdioProbeRequest{
+				Command:    req.Command,
+				Args:       req.Args,
+				Env:        req.Env,
+				OnProgress: onProgress,
+			})
 			return tools, "stdio", err
 		default: // "sse", "http"
 			ssrfOpts := transport.DefaultSafeOptions()
-			a.mu.RLock()
-			cfg := a.cfg
-			a.mu.RUnlock()
-			if cfg != nil {
+			if cfg := a.Config(); cfg != nil {
 				ssrfOpts = transport.OptionsFromConfig(cfg.Security.SSRFProtection)
 			}
-			result, err := ProbeWithAutoNegotiation(ctx, a.SafeHTTPClient(), req.URL, req.AuthToken, req.Headers, ssrfOpts)
+			result, err := mcpprobe.ProbeHTTP(ctx, mcpprobe.ProbeRequest{
+				Client:        a.SafeHTTPClient(),
+				TargetURL:     req.URL,
+				AuthToken:     req.AuthToken,
+				CustomHeaders: req.Headers,
+				SSRFOptions:   ssrfOpts,
+			})
 			if err != nil {
 				return nil, "", err
 			}
@@ -295,12 +177,9 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 	}
 
 	tools, transportMode, probeErr := runProbe(nil)
-
-	w.Header().Set("Content-Type", "application/json")
 	if probeErr != nil {
 		status, respPayload := buildProbeErrorPayload(probeErr)
-		w.WriteHeader(status)
-		json.NewEncoder(w).Encode(respPayload)
+		writeJSON(w, status, respPayload)
 		return
 	}
 
@@ -308,8 +187,7 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 		tools = make([]map[string]interface{}, 0)
 	}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":         "success",
 		"count":          len(tools),
 		"tools":          tools,
@@ -424,7 +302,7 @@ func buildProbeErrorPayload(probeErr error) (int, map[string]interface{}) {
 		"message": probeErr.Error(),
 	}
 
-	var upstreamErr *UpstreamHTTPError
+	var upstreamErr *mcpprobe.UpstreamHTTPError
 	if errors.As(probeErr, &upstreamErr) {
 		// Structured upstream HTTP error with actionable diagnostics
 		status = http.StatusBadGateway
@@ -451,318 +329,161 @@ func writeProbeSSE(w http.ResponseWriter, flusher http.Flusher, canFlush bool, e
 	}
 }
 
-// handleProtocols manages CRUD operations for MCP protocol definitions.
-// Endpoints:
-//
-//	GET    /admin/protocols         -> List all protocols (masked)
-//	GET    /admin/protocols/{id}    -> Get single protocol (masked)
-//	POST   /admin/protocols         -> Create new protocol definition
-//	PUT    /admin/protocols/{id}    -> Update protocol definition
-//	DELETE /admin/protocols/{id}    -> Delete protocol definition (blocked if in use)
-func (a *AdminServer) handleProtocols(w http.ResponseWriter, r *http.Request) {
-	relPath := strings.TrimPrefix(r.URL.Path, "/admin/protocols")
-	relPath = strings.Trim(relPath, "/")
-
-	if relPath == "presets" {
-		a.handleProtocolPresets(w, r)
-		return
-	}
-	if relPath == "probe" {
-		a.handleProtocolProbe(w, r)
-		return
-	}
-
+func (a *AdminServer) requireProtocolStore(w http.ResponseWriter) protocol.Store {
 	store := a.getProtocolStore()
 	if store == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "STORE_UNAVAILABLE",
-			"message": "Protocol store is not initialized",
-		})
+		writeError(w, http.StatusServiceUnavailable, "STORE_UNAVAILABLE", "Protocol store is not initialized")
+		return nil
+	}
+	return store
+}
+
+// handleListProtocols lists all registered protocol definitions with secrets masked (GET /admin/protocols).
+func (a *AdminServer) handleListProtocols(w http.ResponseWriter, r *http.Request) {
+	store := a.requireProtocolStore(w)
+	if store == nil {
 		return
 	}
 
-	// Enforce mutation guard in managed mode for non-GET methods
-	if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
-		a.mu.RLock()
-		isManaged := a.cfg != nil && a.cfg.IsManaged()
-		a.mu.RUnlock()
-		if isManaged {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "FORBIDDEN_MANAGED_MODE",
-				"message": "Protocol configuration is locked: Gateway is managed by organization.",
-			})
-			return
-		}
+	protocols, err := store.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
+		return
 	}
 
-	switch r.Method {
-	case http.MethodGet:
-		w.Header().Set("Content-Type", "application/json")
-		if relPath == "" {
-			protocols, err := store.List()
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "LIST_FAILED",
-					"message": err.Error(),
-				})
-				return
-			}
-			masked := make([]*protocol.Protocol, 0, len(protocols))
-			for _, p := range protocols {
-				masked = append(masked, p.MaskSecrets())
-			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"protocols": masked,
-			})
-			return
-		}
-
-		if err := pathguard.ValidateSafeIdentifier(relPath); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INVALID_ID",
-				"message": "Invalid protocol ID: " + err.Error(),
-			})
-			return
-		}
-
-		p, err := store.Get(relPath)
-		if err != nil {
-			if errors.Is(err, protocol.ErrProtocolNotFound) {
-				w.WriteHeader(http.StatusNotFound)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "NOT_FOUND",
-					"message": "Protocol not found",
-				})
-				return
-			}
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "GET_FAILED",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		json.NewEncoder(w).Encode(p.MaskSecrets())
-		return
-
-	case http.MethodPost:
-		w.Header().Set("Content-Type", "application/json")
-		if relPath != "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "BAD_REQUEST",
-				"message": "Protocol creation should be requested on /admin/protocols without an ID path",
-			})
-			return
-		}
-
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
-		var p protocol.Protocol
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "BAD_REQUEST",
-				"message": "Invalid request body: " + err.Error(),
-			})
-			return
-		}
-
-		if err := p.Validate(); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "VALIDATION_ERROR",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		// Check if protocol already exists
-		existing, _ := store.Get(p.ID)
-		if existing != nil {
-			w.WriteHeader(http.StatusConflict)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "CONFLICT",
-				"message": "Protocol with ID '" + p.ID + "' already exists. Use PUT to update.",
-			})
-			return
-		}
-
-		if err := store.Save(&p); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "SAVE_FAILED",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":   "created",
-			"protocol": p.MaskSecrets(),
-		})
-		return
-
-	case http.MethodPut:
-		w.Header().Set("Content-Type", "application/json")
-		if relPath == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "BAD_REQUEST",
-				"message": "Protocol ID is required in URL path for PUT",
-			})
-			return
-		}
-
-		if err := pathguard.ValidateSafeIdentifier(relPath); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INVALID_ID",
-				"message": "Invalid protocol ID: " + err.Error(),
-			})
-			return
-		}
-
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-		var p protocol.Protocol
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "BAD_REQUEST",
-				"message": "Invalid request body: " + err.Error(),
-			})
-			return
-		}
-
-		p.ID = relPath
-		if err := p.Validate(); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "VALIDATION_ERROR",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		// Preserve CreatedAt and existing secrets if client sent masked value back
-		if existing, err := store.Get(relPath); err == nil && existing != nil {
-			p.CreatedAt = existing.CreatedAt
-
-			existingEnvMap := make(map[string]string)
-			for _, e := range existing.Env {
-				parts := strings.SplitN(e, "=", 2)
-				if len(parts) == 2 {
-					existingEnvMap[parts[0]] = parts[1]
-				}
-			}
-			for i, e := range p.Env {
-				parts := strings.SplitN(e, "=", 2)
-				if len(parts) == 2 && strings.Contains(parts[1], "••••••") {
-					if origVal, exists := existingEnvMap[parts[0]]; exists {
-						p.Env[i] = parts[0] + "=" + origVal
-					}
-				}
-			}
-
-			// Preserve AuthToken if client sent masked placeholder back
-			if strings.Contains(p.AuthToken, "••••••") {
-				p.AuthToken = existing.AuthToken
-			}
-
-			// Preserve sensitive Headers if client sent masked placeholder back
-			if p.Headers != nil && existing.Headers != nil {
-				for k, v := range p.Headers {
-					if strings.Contains(v, "••••••") {
-						if origVal, exists := existing.Headers[k]; exists {
-							p.Headers[k] = origVal
-						}
-					}
-				}
-			}
-		}
-
-		if err := store.Save(&p); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "SAVE_FAILED",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":   "updated",
-			"protocol": p.MaskSecrets(),
-		})
-		return
-
-	case http.MethodDelete:
-		w.Header().Set("Content-Type", "application/json")
-		protocolID := relPath
-		if protocolID == "" {
-			protocolID = r.URL.Query().Get("id")
-		}
-		if protocolID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "BAD_REQUEST",
-				"message": "Protocol ID is required",
-			})
-			return
-		}
-
-		if err := store.Delete(protocolID); err != nil {
-			if errors.Is(err, protocol.ErrProtocolNotFound) {
-				w.WriteHeader(http.StatusNotFound)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "NOT_FOUND",
-					"message": "Protocol not found",
-				})
-				return
-			}
-			if errors.Is(err, protocol.ErrProtocolInUse) {
-				w.WriteHeader(http.StatusConflict)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "PROTOCOL_IN_USE",
-					"message": err.Error(),
-				})
-				return
-			}
-			if errors.Is(err, protocol.ErrInvalidID) {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "INVALID_ID",
-					"message": err.Error(),
-				})
-				return
-			}
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "DELETE_FAILED",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		json.NewEncoder(w).Encode(map[string]string{
-			"status":  "success",
-			"message": "Protocol successfully deleted",
-		})
-		return
-
-	default:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "METHOD_NOT_ALLOWED",
-			"message": "Method not allowed",
-		})
+	masked := make([]*protocol.Protocol, 0, len(protocols))
+	for _, p := range protocols {
+		masked = append(masked, p.MaskSecrets())
 	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"protocols": masked})
+}
+
+// handleGetProtocol retrieves a single masked protocol definition (GET /admin/protocols/{id}).
+func (a *AdminServer) handleGetProtocol(w http.ResponseWriter, r *http.Request) {
+	store := a.requireProtocolStore(w)
+	if store == nil {
+		return
+	}
+
+	protocolID := r.PathValue("id")
+	if err := pathguard.ValidateSafeIdentifier(protocolID); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid protocol ID: "+err.Error())
+		return
+	}
+
+	p, err := store.Get(protocolID)
+	if err != nil {
+		if errors.Is(err, protocol.ErrProtocolNotFound) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Protocol not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "GET_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, p.MaskSecrets())
+}
+
+// handleCreateProtocol validates and persists a new protocol definition (POST /admin/protocols).
+func (a *AdminServer) handleCreateProtocol(w http.ResponseWriter, r *http.Request) {
+	store := a.requireProtocolStore(w)
+	if store == nil {
+		return
+	}
+
+	var p protocol.Protocol
+	if err := decodeJSON(w, r, maxAdminBodyBytes, &p); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid request body: "+err.Error())
+		return
+	}
+	if err := p.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	if existing, _ := store.Get(p.ID); existing != nil {
+		writeError(w, http.StatusConflict, "CONFLICT", "Protocol with ID '"+p.ID+"' already exists. Use PUT to update.")
+		return
+	}
+	if err := store.Save(&p); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"status":   "created",
+		"protocol": p.MaskSecrets(),
+	})
+}
+
+// handleUpdateProtocol updates a protocol definition while preserving masked secrets (PUT /admin/protocols/{id}).
+func (a *AdminServer) handleUpdateProtocol(w http.ResponseWriter, r *http.Request) {
+	store := a.requireProtocolStore(w)
+	if store == nil {
+		return
+	}
+
+	protocolID := r.PathValue("id")
+	if err := pathguard.ValidateSafeIdentifier(protocolID); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid protocol ID: "+err.Error())
+		return
+	}
+
+	var p protocol.Protocol
+	if err := decodeJSON(w, r, maxAdminBodyBytes, &p); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid request body: "+err.Error())
+		return
+	}
+	p.ID = protocolID
+	if err := p.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		return
+	}
+
+	if existing, err := store.Get(protocolID); err == nil && existing != nil {
+		p.CreatedAt = existing.CreatedAt
+		p.HydrateMaskedSecrets(existing)
+	}
+
+	if err := store.Save(&p); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":   "updated",
+		"protocol": p.MaskSecrets(),
+	})
+}
+
+// handleDeleteProtocol deletes an unused protocol definition (DELETE /admin/protocols/{id}).
+func (a *AdminServer) handleDeleteProtocol(w http.ResponseWriter, r *http.Request) {
+	store := a.requireProtocolStore(w)
+	if store == nil {
+		return
+	}
+
+	protocolID := cmp.Or(r.PathValue("id"), r.URL.Query().Get("id"))
+	if protocolID == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Protocol ID is required")
+		return
+	}
+
+	if err := store.Delete(protocolID); err != nil {
+		switch {
+		case errors.Is(err, protocol.ErrProtocolNotFound):
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Protocol not found")
+		case errors.Is(err, protocol.ErrProtocolInUse):
+			writeError(w, http.StatusConflict, "PROTOCOL_IN_USE", err.Error())
+		case errors.Is(err, protocol.ErrInvalidID):
+			writeError(w, http.StatusBadRequest, "INVALID_ID", err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "DELETE_FAILED", err.Error())
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "success",
+		"message": "Protocol successfully deleted",
+	})
 }

@@ -19,10 +19,14 @@ import (
 
 func TestAdminServer_SSEConnection(t *testing.T) {
 	cfg := &config.Config{}
-	server := NewAdminServer(cfg, func() error { return nil }, func() {})
 	b := broker.NewEventBroker(30 * time.Millisecond)
 	defer b.Close()
-	server.SetEventBroker(b)
+	server := NewAdminServer(AdminDependencies{
+		Config:          cfg,
+		EventBroker:     b,
+		ReloadFunc:      func() error { return nil },
+		SchemaClearFunc: func() {},
+	})
 
 	handler := server.Handler()
 
@@ -101,10 +105,14 @@ func (p *pipeResponseWriter) Flush() {}
 
 func TestAdminServer_SSEStreamingDelivery(t *testing.T) {
 	cfg := &config.Config{}
-	server := NewAdminServer(cfg, func() error { return nil }, func() {})
 	b := broker.NewEventBroker(30 * time.Millisecond)
 	defer b.Close()
-	server.SetEventBroker(b)
+	server := NewAdminServer(AdminDependencies{
+		Config:          cfg,
+		EventBroker:     b,
+		ReloadFunc:      func() error { return nil },
+		SchemaClearFunc: func() {},
+	})
 
 	pr, pw := io.Pipe()
 	defer pr.Close()

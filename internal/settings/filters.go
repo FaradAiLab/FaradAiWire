@@ -2,11 +2,23 @@ package settings
 
 import (
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 )
+
+var orderedFilterNames = []string{
+	"prefill_block",
+	"rate_limiting",
+	"loop_protection",
+	"schema_validation",
+	"dlp",
+	"hitl",
+	"guard",
+	"injection_scanner",
+}
 
 // FilterKeyPrefix is the canonical DuckDB system_settings key prefix for security filter toggles.
 const FilterKeyPrefix = "filters."
@@ -214,5 +226,58 @@ func ApplyFilterOverrides(cfg *config.Config, overrides map[string]string) {
 			continue
 		}
 		ApplyFilterToggleToConfig(cfg, strings.TrimPrefix(key, FilterKeyPrefix), enabled)
+	}
+}
+
+// OrderedFilterNames returns all registered security filter names in canonical display order.
+func OrderedFilterNames() []string {
+	return slices.Clone(orderedFilterNames)
+}
+
+// FilterStatusSummary summarizes active pipeline filters and per-filter enabled flags for status reporting.
+type FilterStatusSummary struct {
+	ActiveFilters []string
+	ConfigStates  map[string]bool
+}
+
+// BuildFilterStatusSummary projects the active security filters and config booleans from cfg
+// using the canonical ordered filter registry.
+func BuildFilterStatusSummary(cfg *config.Config) FilterStatusSummary {
+	summary := FilterStatusSummary{
+		ConfigStates: make(map[string]bool, len(orderedFilterNames)),
+	}
+	for _, name := range orderedFilterNames {
+		enabled, _ := ExtractFilterEnabled(cfg, name)
+		summary.ConfigStates[name] = enabled
+		// injection_scanner is surfaced via ConfigStates and guard_status rather than active_filters.
+		if enabled && name != "injection_scanner" {
+			summary.ActiveFilters = append(summary.ActiveFilters, name)
+		}
+	}
+	return summary
+}
+
+// IsLegacyToggleName reports whether name is a supported top-level runtime gateway boolean toggle.
+func IsLegacyToggleName(name string) bool {
+	return name == "auto_sync_mcp" || name == "auto_update_policies"
+}
+
+// ApplyRuntimeToggle applies a boolean toggle for either a registered security filter or a legacy gateway toggle.
+func ApplyRuntimeToggle(cfg *config.Config, name string, enabled bool) (isFilter bool, ok bool) {
+	if IsSupportedFilterName(name) {
+		return true, ApplyFilterToggleToConfig(cfg, name, enabled)
+	}
+	if cfg == nil {
+		return false, false
+	}
+	switch name {
+	case "auto_sync_mcp":
+		cfg.AutoSyncMCP = enabled
+		return false, true
+	case "auto_update_policies":
+		cfg.AutoUpdatePolicies = enabled
+		return false, true
+	default:
+		return false, false
 	}
 }

@@ -17,8 +17,8 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/auth"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
+	"github.com/FaradAiLab/FaradAiWire/internal/mcpprobe"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
-	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 )
 
 func newTestServer(t *testing.T, handler http.Handler) *httptest.Server {
@@ -33,7 +33,7 @@ func newTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	return ts
 }
 
-func setupTestAdminServerWithProtocols(t *testing.T, runtimeMode string) (*AdminServer, string, string) {
+func setupTestAdminServerWithProtocols(t *testing.T, runtimeMode string, opts ...func(*AdminDependencies)) (*AdminServer, string, string) {
 	tmpProtocolsDir := t.TempDir()
 	tmpAgentsDir := t.TempDir()
 
@@ -43,35 +43,24 @@ func setupTestAdminServerWithProtocols(t *testing.T, runtimeMode string) (*Admin
 		AgentsDir:    tmpAgentsDir,
 	}
 
-	server := NewAdminServer(cfg, func() error { return nil }, func() {})
-	server.SetKeyStore(auth.NewMemoryKeyStore())
-
 	store, err := protocol.NewFSStore(tmpProtocolsDir)
 	if err != nil {
 		t.Fatalf("failed to create protocol store: %v", err)
 	}
 
 	repo := agent.NewFSRepository(tmpAgentsDir)
-	server.SetAgentRepository(repo)
 
 	// Wire referential integrity
 	store.SetAgentUsageChecker(func(protocolID string) ([]string, error) {
-		agentNames, err := repo.ListAgents()
+		snapshots, err := repo.ListAgentSnapshots()
 		if err != nil {
 			return nil, err
 		}
 		var inUse []string
-		for _, name := range agentNames {
-			if name == "archive" || name == "agents" || name == "temp" {
-				continue
-			}
-			agentCfg, err := repo.GetAgentConfig(name)
-			if err != nil || agentCfg == nil {
-				continue
-			}
-			for _, p := range agentCfg.Protocols {
+		for _, snap := range snapshots {
+			for _, p := range snap.Config.Protocols {
 				if strings.EqualFold(p.ID, protocolID) || strings.EqualFold(p.Name, protocolID) {
-					inUse = append(inUse, name)
+					inUse = append(inUse, snap.Name)
 					break
 				}
 			}
@@ -79,8 +68,21 @@ func setupTestAdminServerWithProtocols(t *testing.T, runtimeMode string) (*Admin
 		return inUse, nil
 	})
 
-	server.SetProtocolStore(store)
-	return server, tmpProtocolsDir, tmpAgentsDir
+	deps := AdminDependencies{
+		Config:          cfg,
+		ReloadFunc:      func() error { return nil },
+		SchemaClearFunc: func() {},
+		KeyStore:        auth.NewMemoryKeyStore(),
+		AgentRepo:       repo,
+		ProtocolStore:   store,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&deps)
+		}
+	}
+
+	return NewAdminServer(deps), tmpProtocolsDir, tmpAgentsDir
 }
 
 func TestProtocolEndpoints_Presets(t *testing.T) {
@@ -699,9 +701,7 @@ func TestAdminServer_ProtocolProbe_WithAuthTokenAndCustomHeaders(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = new(bool)
-	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
+	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
 	handler := server.Handler()
 
 	probeReq := ProbeProtocolRequest{
@@ -790,20 +790,16 @@ func TestAdminServer_ProtocolProbe_MaskedTokenHydration(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, protoDir := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = new(bool)
-	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
+	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
 
 	// Save real protocol to store
-	store, _ := protocol.NewFSStore(protoDir)
-	_ = store.Save(&protocol.Protocol{
+	_ = server.getProtocolStore().Save(&protocol.Protocol{
 		ID:           "test-probe-mask",
 		Name:         "Masked Probe Test",
 		Type:         "sse",
 		URLOrCommand: upstream.URL + "/sse",
 		AuthToken:    "my-real-secret-12345",
 	})
-	server.protocolStore = store
 
 	handler := server.Handler()
 
@@ -852,9 +848,7 @@ func TestAdminServer_Probe_UpstreamHTTPError_StatusCodes(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-			server.cfg.Security.SSRFProtection.Enabled = new(bool)
-			server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
+			server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
 			handler := server.Handler()
 
 			probeReq := ProbeProtocolRequest{
@@ -908,9 +902,7 @@ func TestAdminServer_Probe_UpstreamHTTPError_WithCredentials(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = new(bool)
-	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
+	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
 	handler := server.Handler()
 
 	probeReq := ProbeProtocolRequest{
@@ -951,7 +943,7 @@ func TestAdminServer_Probe_UpstreamHTTPError_WithCredentials(t *testing.T) {
 }
 
 func TestUpstreamHTTPError_ErrorMethod(t *testing.T) {
-	err := &UpstreamHTTPError{
+	err := &mcpprobe.UpstreamHTTPError{
 		StatusCode:  403,
 		Category:    "UPSTREAM_HTTP_ERROR",
 		Remediation: "Access denied by remote server.",
@@ -969,30 +961,103 @@ func TestUpstreamHTTPError_ErrorMethod(t *testing.T) {
 	}
 }
 
-func TestUpstreamHTTPRemediation(t *testing.T) {
-	tests := []struct {
-		code     int
-		contains string
-	}{
-		{401, "credentials"},
-		{403, "Access denied"},
-		{404, "Endpoint not found"},
-		{405, "HTTP method"},
-		{429, "Rate limited"},
-		{500, "internal error"},
-		{502, "Bad gateway"},
-		{503, "temporarily unavailable"},
-		{504, "timed out"},
-		{418, "unexpected HTTP 418"},
+func TestStdioProbeTimeout_FloorsByCommandType(t *testing.T) {
+	s := NewAdminServer(AdminDependencies{})
+	if got := s.probeTimeout(); got != 5*time.Second {
+		t.Fatalf("expected default probeTimeout=5s, got %v", got)
+	}
+	if got := s.stdioProbeTimeout("mcp-local-binary"); got != 30*time.Second {
+		t.Fatalf("expected default stdioProbeTimeout=30s, got %v", got)
+	}
+	if got := s.stdioProbeTimeout("uvx"); got != 120*time.Second {
+		t.Fatalf("expected uvx stdioProbeTimeout=120s, got %v", got)
+	}
+	if got := s.stdioProbeTimeout(`C:\Tools\uvx.exe`); got != 120*time.Second {
+		t.Fatalf("expected Windows uvx.exe stdioProbeTimeout=120s, got %v", got)
+	}
+}
+
+func TestHandleProtocolProbe_StreamSSE(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell test skipped on Windows")
 	}
 
-	for _, tc := range tests {
-		t.Run(fmt.Sprintf("HTTP_%d", tc.code), func(t *testing.T) {
-			msg := upstreamHTTPRemediation(tc.code)
-			if !strings.Contains(msg, tc.contains) {
-				t.Errorf("expected remediation for %d to contain %q, got: %s", tc.code, tc.contains, msg)
-			}
-		})
+	script := `
+printf 'Installing mcp-server-git...\n' >&2
+while IFS= read -r line; do
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}\n'
+      ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"git_status","description":"status"}]}}\n'
+      exit 0
+      ;;
+  esac
+done
+`
+	payload, err := json.Marshal(ProbeProtocolRequest{
+		Type:    "stdio",
+		Command: "sh",
+		Args:    []string{"-c", script},
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/protocols/probe?stream=1", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	s := NewAdminServer(AdminDependencies{})
+	s.handleProtocolProbe(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("expected text/event-stream Content-Type, got %q", ct)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "event: progress\n") {
+		t.Fatalf("expected SSE progress event in body: %s", out)
+	}
+	if !strings.Contains(out, "Installing mcp-server-git...") {
+		t.Fatalf("expected stderr line in SSE progress event: %s", out)
+	}
+	if !strings.Contains(out, "event: result\n") || !strings.Contains(out, `"git_status"`) {
+		t.Fatalf("expected SSE result event with discovered tool in body: %s", out)
+	}
+}
+
+func TestHandleProtocolProbe_StreamSSE_ErrorEvent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell test skipped on Windows")
+	}
+
+	payload, err := json.Marshal(ProbeProtocolRequest{
+		Type:    "stdio",
+		Command: "sh",
+		Args:    []string{"-c", "printf 'Downloading packages...\n' >&2; exit 2"},
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/protocols/probe?stream=1", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	s := NewAdminServer(AdminDependencies{})
+	s.handleProtocolProbe(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK SSE stream header, got %d: %s", rec.Code, rec.Body.String())
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "event: progress\n") || !strings.Contains(out, "Downloading packages...") {
+		t.Fatalf("expected SSE progress line before failure, got: %s", out)
+	}
+	if !strings.Contains(out, "event: error\n") || !strings.Contains(out, `"PROBE_FAILED"`) {
+		t.Fatalf("expected SSE error event with PROBE_FAILED, got: %s", out)
 	}
 }
 
@@ -1027,9 +1092,7 @@ func TestAutoNegotiation_SSE_Success(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = new(bool)
-	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
+	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
 	handler := server.Handler()
 
 	probeReq := ProbeProtocolRequest{Type: "sse", URL: upstream.URL + "/sse"}
@@ -1103,9 +1166,7 @@ func TestAutoNegotiation_StreamableHTTP_Success(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = new(bool)
-	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
+	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
 	handler := server.Handler()
 
 	probeReq := ProbeProtocolRequest{Type: "http", URL: upstream.URL + "/mcp"}
@@ -1176,9 +1237,7 @@ func TestAutoNegotiation_SSE_NoEndpoint_FallbackToStreamableHTTP(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = new(bool)
-	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
+	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
 	handler := server.Handler()
 
 	probeReq := ProbeProtocolRequest{Type: "sse", URL: upstream.URL + "/mcp"}
@@ -1212,9 +1271,7 @@ func TestAutoNegotiation_FatalHTTPError_NoFallback(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.cfg.Security.SSRFProtection.Enabled = new(bool)
-	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
+	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
 	handler := server.Handler()
 
 	probeReq := ProbeProtocolRequest{Type: "sse", URL: upstream.URL + "/mcp"}
@@ -1239,39 +1296,6 @@ func TestAutoNegotiation_FatalHTTPError_NoFallback(t *testing.T) {
 	}
 }
 
-func TestExtractJSONFromSSEOrDirect(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "direct JSON",
-			input:    `{"jsonrpc":"2.0","id":1,"result":{}}`,
-			expected: `{"jsonrpc":"2.0","id":1,"result":{}}`,
-		},
-		{
-			name:     "SSE wrapped",
-			input:    "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n",
-			expected: `{"jsonrpc":"2.0","id":1,"result":{}}`,
-		},
-		{
-			name:     "SSE with multiple lines",
-			input:    "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\nevent: done\ndata: {}\n\n",
-			expected: `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			result := string(extractJSONFromSSEOrDirect([]byte(tc.input)))
-			if result != tc.expected {
-				t.Errorf("expected %q, got %q", tc.expected, result)
-			}
-		})
-	}
-}
-
 func TestAdminServer_ProtocolProbe_RejectsDestinationMismatchSecretExfiltration(t *testing.T) {
 	var receivedAuth string
 	var receivedCustom string
@@ -1287,11 +1311,9 @@ func TestAdminServer_ProtocolProbe_RejectsDestinationMismatchSecretExfiltration(
 	}
 	defer attacker.Close()
 
-	server, _, protoDir := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
-	server.SetSafeHTTPClient(transport.NewSafeHTTPClient(transport.SafeTransportOptions{Enabled: false}, 5*time.Second))
+	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
 
-	store, _ := protocol.NewFSStore(protoDir)
-	_ = store.Save(&protocol.Protocol{
+	_ = server.getProtocolStore().Save(&protocol.Protocol{
 		ID:           "trusted-remote",
 		Name:         "Trusted Remote",
 		Type:         "http",
@@ -1299,7 +1321,6 @@ func TestAdminServer_ProtocolProbe_RejectsDestinationMismatchSecretExfiltration(
 		AuthToken:    "super-secret-token-xyz",
 		Headers:      map[string]string{"X-Secret-Key": "header-secret-xyz"},
 	})
-	server.SetProtocolStore(store)
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"id":         "trusted-remote",

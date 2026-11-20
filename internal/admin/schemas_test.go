@@ -27,8 +27,11 @@ func setupTestAdminServerWithSchemaStore(t *testing.T) (*AdminServer, schema.Sto
 		_ = store.Close()
 	})
 
-	server := NewAdminServer(nil, func() error { return nil }, func() {})
-	server.SetSchemaStore(store)
+	server := NewAdminServer(AdminDependencies{
+		SchemaStore:     store,
+		ReloadFunc:      func() error { return nil },
+		SchemaClearFunc: func() {},
+	})
 	return server, store
 }
 

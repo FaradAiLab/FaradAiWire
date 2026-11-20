@@ -14,6 +14,13 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
 )
 
+// AgentSnapshot combines a discovered agent's name, RouteConfig, and tool manifest.
+type AgentSnapshot struct {
+	Name     string
+	Config   *RouteConfig
+	Manifest []ToolMetadata
+}
+
 // Resolver defines the read-only contract for querying and routing agent configurations and tool manifests.
 type Resolver interface {
 	GetAgentConfig(agentName string) (*RouteConfig, error)
@@ -22,6 +29,7 @@ type Resolver interface {
 	ResolveToolProtocol(agentName, toolName string) (*ToolTargetInfo, error)
 	ResolveTargetURLFromPath(path string, defaultTargetURL string) (string, error)
 	ListAgents() ([]string, error)
+	ListAgentSnapshots() ([]AgentSnapshot, error)
 }
 
 // Manager defines the administrative mutator contract for managing agent configurations, manifests, and archives.
@@ -413,6 +421,36 @@ func (r *FSRepository) ListAgents() ([]string, error) {
 		res = append(res, k)
 	}
 	return res, nil
+}
+
+// ListAgentSnapshots returns sorted configuration and tool-manifest snapshots for all active non-reserved agents.
+func (r *FSRepository) ListAgentSnapshots() ([]AgentSnapshot, error) {
+	names, err := r.ListAgents()
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+
+	snapshots := make([]AgentSnapshot, 0, len(names))
+	for _, name := range names {
+		if name == "archive" || name == "agents" || name == "temp" {
+			continue
+		}
+		if err := pathguard.ValidateSafeIdentifier(name); err != nil {
+			continue
+		}
+		cfg, err := r.GetAgentConfig(name)
+		if err != nil || cfg == nil {
+			continue
+		}
+		manifest, _ := r.GetAgentManifest(name)
+		snapshots = append(snapshots, AgentSnapshot{
+			Name:     name,
+			Config:   cfg,
+			Manifest: manifest,
+		})
+	}
+	return snapshots, nil
 }
 
 // SaveAgentManifest writes the tools manifest for an agent and refreshes the manifest cache.

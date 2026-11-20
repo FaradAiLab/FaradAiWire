@@ -38,10 +38,11 @@ func setupTestAdminServerWithPolicy(t *testing.T) (*AdminServer, *policy.DuckDBS
 	compiler := policy.NewCompiler(store, policy.WithAgentsDir(tempAgentsDir))
 	agentRepo := agent.NewFSRepository(tempAgentsDir)
 
-	server := NewAdminServer(nil, nil, nil)
-	server.SetAgentRepository(agentRepo)
-	server.SetPolicyStore(store)
-	server.SetPolicyCompiler(compiler)
+	server := NewAdminServer(AdminDependencies{
+		AgentRepo:      agentRepo,
+		PolicyStore:    store,
+		PolicyCompiler: compiler,
+	})
 
 	return server, store, compiler, tempAgentsDir
 }
@@ -427,8 +428,8 @@ func TestPolicyPackHandlers_AgentDLP_ReconcileFromDisk(t *testing.T) {
 	}
 
 	var getResp struct {
-		AgentName string                   `json:"agent_name"`
-		Config    policy.AgentPolicyConfig `json:"config"`
+		AgentName string                      `json:"agent_name"`
+		Config    policy.AgentPolicyConfig    `json:"config"`
 		Compiled  *policy.CompiledAgentPolicy `json:"compiled"`
 	}
 	if err := json.Unmarshal(recGet.Body.Bytes(), &getResp); err != nil {
@@ -608,4 +609,3 @@ func TestPolicyPreviewEndpoint_EdgeCases(t *testing.T) {
 		t.Errorf("expected 200 for alias /admin/policy-packs/preview, got %d", recAlias.Code)
 	}
 }
-

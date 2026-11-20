@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -11,76 +10,68 @@ import (
 func (a *AdminServer) handleAgentArchives(w http.ResponseWriter, r *http.Request) {
 	agentName := r.URL.Query().Get("agent")
 	if agentName == "" {
-		http.Error(w, "agent query parameter is required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "agent query parameter is required")
 		return
 	}
 
 	if err := pathguard.ValidateSafeIdentifier(agentName); err != nil {
-		http.Error(w, "Security violation: invalid agent identifier: "+err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "INVALID_IDENTIFIER", "Security violation: invalid agent identifier: "+err.Error())
 		return
 	}
 
-	repo := a.getAgentRepository()
+	repo := a.requireAgentRepository(w)
+	if repo == nil {
+		return
+	}
 	archives, err := repo.ListAgentArchives(agentName)
 	if err != nil {
-		http.Error(w, "Security violation or lookup error: "+err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "ARCHIVE_LOOKUP_FAILED", "Security violation or lookup error: "+err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"agent":    agentName,
 		"archives": archives,
 	})
 }
 
 func (a *AdminServer) handleAgentRollback(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-
 	var req struct {
 		AgentName string `json:"agent"`
 		Timestamp string `json:"timestamp"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.AgentName == "" || req.Timestamp == "" {
-		http.Error(w, "Invalid payload. 'agent' and 'timestamp' required", http.StatusBadRequest)
+	if err := decodeJSON(w, r, maxAdminBodyBytes, &req); err != nil || req.AgentName == "" || req.Timestamp == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid payload. 'agent' and 'timestamp' required")
 		return
 	}
 
 	if err := pathguard.ValidateSafeIdentifier(req.AgentName); err != nil {
-		http.Error(w, "Security violation: invalid agent identifier: "+err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "INVALID_IDENTIFIER", "Security violation: invalid agent identifier: "+err.Error())
 		return
 	}
 	if err := pathguard.ValidateSafeIdentifier(req.Timestamp); err != nil {
-		http.Error(w, "Security violation: invalid timestamp identifier: "+err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "INVALID_IDENTIFIER", "Security violation: invalid timestamp identifier: "+err.Error())
 		return
 	}
 
-	repo := a.getAgentRepository()
+	repo := a.requireAgentRepository(w)
+	if repo == nil {
+		return
+	}
 	if err := repo.RollbackAgent(req.AgentName, req.Timestamp); err != nil {
-		http.Error(w, "Archive snapshot not found: "+err.Error(), http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Archive snapshot not found: "+err.Error())
 		return
 	}
 
-	a.mu.Lock()
-	reloadFn := a.reloadFunc
-	a.mu.Unlock()
-
-	if reloadFn != nil {
-		if err := reloadFn(); err != nil {
-			http.Error(w, "Rollback successful on disk but hot-reload failed: "+err.Error(), http.StatusInternalServerError)
+	if a.reloadFunc != nil {
+		if err := a.reloadFunc(); err != nil {
+			writeError(w, http.StatusInternalServerError, "RELOAD_FAILED", "Rollback successful on disk but hot-reload failed: "+err.Error())
 			return
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "success",
 		"message": fmt.Sprintf("Agent '%s' successfully rolled back to %s", req.AgentName, req.Timestamp),
 	})
 }
-

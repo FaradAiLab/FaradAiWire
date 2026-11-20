@@ -2,6 +2,7 @@ package admin
 
 import (
 	"bufio"
+	"cmp"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -17,12 +18,8 @@ import (
 )
 
 func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
 	// 1. DuckDB Telemetry Engine: serve filtered, paginated query results (TICK-CORE-002)
-	a.mu.RLock()
 	engine := a.telemetryEngine
-	a.mu.RUnlock()
 
 	if engine != nil {
 		limit := 50
@@ -52,8 +49,7 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		result, err := engine.QueryAuditLogs(r.Context(), filter)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "Failed to query telemetry audit logs", slog.String("error", err.Error()))
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 				"enabled": true,
 				"error":   "Failed to query audit logs",
 				"logs":    []interface{}{},
@@ -61,7 +57,7 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"enabled": true,
 			"total":   result.Total,
 			"limit":   result.Limit,
@@ -75,7 +71,7 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	// 2. Fallback to legacy file-based JSONL audit trail if configured
 	cfg := a.Config()
 	if cfg == nil || cfg.AuditLog.Path == "" || !cfg.AuditLog.Enabled {
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"enabled": false,
 			"logs":    []string{},
 		})
@@ -86,7 +82,7 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	file, err := os.Open(auditLogPath)
 	if err != nil {
 		slog.WarnContext(r.Context(), "Failed to open fallback audit log file", slog.String("error", err.Error()))
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"enabled": true,
 			"error":   "Failed to open audit log file",
 			"logs":    []string{},
@@ -118,7 +114,7 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"enabled": true,
 		"logs":    parsedLogs,
 		"events":  parsedLogs,
@@ -126,21 +122,15 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *AdminServer) handleAuditLogDetail(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/admin/audit-logs/"))
+	id := cmp.Or(strings.TrimSpace(r.PathValue("id")), strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/admin/audit-logs/")))
 	if id == "" || strings.Contains(id, "/") {
-		http.Error(w, "Invalid audit log identifier", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "INVALID_IDENTIFIER", "Invalid audit log identifier")
 		return
 	}
 
-	a.mu.RLock()
 	engine := a.telemetryEngine
-	a.mu.RUnlock()
 	if engine == nil {
-		http.Error(w, "DuckDB telemetry engine not available", http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "DuckDB telemetry engine not available")
 		return
 	}
 
@@ -148,11 +138,10 @@ func (a *AdminServer) handleAuditLogDetail(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		res, err := engine.QueryAuditLogs(r.Context(), duckdb.QueryFilter{TraceID: id, Limit: 1})
 		if err != nil || res == nil || len(res.Logs) == 0 {
-			http.Error(w, "Audit record not found", http.StatusNotFound)
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Audit record not found")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"status": "success",
 			"record": res.Logs[0],
 		})
@@ -162,16 +151,15 @@ func (a *AdminServer) handleAuditLogDetail(w http.ResponseWriter, r *http.Reques
 	rec, err := detailReader.GetAuditLogByID(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			http.Error(w, "Audit record not found", http.StatusNotFound)
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Audit record not found")
 			return
 		}
 		slog.ErrorContext(r.Context(), "Failed to retrieve audit record detail", slog.String("id", id), slog.String("error", err.Error()))
-		http.Error(w, "Failed to retrieve audit record", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve audit record")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status": "success",
 		"record": rec,
 	})
@@ -184,10 +172,7 @@ func (a *AdminServer) handleLogEventsStream(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	a.mu.RLock()
 	broker := a.eventBroker
-	a.mu.RUnlock()
-
 	if broker == nil {
 		http.Error(w, "Event streaming service unavailable", http.StatusServiceUnavailable)
 		return

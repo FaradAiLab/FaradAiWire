@@ -17,9 +17,13 @@ func setupTestAdminServerWithKeyStore() (*AdminServer, auth.KeyStore) {
 		RuntimeMode: config.RuntimeModeStandalone,
 		AdminPort:   8090,
 	}
-	server := NewAdminServer(cfg, func() error { return nil }, func() {})
 	keyStore := auth.NewMemoryKeyStore()
-	server.SetKeyStore(keyStore)
+	server := NewAdminServer(AdminDependencies{
+		Config:          cfg,
+		ReloadFunc:      func() error { return nil },
+		SchemaClearFunc: func() {},
+		KeyStore:        keyStore,
+	})
 	return server, keyStore
 }
 

@@ -2,15 +2,18 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
@@ -179,7 +182,11 @@ func TestAdminEndpoints_Agents_CRUD_And_Archiving(t *testing.T) {
 }
 
 func TestAdminEndpoints_Agents_ActiveSessionProtection(t *testing.T) {
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, func(d *AdminDependencies) {
+		d.ActiveSessionChecker = func(agentName string) bool {
+			return agentName == "active-agent"
+		}
+	})
 	handler := server.Handler()
 
 	// Create agent
@@ -194,11 +201,6 @@ func TestAdminEndpoints_Agents_ActiveSessionProtection(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("failed to create agent: %d", rec.Code)
 	}
-
-	// Set session checker that blocks "active-agent"
-	server.SetActiveSessionChecker(func(agentName string) bool {
-		return agentName == "active-agent"
-	})
 
 	// Attempting DELETE should return 409 Conflict
 	req = httptest.NewRequest(http.MethodDelete, "/admin/agents/active-agent", nil)
@@ -1021,15 +1023,16 @@ func TestAdminEndpoints_Agents_EnrichAgentProtocols_HydratesSecrets(t *testing.T
 func TestAdminEndpoints_Agents_PUT_HydratesExistingBeforeTemplateStore(t *testing.T) {
 	server, protoDir, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
 
-	store, _ := protocol.NewFSStore(protoDir)
-	_ = store.Save(&protocol.Protocol{
+	if err := server.getProtocolStore().Save(&protocol.Protocol{
 		ID:           "shared-proto",
 		Name:         "Shared Proto",
 		Type:         "http",
 		URLOrCommand: "https://api.example.com/mcp",
 		AuthToken:    "global-template-token-000",
-	})
-	server.SetProtocolStore(store)
+	}); err != nil {
+		t.Fatalf("save protocol failed: %v", err)
+	}
+	_ = protoDir
 
 	repo := server.getAgentRepository()
 	if err := repo.SaveAgentConfig("agent-override", &agent.RouteConfig{
@@ -1125,5 +1128,61 @@ func TestAdminEndpoints_Agents_RestoreRetainedProtocolsNotWipedByToolGovernance(
 	}
 	if gotCfg.ToolGovernance["p1__read_file"] != agent.ModeAutonomous {
 		t.Fatalf("expected explicit payload rule p1__read_file=autonomous preserved, got %+v", gotCfg.ToolGovernance)
+	}
+}
+
+func TestSyncAgentToolsProbed_BoundedParallelDeterministicOrder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell test skipped on Windows")
+	}
+
+	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+
+	mkScript := func(toolName string) string {
+		return fmt.Sprintf(`
+sleep 0.15
+while IFS= read -r line; do
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}\n'
+      ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"%s","description":"ok"}]}}\n'
+      exit 0
+      ;;
+  esac
+done
+`, toolName)
+	}
+
+	agentCfg := &agent.RouteConfig{
+		AgentID:     "parallel-agent",
+		AgentName:   "parallel-agent",
+		RoutingMode: "aggregated",
+		Protocols: []agent.ProtocolConfig{
+			{ID: "p0", Name: "Proto 0", Type: "stdio", Command: "sh", Args: []string{"-c", mkScript("tool_zero")}},
+			{ID: "p1", Name: "Proto 1", Type: "stdio", Command: "sh", Args: []string{"-c", mkScript("tool_one")}},
+			{ID: "p2", Name: "Proto 2", Type: "stdio", Command: "sh", Args: []string{"-c", mkScript("tool_two")}},
+		},
+	}
+
+	start := time.Now()
+	tools, err := server.syncAgentToolsProbed(context.Background(), "parallel-agent", agentCfg)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("syncAgentToolsProbed failed: %v", err)
+	}
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 tools, got %d: %#v", len(tools), tools)
+	}
+	wantNames := []string{"p0__tool_zero", "p1__tool_one", "p2__tool_two"}
+	for i, want := range wantNames {
+		if got, _ := tools[i]["name"].(string); got != want {
+			t.Fatalf("tools[%d].name = %q, want deterministic %q", i, got, want)
+		}
+	}
+	// Three 150ms sleeps run sequentially would take >=450ms; concurrent run finishes well under 400ms.
+	if elapsed >= 400*time.Millisecond {
+		t.Fatalf("expected concurrent multi-protocol probing (<400ms), took %v", elapsed)
 	}
 }

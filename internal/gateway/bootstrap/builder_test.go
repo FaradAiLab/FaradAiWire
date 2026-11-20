@@ -1,10 +1,15 @@
 package bootstrap
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
+	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
 )
 
 func TestBuilder_Build_DefaultConfig(t *testing.T) {
@@ -76,5 +81,66 @@ func TestBuilder_Build_SamePort_Rejection(t *testing.T) {
 	_, err := Build(cfg, nil)
 	if err == nil {
 		t.Fatal("expected error when listen_port and admin_port are identical, got nil")
+	}
+}
+
+func TestBuilder_Build_ProtocolStore_InUseIntegrity(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tempDir)
+
+	enabled := false
+	cfg := &config.Config{
+		RuntimeMode:  config.RuntimeModeStandalone,
+		Mode:         "sse",
+		ListenPort:   8080,
+		AdminPort:    9090,
+		AgentsDir:    filepath.Join(tempDir, "agents"),
+		ProtocolsDir: filepath.Join(tempDir, "protocols"),
+		Telemetry: config.TelemetryConfig{
+			Enabled: &enabled,
+			DBPath:  filepath.Join(tempDir, "telemetry.duckdb"),
+		},
+		SSE: config.SSEConfig{
+			TargetURL: "http://localhost:8081/sse",
+		},
+	}
+
+	deps, err := Build(cfg, nil)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	defer deps.Cleanup()
+
+	if deps.ProtocolStore == nil {
+		t.Fatal("expected non-nil ProtocolStore wired by Build")
+	}
+
+	if err := deps.ProtocolStore.Save(&protocol.Protocol{
+		ID:      "corp-proto",
+		Name:    "corp-proto",
+		Type:    "stdio",
+		Command: "cat",
+	}); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	if err := deps.AgentRepo.SaveAgentConfig("demo-agent", &agent.RouteConfig{
+		AgentName: "demo-agent",
+		Protocols: []agent.ProtocolConfig{
+			{ID: "corp-proto", Name: "corp-proto", Type: "stdio", Command: "cat"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveAgentConfig failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/admin/protocols/corp-proto", nil)
+	rec := httptest.NewRecorder()
+	deps.AdminServer.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("DELETE /admin/protocols/corp-proto = %d, want 409 Conflict (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "PROTOCOL_IN_USE") {
+		t.Fatalf("expected PROTOCOL_IN_USE error code in body, got: %s", rec.Body.String())
 	}
 }

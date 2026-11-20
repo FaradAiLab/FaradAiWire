@@ -9,169 +9,122 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
 	"github.com/FaradAiLab/FaradAiWire/internal/policy"
 )
 
-// handleAgentDLP handles reading and saving DLP governance configurations for a specific agent:
-//
-//	GET /admin/agents/{name}/dlp -> Get saved config and compiled effective preview
-//	PUT /admin/agents/{name}/dlp -> Save config, atomically compile to dlp.json, and hot-reload
-func (a *AdminServer) handleAgentDLP(w http.ResponseWriter, r *http.Request, agentName string) {
-	w.Header().Set("Content-Type", "application/json")
-
+func (a *AdminServer) requireAgentDLPContext(w http.ResponseWriter, r *http.Request) (string, policy.Store, *policy.Compiler, bool) {
+	agentName := r.PathValue("name")
 	if err := pathguard.ValidateSafeIdentifier(agentName); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "INVALID_AGENT_IDENTIFIER",
-			"message": err.Error(),
-		})
-		return
+		writeError(w, http.StatusBadRequest, "INVALID_AGENT_IDENTIFIER", err.Error())
+		return "", nil, nil, false
 	}
 
 	store := a.getPolicyStore()
 	if store == nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "POLICY_STORE_UNAVAILABLE",
-			"message": "Policy store is not initialized",
-		})
+		writeError(w, http.StatusServiceUnavailable, "POLICY_STORE_UNAVAILABLE", "Policy store is not initialized")
+		return "", nil, nil, false
+	}
+	return agentName, store, a.getPolicyCompiler(), true
+}
+
+// handleGetAgentDLP returns saved and compiled DLP governance configuration for an agent (GET /admin/agents/{name}/dlp).
+func (a *AdminServer) handleGetAgentDLP(w http.ResponseWriter, r *http.Request) {
+	agentName, store, compiler, ok := a.requireAgentDLPContext(w, r)
+	if !ok {
 		return
 	}
 
-	compiler := a.getPolicyCompiler()
-
-	switch r.Method {
-	case http.MethodGet:
-		cfg, err := store.GetAgentConfig(r.Context(), agentName)
-		if err != nil {
-			if errors.Is(err, policy.ErrConfigNotFound) {
-				// Reconcile from existing agents/<agentName>/current/dlp.json if present on disk
-				if recCfg := a.reconcileAgentDLPFromDisk(r.Context(), agentName, store); recCfg != nil {
-					cfg = recCfg
-				} else {
-					// Return clean empty configuration
-					cfg = &policy.AgentPolicyConfig{
-						AgentName:      agentName,
-						PackIDs:        []string{},
-						Overrides:      []policy.RuleOverride{},
-						CustomPatterns: []policy.CustomPattern{},
-						ToolExemptions: make(map[string]policy.ToolExemption),
-					}
-				}
-			} else {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "GET_AGENT_CONFIG_FAILED",
-					"message": err.Error(),
-				})
-				return
-			}
-		}
-
-		var compiled *policy.CompiledAgentPolicy
-		if compiler != nil {
-			comp, cErr := compiler.Compile(r.Context(), cfg)
-			if cErr == nil {
-				compiled = comp
-			}
-		}
-
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"agent_name": agentName,
-			"config":     cfg,
-			"compiled":   compiled,
-		})
-		return
-
-	case http.MethodPut:
-		a.mu.RLock()
-		isManaged := a.cfg != nil && a.cfg.IsManaged()
-		a.mu.RUnlock()
-		if isManaged {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "FORBIDDEN_MANAGED_MODE",
-				"message": "Agent policy editing is locked: Gateway is managed by organization.",
-			})
+	cfg, err := store.GetAgentConfig(r.Context(), agentName)
+	if err != nil {
+		if !errors.Is(err, policy.ErrConfigNotFound) {
+			writeError(w, http.StatusInternalServerError, "GET_AGENT_CONFIG_FAILED", err.Error())
 			return
 		}
-
-		var cfg policy.AgentPolicyConfig
-		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INVALID_JSON",
-				"message": "Failed to decode agent DLP config: " + err.Error(),
-			})
-			return
-		}
-		cfg.AgentName = agentName
-
-		if err := policy.ValidateAgentPolicyConfig(&cfg); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "VALIDATION_FAILED",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		// Enforce atomic rollback parity: snapshot current agent state before updating DLP
-		if repo := a.getAgentRepository(); repo != nil {
-			if err := repo.ArchiveAgentCurrent(agentName); err != nil {
-				slog.WarnContext(r.Context(), "Failed to create agent snapshot archive before saving DLP", "agent", agentName, "error", err)
-			}
-		}
-
-		if compiler != nil {
-			if err := compiler.SaveConfigAndCompile(r.Context(), &cfg); err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "COMPILE_AND_SAVE_FAILED",
-					"message": err.Error(),
-				})
-				return
-			}
+		if recCfg := a.reconcileAgentDLPFromDisk(r.Context(), agentName, store); recCfg != nil {
+			cfg = recCfg
 		} else {
-			if err := store.SaveAgentConfig(r.Context(), &cfg); err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "SAVE_AGENT_CONFIG_FAILED",
-					"message": err.Error(),
-				})
-				return
+			cfg = &policy.AgentPolicyConfig{
+				AgentName:      agentName,
+				PackIDs:        []string{},
+				Overrides:      []policy.RuleOverride{},
+				CustomPatterns: []policy.CustomPattern{},
+				ToolExemptions: make(map[string]policy.ToolExemption),
 			}
 		}
+	}
 
-		var compiled *policy.CompiledAgentPolicy
-		if compiler != nil {
-			compiled, _ = compiler.Compile(r.Context(), &cfg)
+	var compiled *policy.CompiledAgentPolicy
+	if compiler != nil {
+		if comp, cErr := compiler.Compile(r.Context(), cfg); cErr == nil {
+			compiled = comp
 		}
+	}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":     "saved",
-			"agent_name": agentName,
-			"config":     cfg,
-			"compiled":   compiled,
-		})
-		return
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"agent_name": agentName,
+		"config":     cfg,
+		"compiled":   compiled,
+	})
+}
 
-	default:
-		w.Header().Set("Allow", "GET, PUT")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "METHOD_NOT_ALLOWED",
-			"message": "Only GET and PUT methods are supported on /admin/agents/{name}/dlp",
-		})
+// handleUpdateAgentDLP persists and compiles an agent's DLP governance config (PUT /admin/agents/{name}/dlp).
+func (a *AdminServer) handleUpdateAgentDLP(w http.ResponseWriter, r *http.Request) {
+	agentName, store, compiler, ok := a.requireAgentDLPContext(w, r)
+	if !ok {
 		return
 	}
+
+	var cfg policy.AgentPolicyConfig
+	if err := decodeJSON(w, r, maxAdminBodyBytes, &cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to decode agent DLP config: "+err.Error())
+		return
+	}
+	cfg.AgentName = agentName
+
+	if err := policy.ValidateAgentPolicyConfig(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error())
+		return
+	}
+
+	// Enforce atomic rollback parity: snapshot current agent state before updating DLP.
+	if repo := a.getAgentRepository(); repo != nil {
+		if err := repo.ArchiveAgentCurrent(agentName); err != nil {
+			slog.WarnContext(r.Context(), "Failed to create agent snapshot archive before saving DLP", "agent", agentName, "error", err)
+		}
+	}
+
+	if compiler != nil {
+		if err := compiler.SaveConfigAndCompile(r.Context(), &cfg); err != nil {
+			writeError(w, http.StatusInternalServerError, "COMPILE_AND_SAVE_FAILED", err.Error())
+			return
+		}
+	} else if err := store.SaveAgentConfig(r.Context(), &cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_AGENT_CONFIG_FAILED", err.Error())
+		return
+	}
+
+	var compiled *policy.CompiledAgentPolicy
+	if compiler != nil {
+		compiled, _ = compiler.Compile(r.Context(), &cfg)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":     "saved",
+		"agent_name": agentName,
+		"config":     cfg,
+		"compiled":   compiled,
+	})
 }
 
 // reconcileAgentDLPFromDisk attempts to reconstruct an AgentPolicyConfig from an existing
 // agents/<name>/current/dlp.json file when DuckDB lacks an agent_dlp_configs entry.
 func (a *AdminServer) reconcileAgentDLPFromDisk(ctx context.Context, agentName string, store policy.Store) *policy.AgentPolicyConfig {
-	agentsDir := a.getAgentsDir()
+	agentsDir := (&config.Config{}).GetAgentsDir()
+	if cfg := a.Config(); cfg != nil {
+		agentsDir = cfg.GetAgentsDir()
+	}
 	if compiler := a.getPolicyCompiler(); compiler != nil && compiler.AgentsDir() != "" {
 		agentsDir = compiler.AgentsDir()
 	}

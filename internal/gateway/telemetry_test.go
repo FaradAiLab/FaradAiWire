@@ -14,8 +14,8 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/internal/gateway"
-	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
+	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
 func TestGateway_DuckDBTelemetry_Integration(t *testing.T) {

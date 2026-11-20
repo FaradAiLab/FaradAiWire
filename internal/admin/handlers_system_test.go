@@ -12,7 +12,7 @@ import (
 )
 
 func TestHostResources_Endpoint(t *testing.T) {
-	server := NewAdminServer(nil, nil, nil)
+	server := NewAdminServer(AdminDependencies{})
 	handler := server.Handler()
 
 	// 1. GET request should return 200 OK with valid HostResources

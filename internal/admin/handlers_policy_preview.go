@@ -1,33 +1,18 @@
 package admin
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/policy"
 )
 
 // handlePolicyRecommend analyzes attached protocols/tools and returns smart pack recommendations.
-//   POST /admin/policy-packs/recommend
+//
+//	POST /admin/policy-packs/recommend
 func (a *AdminServer) handlePolicyRecommend(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "METHOD_NOT_ALLOWED",
-			"message": "Only POST method is supported on /admin/policy-packs/recommend",
-		})
-		return
-	}
-
 	var req policy.RecommendationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "INVALID_JSON",
-			"message": "Failed to decode recommendation request: " + err.Error(),
-		})
+	if err := decodeJSON(w, r, maxAdminBodyBytes, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to decode recommendation request: "+err.Error())
 		return
 	}
 
@@ -37,44 +22,27 @@ func (a *AdminServer) handlePolicyRecommend(w http.ResponseWriter, r *http.Reque
 		recommendations = make([]policy.Recommendation, 0)
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"recommendations": recommendations,
 	})
 }
 
 // handlePolicyPreview handles stateless dry-run policy compilation:
-//   POST /admin/policies/preview
+//
+//	POST /admin/policies/preview
+//
 // Accepts an unpersisted AgentPolicyConfig JSON payload, compiles effective rules via Compiler,
 // and returns the resolved compiled policy immediately without mutating database or filesystem state.
 func (a *AdminServer) handlePolicyPreview(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "METHOD_NOT_ALLOWED",
-			"message": "Only POST is supported on preview endpoint",
-		})
-		return
-	}
-
 	compiler := a.getPolicyCompiler()
 	if compiler == nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "POLICY_COMPILER_UNAVAILABLE",
-			"message": "Policy compiler is not initialized",
-		})
+		writeError(w, http.StatusServiceUnavailable, "POLICY_COMPILER_UNAVAILABLE", "Policy compiler is not initialized")
 		return
 	}
 
 	var cfg policy.AgentPolicyConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "INVALID_JSON",
-			"message": "Failed to decode preview payload: " + err.Error(),
-		})
+	if err := decodeJSON(w, r, maxAdminBodyBytes, &cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to decode preview payload: "+err.Error())
 		return
 	}
 
@@ -84,17 +52,12 @@ func (a *AdminServer) handlePolicyPreview(w http.ResponseWriter, r *http.Request
 
 	compiled, err := compiler.Compile(r.Context(), &cfg)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "COMPILATION_FAILED",
-			"message": err.Error(),
-		})
+		writeError(w, http.StatusBadRequest, "COMPILATION_FAILED", err.Error())
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":   "ok",
 		"compiled": compiled,
 	})
 }
-

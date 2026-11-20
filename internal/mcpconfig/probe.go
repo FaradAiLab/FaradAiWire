@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/FaradAiLab/FaradAiWire/internal/admin"
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
+	"github.com/FaradAiLab/FaradAiWire/internal/mcpprobe"
 	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
 )
 
@@ -68,7 +68,11 @@ func ProbeAndCompileManifest(ctx context.Context, profileName string, servers []
 			sort.Strings(envSlice)
 
 			probeCtx, cancel := context.WithTimeout(ctx, timeoutPerServer)
-			rawTools, err := admin.ProbeAndDiscoverMCPToolsStdio(probeCtx, s.Command, s.Args, envSlice)
+			rawTools, err := mcpprobe.ProbeStdio(probeCtx, mcpprobe.StdioProbeRequest{
+				Command: s.Command,
+				Args:    s.Args,
+				Env:     envSlice,
+			})
 			cancel()
 
 			if err != nil {

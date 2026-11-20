@@ -1,10 +1,6 @@
 package admin
 
-import (
-	"fmt"
-
-	"github.com/FaradAiLab/FaradAiWire/internal/agent"
-)
+import "github.com/FaradAiLab/FaradAiWire/internal/agent"
 
 // AgentPayload encapsulates incoming HTTP JSON payload for creating or modifying agents.
 type AgentPayload struct {
@@ -27,68 +23,21 @@ type AgentPayload struct {
 	Guard                    *agent.GuardOverride                           `json:"guard,omitempty"`
 }
 
-func validateSchemaValidation(s *agent.SchemaValidationOverride) error {
-	if s == nil {
-		return nil
+// ToUpdateSpec converts the HTTP payload into a domain agent.UpdateSpec.
+func (p AgentPayload) ToUpdateSpec(protocols []agent.ProtocolConfig, protocolsUpdated bool) agent.UpdateSpec {
+	return agent.UpdateSpec{
+		Description:              p.Description,
+		RoutingMode:              p.RoutingMode,
+		Protocols:                protocols,
+		ProtocolsUpdated:         protocolsUpdated,
+		EnabledTools:             p.EnabledTools,
+		ToolOverrides:            p.ToolOverrides,
+		ToolGovernance:           p.ToolGovernance,
+		RetainedGovernance:       p.RetainedGovernance,
+		RestoreRetainedProtocols: p.RestoreRetainedProtocols,
+		RateLimit:                p.RateLimit,
+		LoopProtection:           p.LoopProtection,
+		SchemaValidation:         p.SchemaValidation,
+		Guard:                    p.Guard,
 	}
-	if !s.Mode.IsValid() {
-		return fmt.Errorf("invalid schema_validation mode '%s': allowed values are 'enforce', 'audit', or 'off'", s.Mode)
-	}
-	return nil
-}
-
-func validateGuardOverride(g *agent.GuardOverride) error {
-	if g == nil {
-		return nil
-	}
-	if !g.Mode.IsValid() {
-		return fmt.Errorf("invalid guard mode '%s': allowed values are 'enforce', 'audit', or 'off'", g.Mode)
-	}
-	return nil
-}
-
-func validateRateLimit(r *agent.RateLimitOverride) error {
-	if r == nil {
-		return nil
-	}
-	if r.MaxBurst < 0 {
-		return fmt.Errorf("rate_limit max_burst cannot be negative")
-	}
-	if r.RefillRate < 0 {
-		return fmt.Errorf("rate_limit refill_rate cannot be negative")
-	}
-	return nil
-}
-
-func validateLoopProtection(l *agent.LoopProtectionOverride) error {
-	if l == nil {
-		return nil
-	}
-	if l.MaxRepeat < 0 {
-		return fmt.Errorf("loop_protection max_repeat cannot be negative")
-	}
-	if l.WindowSeconds < 0 {
-		return fmt.Errorf("loop_protection window_seconds cannot be negative")
-	}
-	return nil
-}
-
-func validateToolGovernance(gov map[string]agent.ToolGovernanceMode) error {
-	for tool, mode := range gov {
-		if !mode.IsValid() {
-			return fmt.Errorf("invalid tool governance mode '%s' for tool '%s'", mode, tool)
-		}
-	}
-	return nil
-}
-
-func validateRetainedGovernance(retained map[string]map[string]agent.ToolGovernanceMode) error {
-	for proto, tools := range retained {
-		for tool, mode := range tools {
-			if !mode.IsValid() {
-				return fmt.Errorf("invalid retained tool governance mode '%s' for protocol '%s', tool '%s'", mode, proto, tool)
-			}
-		}
-	}
-	return nil
 }

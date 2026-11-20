@@ -78,8 +78,25 @@ type Server struct {
 	shutdownOnce        sync.Once
 }
 
+// ServerOption configures optional dependencies or test doubles when building a Gateway Server.
+type ServerOption func(*bootstrap.Callbacks)
+
+// WithAdminSafeHTTPClient overrides the AdminServer SSRF HTTP client used for outbound probing.
+func WithAdminSafeHTTPClient(client *http.Client) ServerOption {
+	return func(cb *bootstrap.Callbacks) {
+		cb.SafeHTTPClient = client
+	}
+}
+
+// WithGuardManager overrides the GuardManager created during gateway bootstrap.
+func WithGuardManager(mgr guard.Manager) ServerOption {
+	return func(cb *bootstrap.Callbacks) {
+		cb.GuardManager = mgr
+	}
+}
+
 // NewServer initializes a configured Gateway Server instance using the bootstrap composition root.
-func NewServer(cfg *config.Config, provider config.Provider) (*Server, error) {
+func NewServer(cfg *config.Config, provider config.Provider, opts ...ServerOption) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("configuration cannot be nil")
 	}
@@ -90,7 +107,7 @@ func NewServer(cfg *config.Config, provider config.Provider) (*Server, error) {
 		inFlightGracePeriod: 10 * time.Second,
 	}
 
-	deps, err := bootstrap.Build(cfg, provider, bootstrap.Callbacks{
+	callbacks := bootstrap.Callbacks{
 		OnReload: func() error {
 			slog.Info("Admin manual reload triggered")
 			return s.Reload()
@@ -105,7 +122,14 @@ func NewServer(cfg *config.Config, provider config.Provider) (*Server, error) {
 				s.pipeline.ClearBaselines()
 			}
 		},
-	})
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&callbacks)
+		}
+	}
+
+	deps, err := bootstrap.Build(cfg, provider, callbacks)
 	if err != nil {
 		return nil, err
 	}
@@ -142,9 +166,6 @@ func NewServerWithDependencies(deps *bootstrap.Dependencies) (*Server, error) {
 		inFlightGracePeriod: 10 * time.Second,
 	}
 	s.applyDependencies(deps)
-	if s.adminServer != nil {
-		s.adminServer.SetReloadConfigFunc(s.ReloadWithConfig)
-	}
 	if s.sseProxy != nil {
 		s.sseProxy.SetDrainingMiddleware(s.drainingMiddleware)
 	}

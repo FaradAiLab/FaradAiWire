@@ -2,10 +2,9 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,57 +14,32 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/guardprobe"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/web"
 )
-
-func writeDashboardJSON(w http.ResponseWriter, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		slog.Warn("Failed to encode admin JSON response", "error", err)
-	}
-}
 
 func (a *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	web.Handler().ServeHTTP(w, r)
 }
 
 func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
-	a.mu.RLock()
-	cfg := a.cfg
+	cfg := a.Config()
 	mgr := a.guardManager
 	catalog := a.guardCatalog
-	a.mu.RUnlock()
 
 	var (
-		activeFilters      []string
 		listenPort         = config.DefaultListenPort
 		listenHost         = "127.0.0.1"
 		runtimeMode        string
 		transportMode      string
 		isManaged          bool
-		injScannerEnabled  bool
 		injClassifierURL   string
-		prefillEnabled     bool
-		schemaEnabled      bool
-		guardEnabled       bool
-		dlpEnabled         bool
-		hitlEnabled        bool
-		loopEnabled        bool
-		rateLimitEnabled   bool
 		autoSyncMCP        bool
 		autoUpdatePolicies bool
 		pollIntervalSec    int
 	)
 
 	if cfg != nil {
-		prefillEnabled = cfg.Filters.PrefillBlock.Enabled
-		rateLimitEnabled = cfg.Filters.RateLimiting.Enabled
-		loopEnabled = cfg.Filters.LoopProtection.Enabled
-		schemaEnabled = cfg.Filters.SchemaValidation.Enabled
-		dlpEnabled = cfg.Filters.DLP.Enabled
-		hitlEnabled = cfg.Filters.HITL.Enabled
-		guardEnabled = cfg.Filters.Guard.Enabled
-		injScannerEnabled = cfg.Filters.InjectionScanner.Enabled
 		injClassifierURL = cfg.Filters.InjectionScanner.ClassifierURL
 		autoSyncMCP = cfg.AutoSyncMCP
 		autoUpdatePolicies = cfg.AutoUpdatePolicies
@@ -81,27 +55,9 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if prefillEnabled {
-		activeFilters = append(activeFilters, "prefill_block")
-	}
-	if rateLimitEnabled {
-		activeFilters = append(activeFilters, "rate_limiting")
-	}
-	if loopEnabled {
-		activeFilters = append(activeFilters, "loop_protection")
-	}
-	if schemaEnabled {
-		activeFilters = append(activeFilters, "schema_validation")
-	}
-	if dlpEnabled {
-		activeFilters = append(activeFilters, "dlp")
-	}
-	if hitlEnabled {
-		activeFilters = append(activeFilters, "hitl")
-	}
-	if guardEnabled {
-		activeFilters = append(activeFilters, "guard")
-	}
+	filterSummary := settings.BuildFilterStatusSummary(cfg)
+	activeFilters := filterSummary.ActiveFilters
+	injScannerEnabled := filterSummary.ConfigStates["injection_scanner"]
 
 	gatewayID := strings.TrimSpace(os.Getenv("GATEWAY_ID"))
 
@@ -146,6 +102,14 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	ingressURL := fmt.Sprintf("http://%s:%d", listenHost, listenPort)
 
+	configResp := make(map[string]interface{}, len(filterSummary.ConfigStates)+3)
+	for name, enabled := range filterSummary.ConfigStates {
+		configResp[name] = enabled
+	}
+	configResp["auto_sync_mcp"] = autoSyncMCP
+	configResp["auto_update_policies"] = autoUpdatePolicies
+	configResp["poll_interval_seconds"] = pollIntervalSec
+
 	resp := map[string]interface{}{
 		"version":             config.GetVersion(),
 		"active_filters":      activeFilters,
@@ -171,23 +135,10 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"model":          guardModel,
 			"active":         guardStatus == "active",
 		},
-
-		"config": map[string]interface{}{
-			"prefill_block":         prefillEnabled,
-			"schema_validation":     schemaEnabled,
-			"injection_scanner":     injScannerEnabled,
-			"guard":                 guardEnabled,
-			"dlp":                   dlpEnabled,
-			"hitl":                  hitlEnabled,
-			"loop_protection":       loopEnabled,
-			"rate_limiting":         rateLimitEnabled,
-			"auto_sync_mcp":         autoSyncMCP,
-			"auto_update_policies":  autoUpdatePolicies,
-			"poll_interval_seconds": pollIntervalSec,
-		},
+		"config": configResp,
 	}
 
-	writeDashboardJSON(w, resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // validateGuardURL enforces pragmatic standalone security guardrails:
@@ -249,21 +200,10 @@ func redactURLCredentials(rawURL string) string {
 }
 
 func (a *AdminServer) handleGuardProbe(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
-	}
-
-	a.mu.RLock()
 	classifierURL := ""
-	if a.cfg != nil {
-		classifierURL = a.cfg.Filters.InjectionScanner.ClassifierURL
+	if cfg := a.Config(); cfg != nil {
+		classifierURL = cfg.Filters.InjectionScanner.ClassifierURL
 	}
-	a.mu.RUnlock()
 
 	// If query param or body overrides target URL (e.g. Test Connection)
 	if target := strings.TrimSpace(r.URL.Query().Get("url")); target != "" {
@@ -272,14 +212,19 @@ func (a *AdminServer) handleGuardProbe(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			URL string `json:"url"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err == nil && payload.URL != "" {
+		if err := decodeJSON(w, r, maxSmallAdminBodyBytes, &payload); err != nil {
+			if !errors.Is(err, io.EOF) {
+				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid JSON payload: "+err.Error())
+				return
+			}
+		} else if payload.URL != "" {
 			classifierURL = strings.TrimSpace(payload.URL)
 		}
 	}
 
 	if classifierURL != "" {
 		if err := validateGuardURL(classifierURL); err != nil {
-			http.Error(w, "Invalid probe target: "+err.Error(), http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "INVALID_TARGET", "Invalid probe target: "+err.Error())
 			return
 		}
 	} else {
@@ -306,7 +251,7 @@ func (a *AdminServer) handleGuardProbe(w http.ResponseWriter, r *http.Request) {
 				LatencyMs:        5,
 				ModelName:        modelName,
 			}
-			writeDashboardJSON(w, probeRes)
+			writeJSON(w, http.StatusOK, probeRes)
 			return
 		}
 	}
@@ -317,16 +262,10 @@ func (a *AdminServer) handleGuardProbe(w http.ResponseWriter, r *http.Request) {
 	probeRes := guardprobe.Probe(ctx, classifierURL)
 	probeRes.ConfiguredURL = redactURLCredentials(probeRes.ConfiguredURL)
 
-	writeDashboardJSON(w, probeRes)
+	writeJSON(w, http.StatusOK, probeRes)
 }
 
 func (a *AdminServer) handleGuardConfigure(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req struct {
 		ClassifierURL string `json:"classifier_url"`
 		Enabled       *bool  `json:"enabled"`
@@ -335,8 +274,8 @@ func (a *AdminServer) handleGuardConfigure(w http.ResponseWriter, r *http.Reques
 		DockerURL     string `json:"docker_url"`
 		CustomURL     string `json:"custom_url"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if err := decodeJSON(w, r, maxSmallAdminBodyBytes, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid request body: "+err.Error())
 		return
 	}
 
@@ -356,7 +295,7 @@ func (a *AdminServer) handleGuardConfigure(w http.ResponseWriter, r *http.Reques
 	} {
 		if field.raw != "" {
 			if err := validateGuardURL(field.raw); err != nil {
-				http.Error(w, "Invalid "+field.label+": "+err.Error(), http.StatusBadRequest)
+				writeError(w, http.StatusBadRequest, "INVALID_TARGET", "Invalid "+field.label+": "+err.Error())
 				return
 			}
 		}
@@ -390,8 +329,7 @@ func (a *AdminServer) handleGuardConfigure(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	a.mu.RLock()
-	origCfg := a.cfg
+	origCfg := a.Config()
 	cfgProvider := a.cfgProvider
 	reloadCfgFn := a.reloadConfigFunc
 	reloadFn := a.reloadFunc
@@ -399,7 +337,6 @@ func (a *AdminServer) handleGuardConfigure(w http.ResponseWriter, r *http.Reques
 	if origCfg != nil {
 		nextCfg = origCfg.Clone()
 	}
-	a.mu.RUnlock()
 
 	if nextCfg != nil {
 		applyGuardMutation(nextCfg)
@@ -407,17 +344,17 @@ func (a *AdminServer) handleGuardConfigure(w http.ResponseWriter, r *http.Reques
 
 	if reloadCfgFn == nil && reloadFn != nil && nextCfg != nil && cfgProvider != nil {
 		if err := cfgProvider.Save(nextCfg); err != nil {
-			http.Error(w, "Failed to save configuration: "+err.Error(), http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "SAVE_FAILED", "Failed to save configuration: "+err.Error())
 			return
 		}
 		if err := a.applyConfigReload(nextCfg); err != nil {
 			_ = cfgProvider.Save(origCfg)
-			http.Error(w, "Failed to reload configuration: "+err.Error(), http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "RELOAD_FAILED", "Failed to reload configuration: "+err.Error())
 			return
 		}
 	} else {
 		if err := a.applyConfigReload(nextCfg); err != nil {
-			http.Error(w, "Failed to reload configuration: "+err.Error(), http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "RELOAD_FAILED", "Failed to reload configuration: "+err.Error())
 			return
 		}
 		if nextCfg != nil && cfgProvider != nil {
@@ -425,13 +362,13 @@ func (a *AdminServer) handleGuardConfigure(w http.ResponseWriter, r *http.Reques
 				if origCfg != nil {
 					_ = a.applyConfigReload(origCfg)
 				}
-				http.Error(w, "Failed to save configuration: "+err.Error(), http.StatusInternalServerError)
+				writeError(w, http.StatusInternalServerError, "SAVE_FAILED", "Failed to save configuration: "+err.Error())
 				return
 			}
 		}
 	}
 
-	writeDashboardJSON(w, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":         "success",
 		"classifier_url": redactURLCredentials(targetURL),
 		"mode":           req.Mode,

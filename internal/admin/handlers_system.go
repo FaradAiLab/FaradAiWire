@@ -35,27 +35,13 @@ var defaultCgroupBasePath = "/sys/fs/cgroup"
 // handleHostResources serves real-time host hardware metrics for the Web Console KV Profiler and Host Telemetry Bar.
 // Endpoint: GET /admin/host/resources
 func (a *AdminServer) handleHostResources(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error":   "METHOD_NOT_ALLOWED",
-			"message": "Only GET method is supported for host telemetry",
-		})
-		return
-	}
-
 	var activeModel *guard.Model
 	if cat := a.getGuardCatalog(); cat != nil {
 		activeModel, _ = cat.GetActive(r.Context())
 	}
 
 	res := collectHostResources(defaultCgroupBasePath, activeModel)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(res)
+	writeJSON(w, http.StatusOK, res)
 }
 
 // collectHostResources samples cgroup/OS memory, swap, CPU load, and AI Guard engine RSS.

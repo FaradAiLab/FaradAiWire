@@ -2,12 +2,10 @@ package admin
 
 import "github.com/FaradAiLab/FaradAiWire/internal/config"
 
-// cloneAndMutateConfig always clones a.cfg under a.mu.RLock() and applies fn to the clone so
+// cloneAndMutateConfig clones the active atomic Config and applies fn to the clone so
 // failed reload transitions never leave partial mutations in runtime state.
 func (a *AdminServer) cloneAndMutateConfig(fn func(*config.Config)) *config.Config {
-	a.mu.RLock()
-	cfg := a.cfg
-	a.mu.RUnlock()
+	cfg := a.Config()
 	if cfg == nil {
 		return nil
 	}
@@ -20,16 +18,11 @@ func (a *AdminServer) cloneAndMutateConfig(fn func(*config.Config)) *config.Conf
 // When reloadConfigFunc is wired (live Gateway), it swaps the pipeline atomically in memory using nextCfg.
 // Otherwise it invokes reloadFunc (if set) and commits nextCfg onto AdminServer on success.
 func (a *AdminServer) applyConfigReload(nextCfg *config.Config) error {
-	a.mu.RLock()
-	reloadCfgFn := a.reloadConfigFunc
-	reloadFn := a.reloadFunc
-	a.mu.RUnlock()
-
-	if reloadCfgFn != nil && nextCfg != nil {
-		return reloadCfgFn(nextCfg)
+	if a.reloadConfigFunc != nil && nextCfg != nil {
+		return a.reloadConfigFunc(nextCfg)
 	}
-	if reloadFn != nil {
-		if err := reloadFn(); err != nil {
+	if a.reloadFunc != nil {
+		if err := a.reloadFunc(); err != nil {
 			return err
 		}
 	}

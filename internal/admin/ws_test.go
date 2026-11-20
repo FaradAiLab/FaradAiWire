@@ -36,21 +36,21 @@ func TestWSHub_Lifecycle_And_Broadcast(t *testing.T) {
 }
 
 func TestAdminServer_HITL_WSHub_Integration(t *testing.T) {
-	server, _, cleanup := setupTestAdminServerWithGuards(t)
+	dispatcher := guard.NewHITLDispatcher(guard.HITLDispatcherConfig{
+		Timeout:       2 * time.Second,
+		DisableTTY:    true,
+		AllowRESTOnly: true,
+	})
+	server, _, cleanup := setupTestAdminServerWithGuards(t, func(d *AdminDependencies) {
+		d.GuardHITL = dispatcher
+	})
 	defer cleanup()
 
 	hub := server.WSHub()
 	if hub == nil {
 		t.Fatal("expected non-nil WSHub on AdminServer")
 	}
-
-	dispatcher := guard.NewHITLDispatcher(guard.HITLDispatcherConfig{
-		Timeout:       2 * time.Second,
-		DisableTTY:    true,
-		AllowRESTOnly: true,
-		WSHub:         hub,
-	})
-	server.SetGuardHITL(dispatcher)
+	dispatcher.SetWSHub(hub)
 
 	// Broadcast an approval event via dispatcher
 	hitlReq := &guard.HITLRequest{

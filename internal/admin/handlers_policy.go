@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -9,286 +8,163 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/policy"
 )
 
-// SetPolicyStore sets the DuckDB policy catalog store for the admin server.
-func (a *AdminServer) SetPolicyStore(store policy.Store) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.policyStore = store
-}
-
-// SetPolicyCompiler sets the policy compiler for resolving and emitting agent dlp.json files.
-func (a *AdminServer) SetPolicyCompiler(compiler *policy.Compiler) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.policyCompiler = compiler
-}
-
 func (a *AdminServer) getPolicyStore() policy.Store {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
 	return a.policyStore
 }
 
 func (a *AdminServer) getPolicyCompiler() *policy.Compiler {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
 	return a.policyCompiler
 }
 
-// handleDlpRules handles CRUD operations for individual DLP pattern rules:
-//   GET    /admin/dlp/rules          -> List rules (optional ?category=...)
-//   POST   /admin/dlp/rules          -> Create custom rule
-//   GET    /admin/dlp/rules/{id}     -> Get single rule
-//   PUT    /admin/dlp/rules/{id}     -> Update custom rule
-//   DELETE /admin/dlp/rules/{id}     -> Delete custom rule
-func (a *AdminServer) handleDlpRules(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
+func (a *AdminServer) requirePolicyStore(w http.ResponseWriter) policy.Store {
 	store := a.getPolicyStore()
 	if store == nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "POLICY_STORE_UNAVAILABLE",
-			"message": "Policy store is not initialized",
-		})
+		writeError(w, http.StatusServiceUnavailable, "POLICY_STORE_UNAVAILABLE", "Policy store is not initialized")
+		return nil
+	}
+	return store
+}
+
+func requireValidPolicyID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if err := policy.ValidateIdentifier(id); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_IDENTIFIER", err.Error())
+		return "", false
+	}
+	return id, true
+}
+
+func writeRuleStorageError(w http.ResponseWriter, ruleID string, err error, failCode, builtinMsg string) {
+	if errors.Is(err, policy.ErrRuleNotFound) {
+		writeError(w, http.StatusNotFound, "RULE_NOT_FOUND", "Rule with ID "+ruleID+" was not found")
+		return
+	}
+	if errors.Is(err, policy.ErrImmutableBuiltin) {
+		writeError(w, http.StatusForbidden, "IMMUTABLE_BUILTIN", builtinMsg)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, failCode, err.Error())
+}
+
+// handleListDlpRules lists all DLP pattern rules with optional ?category= filtering (GET /admin/dlp/rules).
+func (a *AdminServer) handleListDlpRules(w http.ResponseWriter, r *http.Request) {
+	store := a.requirePolicyStore(w)
+	if store == nil {
 		return
 	}
 
-	relPath := strings.TrimPrefix(r.URL.Path, "/admin/dlp/rules")
-	relPath = strings.Trim(relPath, "/")
-
-	// 1. Root collection: GET /admin/dlp/rules or POST /admin/dlp/rules
-	if relPath == "" {
-		switch r.Method {
-		case http.MethodGet:
-			category := r.URL.Query().Get("category")
-			rules, err := store.ListRules(r.Context(), category)
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "LIST_RULES_FAILED",
-					"message": err.Error(),
-				})
-				return
-			}
-			if rules == nil {
-				rules = make([]policy.DlpPatternRule, 0)
-			}
-			if r.URL.Query().Get("format") == "array" {
-				json.NewEncoder(w).Encode(rules)
-				return
-			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"rules": rules,
-			})
-			return
-
-		case http.MethodPost:
-			if a.cfg != nil && a.cfg.IsManaged() {
-				w.WriteHeader(http.StatusForbidden)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "FORBIDDEN_MANAGED_MODE",
-					"message": "Policy editing is locked: Gateway is managed by organization.",
-				})
-				return
-			}
-
-			var rule policy.DlpPatternRule
-			if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "INVALID_JSON",
-					"message": "Failed to decode rule payload: " + err.Error(),
-				})
-				return
-			}
-
-			if err := policy.ValidateRule(&rule); err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "VALIDATION_FAILED",
-					"message": err.Error(),
-				})
-				return
-			}
-
-			if err := store.CreateRule(r.Context(), &rule); err != nil {
-				if errors.Is(err, policy.ErrRuleAlreadyExists) {
-					w.WriteHeader(http.StatusConflict)
-					json.NewEncoder(w).Encode(map[string]string{
-						"error":   "RULE_EXISTS",
-						"message": "A rule with ID " + rule.ID + " already exists",
-					})
-					return
-				}
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "CREATE_RULE_FAILED",
-					"message": err.Error(),
-				})
-				return
-			}
-
-			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"rule": rule,
-			})
-			return
-
-		default:
-			w.Header().Set("Allow", "GET, POST")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "METHOD_NOT_ALLOWED",
-				"message": "Only GET and POST methods are supported on /admin/dlp/rules",
-			})
-			return
-		}
+	rules, err := store.ListRules(r.Context(), r.URL.Query().Get("category"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_RULES_FAILED", err.Error())
+		return
 	}
+	if rules == nil {
+		rules = make([]policy.DlpPatternRule, 0)
+	}
+	if r.URL.Query().Get("format") == "array" {
+		writeJSON(w, http.StatusOK, rules)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"rules": rules})
+}
 
-	// 2. Single item operations: /admin/dlp/rules/{id}
-	ruleID := relPath
-	if err := policy.ValidateIdentifier(ruleID); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "INVALID_IDENTIFIER",
-			"message": err.Error(),
-		})
+// handleCreateDlpRule creates a custom DLP pattern rule (POST /admin/dlp/rules).
+func (a *AdminServer) handleCreateDlpRule(w http.ResponseWriter, r *http.Request) {
+	store := a.requirePolicyStore(w)
+	if store == nil {
 		return
 	}
 
-	switch r.Method {
-	case http.MethodGet:
-		rule, err := store.GetRule(r.Context(), ruleID)
-		if err != nil {
-			if errors.Is(err, policy.ErrRuleNotFound) {
-				w.WriteHeader(http.StatusNotFound)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "RULE_NOT_FOUND",
-					"message": "Rule with ID " + ruleID + " was not found",
-				})
-				return
-			}
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "GET_RULE_FAILED",
-				"message": err.Error(),
-			})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"rule": rule,
-		})
-		return
-
-	case http.MethodPut:
-		if a.cfg != nil && a.cfg.IsManaged() {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "FORBIDDEN_MANAGED_MODE",
-				"message": "Policy editing is locked: Gateway is managed by organization.",
-			})
-			return
-		}
-
-		var rule policy.DlpPatternRule
-		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "INVALID_JSON",
-				"message": "Failed to decode rule payload: " + err.Error(),
-			})
-			return
-		}
-		rule.ID = ruleID
-
-		if err := policy.ValidateRule(&rule); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "VALIDATION_FAILED",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		if err := store.UpdateRule(r.Context(), &rule); err != nil {
-			if errors.Is(err, policy.ErrRuleNotFound) {
-				w.WriteHeader(http.StatusNotFound)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "RULE_NOT_FOUND",
-					"message": "Rule with ID " + ruleID + " was not found",
-				})
-				return
-			}
-			if errors.Is(err, policy.ErrImmutableBuiltin) {
-				w.WriteHeader(http.StatusForbidden)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "IMMUTABLE_BUILTIN",
-					"message": "Built-in rules cannot be modified",
-				})
-				return
-			}
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "UPDATE_RULE_FAILED",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"rule": rule,
-		})
-		return
-
-	case http.MethodDelete:
-		if a.cfg != nil && a.cfg.IsManaged() {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "FORBIDDEN_MANAGED_MODE",
-				"message": "Policy editing is locked: Gateway is managed by organization.",
-			})
-			return
-		}
-
-		if err := store.DeleteRule(r.Context(), ruleID); err != nil {
-			if errors.Is(err, policy.ErrRuleNotFound) {
-				w.WriteHeader(http.StatusNotFound)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "RULE_NOT_FOUND",
-					"message": "Rule with ID " + ruleID + " was not found",
-				})
-				return
-			}
-			if errors.Is(err, policy.ErrImmutableBuiltin) {
-				w.WriteHeader(http.StatusForbidden)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error":   "IMMUTABLE_BUILTIN",
-					"message": "Built-in rules cannot be deleted",
-				})
-				return
-			}
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "DELETE_RULE_FAILED",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "deleted",
-			"id":     ruleID,
-		})
-		return
-
-	default:
-		w.Header().Set("Allow", "GET, PUT, DELETE")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":   "METHOD_NOT_ALLOWED",
-			"message": "Only GET, PUT, and DELETE methods are supported on /admin/dlp/rules/{id}",
-		})
+	var rule policy.DlpPatternRule
+	if err := decodeJSON(w, r, maxAdminBodyBytes, &rule); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to decode rule payload: "+err.Error())
 		return
 	}
+	if err := policy.ValidateRule(&rule); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error())
+		return
+	}
+
+	if err := store.CreateRule(r.Context(), &rule); err != nil {
+		if errors.Is(err, policy.ErrRuleAlreadyExists) {
+			writeError(w, http.StatusConflict, "RULE_EXISTS", "A rule with ID "+rule.ID+" already exists")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "CREATE_RULE_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]interface{}{"rule": rule})
+}
+
+// handleGetDlpRule fetches a single DLP pattern rule by ID (GET /admin/dlp/rules/{id}).
+func (a *AdminServer) handleGetDlpRule(w http.ResponseWriter, r *http.Request) {
+	store := a.requirePolicyStore(w)
+	if store == nil {
+		return
+	}
+	ruleID, ok := requireValidPolicyID(w, r)
+	if !ok {
+		return
+	}
+
+	rule, err := store.GetRule(r.Context(), ruleID)
+	if err != nil {
+		writeRuleStorageError(w, ruleID, err, "GET_RULE_FAILED", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"rule": rule})
+}
+
+// handleUpdateDlpRule updates a custom DLP pattern rule (PUT /admin/dlp/rules/{id}).
+func (a *AdminServer) handleUpdateDlpRule(w http.ResponseWriter, r *http.Request) {
+	store := a.requirePolicyStore(w)
+	if store == nil {
+		return
+	}
+	ruleID, ok := requireValidPolicyID(w, r)
+	if !ok {
+		return
+	}
+
+	var rule policy.DlpPatternRule
+	if err := decodeJSON(w, r, maxAdminBodyBytes, &rule); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to decode rule payload: "+err.Error())
+		return
+	}
+	rule.ID = ruleID
+
+	if err := policy.ValidateRule(&rule); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error())
+		return
+	}
+
+	if err := store.UpdateRule(r.Context(), &rule); err != nil {
+		writeRuleStorageError(w, ruleID, err, "UPDATE_RULE_FAILED", "Built-in rules cannot be modified")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"rule": rule})
+}
+
+// handleDeleteDlpRule deletes a custom DLP pattern rule (DELETE /admin/dlp/rules/{id}).
+func (a *AdminServer) handleDeleteDlpRule(w http.ResponseWriter, r *http.Request) {
+	store := a.requirePolicyStore(w)
+	if store == nil {
+		return
+	}
+	ruleID, ok := requireValidPolicyID(w, r)
+	if !ok {
+		return
+	}
+
+	if err := store.DeleteRule(r.Context(), ruleID); err != nil {
+		writeRuleStorageError(w, ruleID, err, "DELETE_RULE_FAILED", "Built-in rules cannot be deleted")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status": "deleted",
+		"id":     ruleID,
+	})
 }

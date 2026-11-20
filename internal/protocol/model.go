@@ -3,13 +3,18 @@ package protocol
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
 )
+
+// SecretMaskPlaceholder is the canonical mask marker exposed in administrative API responses.
+const SecretMaskPlaceholder = "••••••"
 
 var (
 	// ErrInvalidID indicates that the protocol identifier failed safe character validation.
@@ -196,11 +201,85 @@ func MaskSecretValue(val string) string {
 		return val
 	}
 	if len(val) <= 6 {
-		return "••••••"
+		return SecretMaskPlaceholder
 	}
 	prefix := val[:3]
 	suffix := val[len(val)-2:]
-	return fmt.Sprintf("%s••••••%s", prefix, suffix)
+	return fmt.Sprintf("%s%s%s", prefix, SecretMaskPlaceholder, suffix)
+}
+
+// PreserveMaskedSecret returns existing when incoming contains SecretMaskPlaceholder
+// (or is empty when fillWhenEmpty is true); otherwise incoming is returned unchanged.
+func PreserveMaskedSecret(incoming, existing string, fillWhenEmpty bool) string {
+	if strings.Contains(incoming, SecretMaskPlaceholder) || (fillWhenEmpty && incoming == "") {
+		return existing
+	}
+	return incoming
+}
+
+// MergeMaskedEnv restores masked KEY=VALUE entries in dstEnv from srcEnv while keeping
+// explicitly modified unmasked values intact. When fillWhenEmpty is true and dstEnv is empty,
+// a clone of srcEnv is returned.
+func MergeMaskedEnv(dstEnv, srcEnv []string, fillWhenEmpty bool) []string {
+	if len(dstEnv) == 0 {
+		if fillWhenEmpty {
+			return slices.Clone(srcEnv)
+		}
+		return slices.Clone(dstEnv)
+	}
+	if len(srcEnv) == 0 {
+		return slices.Clone(dstEnv)
+	}
+	srcByKey := make(map[string]string, len(srcEnv))
+	for _, entry := range srcEnv {
+		if k, v, ok := strings.Cut(entry, "="); ok {
+			srcByKey[k] = v
+		}
+	}
+	merged := make([]string, len(dstEnv))
+	for i, entry := range dstEnv {
+		merged[i] = entry
+		if k, v, ok := strings.Cut(entry, "="); ok && strings.Contains(v, SecretMaskPlaceholder) {
+			if orig, found := srcByKey[k]; found {
+				merged[i] = k + "=" + orig
+			}
+		}
+	}
+	return merged
+}
+
+// MergeMaskedHeaders restores masked header values in dstHeaders from srcHeaders while keeping
+// explicitly rotated unmasked headers intact. When fillWhenEmpty is true and dstHeaders is empty,
+// a clone of srcHeaders is returned.
+func MergeMaskedHeaders(dstHeaders, srcHeaders map[string]string, fillWhenEmpty bool) map[string]string {
+	if len(dstHeaders) == 0 {
+		if fillWhenEmpty {
+			return maps.Clone(srcHeaders)
+		}
+		return maps.Clone(dstHeaders)
+	}
+	merged := maps.Clone(dstHeaders)
+	if len(srcHeaders) == 0 {
+		return merged
+	}
+	for k, v := range merged {
+		if strings.Contains(v, SecretMaskPlaceholder) {
+			if orig, ok := srcHeaders[k]; ok {
+				merged[k] = orig
+			}
+		}
+	}
+	return merged
+}
+
+// HydrateMaskedSecrets restores masked AuthToken, Env, and Headers fields from existing in place.
+func (p *Protocol) HydrateMaskedSecrets(existing *Protocol) {
+	if p == nil || existing == nil {
+		return
+	}
+	p.AuthToken = PreserveMaskedSecret(p.AuthToken, existing.AuthToken, false)
+	p.Env = MergeMaskedEnv(p.Env, existing.Env, false)
+	p.Headers = MergeMaskedHeaders(p.Headers, existing.Headers, false)
 }
 
 // MaskHeaderValue redacts sensitive HTTP header values.

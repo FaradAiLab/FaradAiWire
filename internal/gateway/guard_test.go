@@ -179,14 +179,12 @@ func TestGateway_ZeroDowntimeHotSwap_Lifecycle(t *testing.T) {
 		},
 	}
 
-	server, err := NewServer(cfg, config.NewYAMLConfigProvider(""))
+	mockMgr := &mockGatewayGuardManager{}
+	server, err := NewServer(cfg, config.NewYAMLConfigProvider(""), WithGuardManager(mockMgr))
 	if err != nil {
 		t.Fatalf("failed to create gateway server: %v", err)
 	}
 	defer server.Shutdown(context.Background())
-
-	mockMgr := &mockGatewayGuardManager{}
-	server.AdminServer().SetGuardManager(mockMgr)
 
 	adminHandler := server.AdminServer().Handler()
 	catalog := server.GuardCatalog()
@@ -327,4 +325,3 @@ func TestGateway_ZeroDowntimeHotSwap_Lifecycle(t *testing.T) {
 		t.Fatalf("expected no active model after deactivation, got %s", activeM3.ID)
 	}
 }
-
