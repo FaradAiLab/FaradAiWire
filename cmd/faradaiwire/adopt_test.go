@@ -827,4 +827,3 @@ func TestExecuteAdopt_DryRunPreservesLegacyIDs_AndConfirmedAdoptMigrates(t *test
 		t.Errorf("expected legacy antigravity_codegraph_696cf8.json to be removed after migration")
 	}
 }
-

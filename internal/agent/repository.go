@@ -272,16 +272,7 @@ func (r *FSRepository) ResolveToolProtocol(agentName, toolName string) (*ToolTar
 			if proto == nil {
 				proto = agentCfg.FindProtocol(t.ProtocolName)
 			}
-			protoSlug := ""
-			if proto != nil {
-				protoSlug = GetProtocolSlug(proto)
-			} else {
-				if t.ProtocolID != "" && !strings.Contains(t.ProtocolID, " ") {
-					protoSlug = CompactLegacyProtocolSlug(t.ProtocolID)
-				} else if t.ProtocolName != "" {
-					protoSlug = CompactLegacyProtocolSlug(strings.ReplaceAll(t.ProtocolName, " ", "_"))
-				}
-			}
+			protoSlug := ResolveToolSlug(proto, t.ProtocolID, t.ProtocolName)
 
 			raw := t.RawName
 			if raw == "" {

@@ -52,12 +52,12 @@ func (m *mockAggregatorRepo) GetDefaultAgent() (*RouteConfig, error) {
 
 func (m *mockAggregatorRepo) ClearCache() {}
 
-func (m *mockAggregatorRepo) SaveAgentConfig(agentName string, cfg *RouteConfig) error { return nil }
-func (m *mockAggregatorRepo) DeleteAgent(agentName string) error { return nil }
+func (m *mockAggregatorRepo) SaveAgentConfig(agentName string, cfg *RouteConfig) error    { return nil }
+func (m *mockAggregatorRepo) DeleteAgent(agentName string) error                          { return nil }
 func (m *mockAggregatorRepo) SaveAgentManifest(agentName string, tools interface{}) error { return nil }
-func (m *mockAggregatorRepo) ListAgentArchives(agentName string) ([]string, error) { return nil, nil }
-func (m *mockAggregatorRepo) RollbackAgent(agentName, timestamp string) error { return nil }
-func (m *mockAggregatorRepo) ArchiveAgentCurrent(agentName string) error { return nil }
+func (m *mockAggregatorRepo) ListAgentArchives(agentName string) ([]string, error)        { return nil, nil }
+func (m *mockAggregatorRepo) RollbackAgent(agentName, timestamp string) error             { return nil }
+func (m *mockAggregatorRepo) ArchiveAgentCurrent(agentName string) error                  { return nil }
 
 func TestManifestAggregator_CompileToolsList_ExplicitAgent(t *testing.T) {
 	repo := &mockAggregatorRepo{
@@ -181,9 +181,9 @@ func TestManifestAggregator_AllowedToolsWhitelist(t *testing.T) {
 						AllowedTools: []string{"create_issue", "read_file"},
 					},
 					{
-						ID:      "slack-proto",
-						Name:    "slack",
-						Type:    "sse",
+						ID:           "slack-proto",
+						Name:         "slack",
+						Type:         "sse",
 						URLOrCommand: "https://mcp.slack.internal",
 						// No AllowedTools: all tools permitted
 					},
@@ -458,7 +458,38 @@ func TestFormatAggregatedToolName_ToolFirstBudgetAndFindProtocol(t *testing.T) {
 	if mode, ok := cfg.GetToolGovernanceMode("codegraph_696c__codegraph_explore"); !ok || mode != ModeStrictAlwaysHITL {
 		t.Errorf("GetToolGovernanceMode failed to match legacy rule for compact slug: got (%q, %v)", mode, ok)
 	}
+
+	// Tier-3 (37+ char tool name): rule configured under uncompacted raw name must still enforce on compacted wire name
+	tier3Cfg := &RouteConfig{
+		AgentName:   "antigravity",
+		RoutingMode: "aggregated",
+		Protocols: []ProtocolConfig{
+			{ID: "sequential_516f", Name: "sequentialthinking (cline)", Type: "stdio", Command: "npx"},
+		},
+		EnabledTools: []string{
+			"cline_github_com_modelcontextprotocol_servers_tree_main_src_sequentialthinking_516fbc__create_or_update_repository_dependabot_secret",
+		},
+		ToolGovernance: map[string]ToolGovernanceMode{
+			"sequential_516f__create_or_update_repository_dependabot_secret": ModeStrictAlwaysHITL,
+		},
+	}
+	tier3Wire := FormatAggregatedToolName("sequential_516f", "create_or_update_repository_dependabot_secret")
+	if !tier3Cfg.IsToolAllowed(tier3Wire) {
+		t.Errorf("IsToolAllowed should permit Tier-3 wire name %q matching uncompacted rule", tier3Wire)
+	}
+	if mode, ok := tier3Cfg.GetToolGovernanceMode(tier3Wire); !ok || mode != ModeStrictAlwaysHITL {
+		t.Errorf("GetToolGovernanceMode should match Tier-3 wire name %q against uncompacted rule, got (%q, %v)", tier3Wire, mode, ok)
+	}
+
+	// Ambiguity check: two protocols sharing both narrowed stem prefix and 4-hex suffix must fail closed (return nil)
+	ambiguousCfg := &RouteConfig{
+		AgentName: "ambiguous",
+		Protocols: []ProtocolConfig{
+			{ID: "github_a_1234", Name: "github-a", Type: "stdio", Command: "echo"},
+			{ID: "github_b_1234", Name: "github-b", Type: "stdio", Command: "echo"},
+		},
+	}
+	if p := ambiguousCfg.FindProtocol("git_1234"); p != nil {
+		t.Errorf("FindProtocol(\"git_1234\") should return nil on ambiguous hash+prefix collision, got %+v", p)
+	}
 }
-
-
-

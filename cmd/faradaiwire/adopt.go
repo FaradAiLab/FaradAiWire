@@ -19,6 +19,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/db/duckdb"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/schema"
 	"github.com/FaradAiLab/FaradAiWire/internal/mcpconfig"
+	"github.com/FaradAiLab/FaradAiWire/internal/policy"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
 	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/internal/transport"
@@ -436,23 +437,59 @@ func executeAdoptWithAdapters(opts adoptOptions, in io.Reader, out io.Writer, ad
 		return 1
 	}
 
+	schemasDir := strings.TrimSpace(cfg.Filters.SchemaValidation.SchemasDir)
+	if schemasDir == "" {
+		if usingDefaultAgentsDir {
+			schemasDir = filepath.Join(defaultDataDir, "schemas")
+		} else {
+			schemasDir = filepath.Join(filepath.Dir(opts.agentsDir), "schemas")
+		}
+	}
+
 	if totalServers == 0 {
-		if !opts.dryRun && opts.yes {
-			var schemaStore schema.Store
-			if dbPath != "" {
-				if _, statErr := os.Stat(dbPath); statErr == nil {
-					if ss, sErr := schema.OpenDuckDBSchemaStore(dbPath); sErr == nil && ss != nil {
-						schemaStore = ss
-						defer func() { _ = ss.Close() }()
-					}
-				}
+		pendingLegacy := mcpconfig.CountPendingLegacyProtocolIDs(mcpconfig.MigrateOptions{
+			ProtocolsDir: opts.protocolsDir,
+			AgentsDir:    opts.agentsDir,
+		})
+		if pendingLegacy > 0 {
+			if opts.dryRun {
+				fmt.Fprintf(out, "\n[DRY-RUN] Would normalize %d legacy Tool Source ID(s) to compact format.\n", pendingLegacy)
+				fmt.Fprintln(out, "[DRY-RUN] No files were modified on disk.")
+				return 0
 			}
-			if migrated, mErr := mcpconfig.MigrateLegacyProtocolIDs(context.Background(), mcpconfig.MigrateOptions{
-				ProtocolsDir: opts.protocolsDir,
-				AgentsDir:    opts.agentsDir,
-				SchemaStore:  schemaStore,
-			}); mErr == nil && migrated > 0 {
-				fmt.Fprintf(out, "\n[✓] Migrated %d legacy Tool Source ID(s) to compact format.\n", migrated)
+			confirmed := opts.yes
+			if !confirmed {
+				fmt.Fprintf(out, "\nFound %d legacy bloated Tool Source ID(s). Normalize to compact format? [Y/n]: ", pendingLegacy)
+				scanner := bufio.NewScanner(in)
+				if !scanner.Scan() {
+					if scanErr := scanner.Err(); scanErr != nil {
+						fmt.Fprintf(out, "\nMigration aborted: failed to read confirmation input: %v\n", scanErr)
+					} else {
+						fmt.Fprintln(out, "\nMigration aborted: interactive confirmation required (pass --yes for non-interactive runs).")
+					}
+					return 1
+				}
+				ans := strings.TrimSpace(strings.ToLower(scanner.Text()))
+				confirmed = (ans == "" || ans == "y" || ans == "yes")
+			}
+			if confirmed {
+				protoStore, _ := protocol.NewFSStore(opts.protocolsDir)
+				schemaStore, policyStore, closeDB, dbErr := openAdoptDuckDBStores(dbPath, true)
+				if dbErr == nil {
+					defer closeDB()
+				}
+				if migrated, mErr := mcpconfig.MigrateLegacyProtocolIDs(context.Background(), mcpconfig.MigrateOptions{
+					ProtocolsDir:  opts.protocolsDir,
+					AgentsDir:     opts.agentsDir,
+					SchemasDir:    schemasDir,
+					ProtocolStore: protoStore,
+					SchemaStore:   schemaStore,
+					PolicyStore:   policyStore,
+				}); mErr != nil {
+					fmt.Fprintf(out, "\n[!] Warning migrating legacy Tool Source ID(s): %v\n", mErr)
+				} else if migrated > 0 {
+					fmt.Fprintf(out, "\n[✓] Migrated %d legacy Tool Source ID(s) to compact format.\n", migrated)
+				}
 			}
 		}
 		fmt.Fprintln(out, "\nNo MCP servers detected across supported AI clients.")
@@ -564,20 +601,15 @@ func executeAdoptWithAdapters(opts adoptOptions, in io.Reader, out io.Writer, ad
 		return 1
 	}
 
-	var schemaStore *schema.DuckDBSchemaStore
-	if dbPath != "" {
-		var sErr error
-		schemaStore, sErr = schema.OpenDuckDBSchemaStore(dbPath)
-		if sErr != nil {
-			if isDuckDBLockError(sErr) {
-				fmt.Fprintln(out, "[!] Notice: DuckDB database is currently locked by the running gateway; tool schema baselines will be indexed when the gateway reloads.")
-			} else {
-				fmt.Fprintf(out, "[!] Warning: Unable to open DuckDB schema store (%s): %v\n", dbPath, sErr)
-			}
-			schemaStore = nil
+	schemaStore, policyStore, closeDB, sErr := openAdoptDuckDBStores(dbPath, false)
+	if sErr != nil {
+		if isDuckDBLockError(sErr) {
+			fmt.Fprintln(out, "[!] Notice: DuckDB database is currently locked by the running gateway; tool schema baselines will be indexed when the gateway reloads.")
 		} else {
-			defer func() { _ = schemaStore.Close() }()
+			fmt.Fprintf(out, "[!] Warning: Unable to open DuckDB schema store (%s): %v\n", dbPath, sErr)
 		}
+	} else {
+		defer closeDB()
 	}
 
 	fmt.Fprintln(out, "\nExecuting adoption and security shielding...")
@@ -585,9 +617,13 @@ func executeAdoptWithAdapters(opts adoptOptions, in io.Reader, out io.Writer, ad
 	if migrated, mErr := mcpconfig.MigrateLegacyProtocolIDs(context.Background(), mcpconfig.MigrateOptions{
 		ProtocolsDir:  opts.protocolsDir,
 		AgentsDir:     opts.agentsDir,
+		SchemasDir:    schemasDir,
 		ProtocolStore: protoStore,
 		SchemaStore:   schemaStore,
-	}); mErr == nil && migrated > 0 {
+		PolicyStore:   policyStore,
+	}); mErr != nil {
+		fmt.Fprintf(out, "[!] Warning normalizing legacy Tool Source ID(s): %v\n", mErr)
+	} else if migrated > 0 {
 		fmt.Fprintf(out, "[✓] Normalized %d legacy Tool Source ID(s) to compact format\n", migrated)
 	}
 
@@ -694,4 +730,31 @@ func executeAdoptWithAdapters(opts adoptOptions, in io.Reader, out io.Writer, ad
 	fmt.Fprintf(out, "  • View live traffic and audit logs : faradaiwire run (then open %s)\n", adminEndpoint)
 	fmt.Fprintln(out, "  • Revert back to original configs  : faradaiwire adopt --rollback")
 	return 0
+}
+
+// openAdoptDuckDBStores opens a single DuckDB connection pool shared by schema and policy stores
+// to avoid single-process DuckDB file-lock conflicts and returns untyped nil interfaces when unavailable.
+func openAdoptDuckDBStores(dbPath string, onlyIfExists bool) (schema.Store, policy.Store, func(), error) {
+	noop := func() {}
+	if dbPath == "" {
+		return nil, nil, noop, nil
+	}
+	if onlyIfExists {
+		if _, err := os.Stat(dbPath); err != nil {
+			return nil, nil, noop, nil
+		}
+	}
+	mgr, err := duckdb.NewManager(duckdb.Config{DBPath: dbPath})
+	if err != nil {
+		return nil, nil, noop, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ss := schema.NewDuckDBSchemaStore(mgr.DB())
+	ps := policy.NewDuckDBStore(mgr.DB())
+	if mErr := ps.Migrate(ctx); mErr != nil {
+		_ = mgr.Close()
+		return nil, nil, noop, mErr
+	}
+	return ss, ps, func() { _ = mgr.Close() }, nil
 }

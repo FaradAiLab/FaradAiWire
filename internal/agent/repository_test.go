@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -726,4 +728,106 @@ func TestFSRepository_ArchiveAgentCurrent(t *testing.T) {
 	}
 }
 
+func TestFSRepository_ResolveToolProtocol_WireBudgetAndCompaction(t *testing.T) {
+	tmpDir := t.TempDir()
+	currentDir := filepath.Join(tmpDir, "wire-agent", "current")
+	if err := os.MkdirAll(currentDir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 
+	cfg := RouteConfig{
+		AgentID:     "wire-agent",
+		AgentName:   "wire-agent",
+		RoutingMode: "aggregated",
+		Protocols: []ProtocolConfig{
+			{ID: "codegraph_696c", Name: "codegraph (antigravity)", Type: "stdio", Command: "codegraph"},
+			{ID: "sequential_516f", Name: "sequentialthinking (cline)", Type: "stdio", Command: "npx"},
+		},
+	}
+	cfgBytes, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(filepath.Join(currentDir, "config.json"), cfgBytes, 0600); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+
+	long34 := "create_pull_request_review_comment"
+	extreme45 := "create_or_update_repository_dependabot_secret"
+	manifest := []ToolMetadata{
+		{
+			Name:         FormatAggregatedToolName("sequential_516f", long34),
+			RawName:      long34,
+			ProtocolID:   "sequential_516f",
+			ProtocolName: "sequentialthinking (cline)",
+		},
+		{
+			Name:         FormatAggregatedToolName("sequential_516f", extreme45),
+			RawName:      extreme45,
+			ProtocolID:   "sequential_516f",
+			ProtocolName: "sequentialthinking (cline)",
+		},
+		{
+			Name:         FormatAggregatedToolName("codegraph_696c", "fs.read_file"),
+			RawName:      "fs.read_file",
+			ProtocolID:   "codegraph_696c",
+			ProtocolName: "codegraph (antigravity)",
+		},
+		{
+			Name:         FormatAggregatedToolName("codegraph_696c", "git/status"),
+			RawName:      "git/status",
+			ProtocolID:   "codegraph_696c",
+			ProtocolName: "codegraph (antigravity)",
+		},
+	}
+	mBytes, _ := json.MarshalIndent(manifest, "", "  ")
+	if err := os.WriteFile(filepath.Join(currentDir, "tools_manifest.json"), mBytes, 0600); err != nil {
+		t.Fatalf("write tools_manifest.json: %v", err)
+	}
+
+	repo := NewFSRepository(tmpDir)
+
+	// Verify CompileToolsList emits <= 44 char wire-safe names matching ^[a-zA-Z0-9_-]{1,44}$
+	agg := NewManifestAggregator(repo)
+	listed, err := agg.CompileToolsList(context.Background(), "wire-agent")
+	if err != nil {
+		t.Fatalf("CompileToolsList: %v", err)
+	}
+	if len(listed) != 4 {
+		t.Fatalf("expected 4 tools, got %d", len(listed))
+	}
+	for _, entry := range listed {
+		name, _ := entry["name"].(string)
+		if len(name) == 0 || len(name) > MaxWireToolNameLen {
+			t.Errorf("tool name %q (len=%d) violates 1..%d budget", name, len(name), MaxWireToolNameLen)
+		}
+		for i := 0; i < len(name); i++ {
+			c := name[i]
+			valid := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
+			if !valid {
+				t.Errorf("tool name %q contains invalid char %q", name, c)
+			}
+		}
+	}
+
+	// Verify manifest-backed round-trip resolution for Tier 2, Tier 3, and punctuated tools
+	tests := []struct {
+		wireName string
+		wantID   string
+		wantRaw  string
+	}{
+		{wireName: FormatAggregatedToolName("sequential_516f", long34), wantID: "sequential_516f", wantRaw: long34},
+		{wireName: FormatAggregatedToolName("sequential_516f", extreme45), wantID: "sequential_516f", wantRaw: extreme45},
+		{wireName: FormatAggregatedToolName("codegraph_696c", "fs.read_file"), wantID: "codegraph_696c", wantRaw: "fs.read_file"},
+		{wireName: FormatAggregatedToolName("codegraph_696c", "git/status"), wantID: "codegraph_696c", wantRaw: "git/status"},
+		// Unmanifested Tier-2 narrowed prefix tool still resolves via FindProtocol("_696c")
+		{wireName: "cod_696c__another_thirty_character_tool_ok", wantID: "codegraph_696c", wantRaw: "another_thirty_character_tool_ok"},
+	}
+
+	for _, tc := range tests {
+		target, rErr := repo.ResolveToolProtocol("wire-agent", tc.wireName)
+		if rErr != nil {
+			t.Fatalf("ResolveToolProtocol(%q) error: %v", tc.wireName, rErr)
+		}
+		if target == nil || target.ProtocolID != tc.wantID || target.RawToolName != tc.wantRaw {
+			t.Errorf("ResolveToolProtocol(%q) = %+v; want ProtocolID=%q RawToolName=%q", tc.wireName, target, tc.wantID, tc.wantRaw)
+		}
+	}
+}

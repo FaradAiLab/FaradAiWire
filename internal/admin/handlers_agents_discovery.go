@@ -285,13 +285,7 @@ func (a *AdminServer) syncAgentToolsProbed(ctx context.Context, agentName string
 				rawName, _ = t["raw_name"].(string)
 			}
 			toolCopy["raw_name"] = rawName
-			protoSlug := agent.GetProtocolSlug(&proto)
-			if protoSlug == "" {
-				protoSlug = protoID
-			}
-			if protoSlug == "" {
-				protoSlug = protoName
-			}
+			protoSlug := agent.ResolveToolSlug(&proto, protoID, protoName)
 			if agentCfg.IsAggregated() && protoSlug != "" {
 				formatted := agent.FormatAggregatedToolName(protoSlug, rawName)
 				toolCopy["name"] = formatted

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -69,7 +71,7 @@ func resolveCompactProtocolID(defaultProfile, protoID, protoName string) (string
 	if len(lowerID) > 15 {
 		if uIdx := strings.LastIndexByte(lowerID, '_'); uIdx > 0 {
 			suffix := lowerID[uIdx+1:]
-			if len(suffix) == 6 && isHexString(suffix) {
+			if len(suffix) == 6 && agent.IsHexString(suffix) {
 				compacted := agent.CompactLegacyProtocolSlug(lowerID)
 				if compacted != "" && compacted != lowerID {
 					return compacted, true
@@ -81,27 +83,15 @@ func resolveCompactProtocolID(defaultProfile, protoID, protoName string) (string
 	return "", false
 }
 
-func isHexString(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
+// CountPendingLegacyProtocolIDs inspects protocols/ and agents/*/current/ in read-only mode
+// and returns the count of legacy bloated protocol IDs eligible for migration.
+func CountPendingLegacyProtocolIDs(opts MigrateOptions) int {
+	protocolsDir, agentsDir := resolveMigrateDirs(opts)
+	_, lowerIDMap, _ := discoverLegacyProtocolIDMappings(protocolsDir, agentsDir)
+	return len(lowerIDMap)
 }
 
-// MigrateLegacyProtocolIDs scans protocols/ and agents/*/current/ for legacy bloated protocol IDs
-// (`antigravity_codegraph_696cf8`, `cline_github_com_..._516fbc`) and atomically upgrades them to
-// compact `<stem_max10>_<4hex>` identifiers across disk files and DuckDB stores.
-// It is 100% idempotent and returns the number of migrated protocol mappings.
-func MigrateLegacyProtocolIDs(ctx context.Context, opts MigrateOptions) (int, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func resolveMigrateDirs(opts MigrateOptions) (string, string) {
 	protocolsDir := opts.ProtocolsDir
 	if protocolsDir == "" {
 		protocolsDir = filepath.Join(config.DefaultFaradAiWireDir(), "protocols")
@@ -110,10 +100,11 @@ func MigrateLegacyProtocolIDs(ctx context.Context, opts MigrateOptions) (int, er
 	if agentsDir == "" {
 		agentsDir = filepath.Join(config.DefaultFaradAiWireDir(), "agents")
 	}
+	return protocolsDir, agentsDir
+}
 
-	// Map of oldID (exact on-disk casing) -> newID (lowercase compact)
+func discoverLegacyProtocolIDMappings(protocolsDir, agentsDir string) (map[string]string, map[string]string, []os.DirEntry) {
 	idMap := make(map[string]string)
-	// Case-insensitive lookup: strings.ToLower(oldID) -> newID
 	lowerIDMap := make(map[string]string)
 
 	recordMapping := func(oldID, newID string) {
@@ -163,7 +154,18 @@ func MigrateLegacyProtocolIDs(ctx context.Context, opts MigrateOptions) (int, er
 			continue
 		}
 		profileName := ae.Name()
-		cfgPath := filepath.Join(agentsDir, profileName, "current", "config.json")
+		agentDir, err := pathguard.ResolveSandboxedPath(agentsDir, profileName)
+		if err != nil {
+			continue
+		}
+		currentDir, err := pathguard.ResolveSandboxedPath(agentDir, "current")
+		if err != nil {
+			continue
+		}
+		cfgPath, err := pathguard.ResolveSandboxedPath(currentDir, "config.json")
+		if err != nil {
+			continue
+		}
 		data, err := os.ReadFile(cfgPath)
 		if err != nil || len(bytes.TrimSpace(data)) == 0 {
 			continue
@@ -184,16 +186,31 @@ func MigrateLegacyProtocolIDs(ctx context.Context, opts MigrateOptions) (int, er
 		}
 	}
 
+	return idMap, lowerIDMap, agentEntries
+}
+
+// MigrateLegacyProtocolIDs scans protocols/ and agents/*/current/ for legacy bloated protocol IDs
+// (`antigravity_codegraph_696cf8`, `cline_github_com_..._516fbc`) and atomically upgrades them to
+// compact `<stem_max10>_<4hex>` identifiers across disk files and DuckDB stores.
+// It is 100% idempotent and returns the number of migrated protocol mappings.
+func MigrateLegacyProtocolIDs(ctx context.Context, opts MigrateOptions) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	protocolsDir, agentsDir := resolveMigrateDirs(opts)
+	idMap, lowerIDMap, agentEntries := discoverLegacyProtocolIDMappings(protocolsDir, agentsDir)
 	if len(lowerIDMap) == 0 {
 		return 0, nil
 	}
 
-	// 3. Migrate protocol definition files in protocolsDir (write newID before removing oldID)
+	// 3. Migrate protocol definition files in protocolsDir (write newID before updating agents or removing oldID)
 	for oldID, newID := range idMap {
 		if err := migrateProtocolFile(protocolsDir, opts.ProtocolStore, oldID, newID); err != nil {
 			return 0, err
 		}
 	}
+
+	var errs []error
 
 	// 4. Migrate each agent profile (config.json, tools_manifest.json, dlp.json, and PolicyStore)
 	for _, ae := range agentEntries {
@@ -201,21 +218,49 @@ func MigrateLegacyProtocolIDs(ctx context.Context, opts MigrateOptions) (int, er
 			continue
 		}
 		profileName := ae.Name()
-		currentDir := filepath.Join(agentsDir, profileName, "current")
+		agentDir, err := pathguard.ResolveSandboxedPath(agentsDir, profileName)
+		if err != nil {
+			continue
+		}
+		currentDir, err := pathguard.ResolveSandboxedPath(agentDir, "current")
+		if err != nil {
+			continue
+		}
 		if fi, err := os.Stat(currentDir); err != nil || !fi.IsDir() {
 			continue
 		}
-		if err := migrateAgentConfigFile(filepath.Join(currentDir, "config.json"), lowerIDMap); err != nil {
+
+		cfgPath, err := pathguard.ResolveSandboxedPath(currentDir, "config.json")
+		if err != nil {
+			errs = append(errs, fmt.Errorf("resolve config path for '%s': %w", profileName, err))
+			continue
+		}
+		if err := migrateAgentConfigFile(cfgPath, lowerIDMap); err != nil {
 			return 0, err
 		}
-		if err := migrateAgentManifestFile(filepath.Join(currentDir, "tools_manifest.json"), lowerIDMap); err != nil {
+
+		manifestPath, err := pathguard.ResolveSandboxedPath(currentDir, "tools_manifest.json")
+		if err != nil {
+			errs = append(errs, fmt.Errorf("resolve manifest path for '%s': %w", profileName, err))
+			continue
+		}
+		if err := migrateAgentManifestFile(manifestPath, lowerIDMap); err != nil {
 			return 0, err
 		}
-		if err := migrateAgentDLPFile(filepath.Join(currentDir, "dlp.json"), lowerIDMap); err != nil {
+
+		dlpPath, err := pathguard.ResolveSandboxedPath(currentDir, "dlp.json")
+		if err != nil {
+			errs = append(errs, fmt.Errorf("resolve dlp path for '%s': %w", profileName, err))
+			continue
+		}
+		if err := migrateAgentDLPFile(dlpPath, lowerIDMap); err != nil {
 			return 0, err
 		}
+
 		if opts.PolicyStore != nil {
-			_ = migrateAgentPolicyStore(ctx, opts.PolicyStore, profileName, lowerIDMap)
+			if pErr := migrateAgentPolicyStore(ctx, opts.PolicyStore, profileName, lowerIDMap); pErr != nil {
+				errs = append(errs, fmt.Errorf("migrate policy store for '%s': %w", profileName, pErr))
+			}
 		}
 	}
 
@@ -226,28 +271,39 @@ func MigrateLegacyProtocolIDs(ctx context.Context, opts MigrateOptions) (int, er
 				return 0, err
 			}
 			if lowerOld := strings.ToLower(oldID); lowerOld != oldID {
-				_ = sm.MigrateProtocolSchemas(ctx, lowerOld, newID, agent.FormatAggregatedToolName)
+				if err := sm.MigrateProtocolSchemas(ctx, lowerOld, newID, agent.FormatAggregatedToolName); err != nil {
+					errs = append(errs, fmt.Errorf("migrate lowercase schema rows for '%s': %w", lowerOld, err))
+				}
 			}
 		}
 	}
 	if opts.SchemasDir != "" {
-		_ = migrateSchemasDir(opts.SchemasDir, lowerIDMap)
+		if sErr := migrateSchemasDir(opts.SchemasDir, lowerIDMap); sErr != nil {
+			errs = append(errs, fmt.Errorf("migrate schemas directory '%s': %w", opts.SchemasDir, sErr))
+		}
 	}
 
-	// 6. Clean up legacy protocol files in protocolsDir if no longer referenced by any current agent config
+	// 6. Clean up legacy protocol files in protocolsDir ONLY if no current config or archive snapshot references oldID
 	stillReferenced := collectReferencedProtocolIDs(agentsDir)
 	for oldID := range idMap {
 		if stillReferenced[strings.ToLower(oldID)] {
 			continue
 		}
 		if opts.ProtocolStore != nil {
-			_ = opts.ProtocolStore.Delete(oldID)
+			if dErr := opts.ProtocolStore.Delete(oldID); dErr != nil && !errors.Is(dErr, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("delete legacy protocol '%s' from store: %w", oldID, dErr))
+			}
 		}
 		if oldPath, err := pathguard.ResolveSandboxedPath(protocolsDir, oldID+".json"); err == nil {
-			_ = os.Remove(oldPath)
+			if rErr := os.Remove(oldPath); rErr != nil && !os.IsNotExist(rErr) {
+				errs = append(errs, fmt.Errorf("remove legacy protocol file '%s': %w", oldPath, rErr))
+			}
 		}
 	}
 
+	if err := errors.Join(errs...); err != nil {
+		return len(lowerIDMap), err
+	}
 	return len(lowerIDMap), nil
 }
 
@@ -276,22 +332,13 @@ func migrateProtocolFile(protocolsDir string, store protocol.Store, oldID, newID
 	targetProto := oldProto
 	targetProto.ID = newID
 
-	// If newPath already exists, merge preserving non-empty credentials/settings
+	// If newPath already exists, preserve any user edits on existingNew over legacy targetProto
 	if newBytes, nErr := os.ReadFile(newPath); nErr == nil {
 		var existingNew protocol.Protocol
 		if json.Unmarshal(newBytes, &existingNew) == nil {
-			if existingNew.AuthToken != "" {
-				targetProto.AuthToken = existingNew.AuthToken
-			}
-			if existingNew.Type != "" && existingNew.Type != "sse" {
-				targetProto.Type = existingNew.Type
-			}
-			if existingNew.TransportMode != "" {
-				targetProto.TransportMode = existingNew.TransportMode
-			}
-			if len(existingNew.AllowedTools) > 0 {
-				targetProto.AllowedTools = existingNew.AllowedTools
-			}
+			mergePreservedProtocol(&existingNew, &targetProto)
+			existingNew.ID = newID
+			targetProto = existingNew
 		}
 	}
 
@@ -378,19 +425,7 @@ func migrateAgentConfigFile(cfgPath string, lowerIDMap map[string]string) error 
 				changed = true
 			}
 			if prev, exists := byID[targetID]; exists {
-				// Merge preserving non-empty AuthToken, AllowedTools, TargetScope, and non-default Type
-				if p.AuthToken == "" {
-					p.AuthToken = prev.AuthToken
-				}
-				if len(p.AllowedTools) == 0 {
-					p.AllowedTools = prev.AllowedTools
-				}
-				if p.TargetScope == "" {
-					p.TargetScope = prev.TargetScope
-				}
-				if (p.Type == "" || p.Type == "sse") && prev.Type != "" && prev.Type != "stdio" {
-					p.Type = prev.Type
-				}
+				mergePreservedProtocolConfig(&p, &prev)
 				changed = true
 			} else {
 				order = append(order, targetID)
@@ -594,7 +629,13 @@ func migrateAgentDLPFile(dlpPath string, lowerIDMap map[string]string) error {
 
 func migrateAgentPolicyStore(ctx context.Context, store policy.Store, agentName string, lowerIDMap map[string]string) error {
 	cfg, err := store.GetAgentConfig(ctx, agentName)
-	if err != nil || cfg == nil || len(cfg.ToolExemptions) == 0 {
+	if err != nil {
+		if errors.Is(err, policy.ErrConfigNotFound) {
+			return nil
+		}
+		return err
+	}
+	if cfg == nil || len(cfg.ToolExemptions) == 0 {
 		return nil
 	}
 
@@ -617,8 +658,12 @@ func migrateAgentPolicyStore(ctx context.Context, store policy.Store, agentName 
 func migrateSchemasDir(schemasDir string, lowerIDMap map[string]string) error {
 	entries, err := os.ReadDir(schemasDir)
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
+	var errs []error
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -627,10 +672,14 @@ func migrateSchemasDir(schemasDir string, lowerIDMap map[string]string) error {
 			// Rewrite top-level tool keys inside mcp_tools.json if present
 			p, pErr := pathguard.ResolveSandboxedPath(schemasDir, "mcp_tools.json")
 			if pErr != nil {
+				errs = append(errs, pErr)
 				continue
 			}
 			raw, rErr := os.ReadFile(p)
 			if rErr != nil {
+				if !os.IsNotExist(rErr) {
+					errs = append(errs, rErr)
+				}
 				continue
 			}
 			var m map[string]json.RawMessage
@@ -647,8 +696,11 @@ func migrateSchemasDir(schemasDir string, lowerIDMap map[string]string) error {
 				nm[rk] = v
 			}
 			if changed {
-				if out, mErr := json.MarshalIndent(nm, "", "  "); mErr == nil {
-					_ = atomicWriteFile(p, out, 0600)
+				out, mErr := json.MarshalIndent(nm, "", "  ")
+				if mErr != nil {
+					errs = append(errs, mErr)
+				} else if wErr := atomicWriteFile(p, out, 0600); wErr != nil {
+					errs = append(errs, wErr)
 				}
 			}
 			continue
@@ -662,15 +714,39 @@ func migrateSchemasDir(schemasDir string, lowerIDMap map[string]string) error {
 		oldPath, err1 := pathguard.ResolveSandboxedPath(schemasDir, entry.Name())
 		newPath, err2 := pathguard.ResolveSandboxedPath(schemasDir, newToolName+".json")
 		if err1 != nil || err2 != nil {
+			errs = append(errs, errors.Join(err1, err2))
 			continue
 		}
 		if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
-			_ = os.Rename(oldPath, newPath)
-		} else {
-			_ = os.Remove(oldPath)
+			if rErr := os.Rename(oldPath, newPath); rErr != nil {
+				errs = append(errs, rErr)
+			}
+		} else if rErr := os.Remove(oldPath); rErr != nil && !os.IsNotExist(rErr) {
+			errs = append(errs, rErr)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+func collectProtocolRefsFromConfig(cfgPath string, refs map[string]bool) {
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return
+	}
+	var rc agent.RouteConfig
+	if json.Unmarshal(data, &rc) != nil {
+		return
+	}
+	for _, p := range rc.Protocols {
+		if id := strings.ToLower(strings.TrimSpace(p.ID)); id != "" {
+			refs[id] = true
+		}
+	}
+	for k := range rc.RetainedGovernance {
+		if id := strings.ToLower(strings.TrimSpace(k)); id != "" {
+			refs[id] = true
+		}
+	}
 }
 
 func collectReferencedProtocolIDs(agentsDir string) map[string]bool {
@@ -683,20 +759,29 @@ func collectReferencedProtocolIDs(agentsDir string) map[string]bool {
 		if !ae.IsDir() {
 			continue
 		}
-		cfgPath := filepath.Join(agentsDir, ae.Name(), "current", "config.json")
-		data, err := os.ReadFile(cfgPath)
+		agentDir, err := pathguard.ResolveSandboxedPath(agentsDir, ae.Name())
 		if err != nil {
 			continue
 		}
-		var rc agent.RouteConfig
-		if json.Unmarshal(data, &rc) != nil {
-			continue
+		if currentDir, err := pathguard.ResolveSandboxedPath(agentDir, "current"); err == nil {
+			if cfgPath, err := pathguard.ResolveSandboxedPath(currentDir, "config.json"); err == nil {
+				collectProtocolRefsFromConfig(cfgPath, refs)
+			}
 		}
-		for _, p := range rc.Protocols {
-			refs[strings.ToLower(strings.TrimSpace(p.ID))] = true
-		}
-		for k := range rc.RetainedGovernance {
-			refs[strings.ToLower(strings.TrimSpace(k))] = true
+		// Never delete legacy protocol files if any archived snapshot still references them.
+		if archiveDir, err := pathguard.ResolveSandboxedPath(agentDir, "archive"); err == nil {
+			if snaps, sErr := os.ReadDir(archiveDir); sErr == nil {
+				for _, snap := range snaps {
+					if !snap.IsDir() {
+						continue
+					}
+					if snapDir, err := pathguard.ResolveSandboxedPath(archiveDir, snap.Name()); err == nil {
+						if snapCfg, err := pathguard.ResolveSandboxedPath(snapDir, "config.json"); err == nil {
+							collectProtocolRefsFromConfig(snapCfg, refs)
+						}
+					}
+				}
+			}
 		}
 	}
 	return refs

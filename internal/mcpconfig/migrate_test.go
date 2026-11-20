@@ -273,3 +273,49 @@ func TestMigrateLegacyProtocolIDs_EndToEndMultiStoreAndIdempotent(t *testing.T) 
 		t.Errorf("expected 0 migrations on second idempotent run, got %d", count2)
 	}
 }
+
+func TestMigrateLegacyProtocolIDs_PreservesFileReferencedByArchiveSnapshot(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	protocolsDir := filepath.Join(tmpDir, "protocols")
+	agentsDir := filepath.Join(tmpDir, "agents")
+	currentDir := filepath.Join(agentsDir, "antigravity", "current")
+	archiveSnapDir := filepath.Join(agentsDir, "antigravity", "archive", "20261119-200000")
+
+	for _, dir := range []string{protocolsDir, currentDir, archiveSnapDir} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	legacyID := legacySanitizeIdentifier("antigravity", "codegraph")
+	protoJSON := `{"id":"` + legacyID + `","name":"codegraph (antigravity)","type":"stdio","command":"codegraph","url_or_command":"codegraph"}`
+	if err := os.WriteFile(filepath.Join(protocolsDir, legacyID+".json"), []byte(protoJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfgJSON := `{"agent_id":"antigravity","agent_name":"antigravity","routing_mode":"aggregated","protocols":[{"protocol_id":"` + legacyID + `","protocol_name":"codegraph (antigravity)","type":"stdio","command":"codegraph","url_or_command":"codegraph"}]}`
+	if err := os.WriteFile(filepath.Join(currentDir, "config.json"), []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(archiveSnapDir, "config.json"), []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := MigrateLegacyProtocolIDs(context.Background(), MigrateOptions{
+		ProtocolsDir: protocolsDir,
+		AgentsDir:    agentsDir,
+	})
+	if err != nil {
+		t.Fatalf("MigrateLegacyProtocolIDs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 migration, got %d", count)
+	}
+	if _, err := os.Stat(filepath.Join(protocolsDir, "codegraph_696c.json")); err != nil {
+		t.Fatalf("expected migrated codegraph_696c.json: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(protocolsDir, legacyID+".json")); err != nil {
+		t.Fatalf("expected legacy protocol file referenced by archive snapshot to be preserved, got err=%v", err)
+	}
+}

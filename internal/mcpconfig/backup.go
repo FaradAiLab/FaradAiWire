@@ -358,21 +358,7 @@ func PersistAdoptedProtocols(
 			}
 		}
 		if existingProto != nil {
-			if p.AuthToken == "" {
-				p.AuthToken = existingProto.AuthToken
-			}
-			if s.URL != "" && existingProto.Type != "" && existingProto.Type != "stdio" {
-				p.Type = existingProto.Type
-			}
-			if existingProto.TransportMode != "" {
-				p.TransportMode = existingProto.TransportMode
-			}
-			if len(p.AllowedTools) == 0 && len(existingProto.AllowedTools) > 0 {
-				p.AllowedTools = existingProto.AllowedTools
-			}
-			if !existingProto.CreatedAt.IsZero() {
-				p.CreatedAt = existingProto.CreatedAt
-			}
+			mergePreservedProtocol(p, existingProto)
 		}
 
 		if protoStore != nil {
@@ -456,18 +442,7 @@ func PersistAdoptedProtocols(
 	// Add/update with newly attached protocols while preserving existing agent-level overrides
 	for _, ap := range attachedProtocols {
 		if prev, exists := protocolMap[ap.ID]; exists {
-			if ap.AuthToken == "" {
-				ap.AuthToken = prev.AuthToken
-			}
-			if ap.TargetScope == "" {
-				ap.TargetScope = prev.TargetScope
-			}
-			if len(ap.AllowedTools) == 0 && len(prev.AllowedTools) > 0 {
-				ap.AllowedTools = prev.AllowedTools
-			}
-			if ap.Type == "sse" && prev.Type != "" && prev.Type != "stdio" {
-				ap.Type = prev.Type
-			}
+			mergePreservedProtocolConfig(&ap, &prev)
 		}
 		protocolMap[ap.ID] = ap
 	}
@@ -491,4 +466,46 @@ func PersistAdoptedProtocols(
 	}
 
 	return nil
+}
+
+// mergePreservedProtocol copies non-empty runtime/credential metadata from prev onto dst
+// when dst lacks them (e.g. preserving AuthToken, Streamable HTTP Type, TransportMode, AllowedTools).
+func mergePreservedProtocol(dst, prev *protocol.Protocol) {
+	if dst == nil || prev == nil {
+		return
+	}
+	if dst.AuthToken == "" {
+		dst.AuthToken = prev.AuthToken
+	}
+	if (dst.Type == "" || dst.Type == "sse") && prev.Type != "" && prev.Type != "stdio" {
+		dst.Type = prev.Type
+	}
+	if dst.TransportMode == "" && prev.TransportMode != "" {
+		dst.TransportMode = prev.TransportMode
+	}
+	if len(dst.AllowedTools) == 0 && len(prev.AllowedTools) > 0 {
+		dst.AllowedTools = prev.AllowedTools
+	}
+	if dst.CreatedAt.IsZero() && !prev.CreatedAt.IsZero() {
+		dst.CreatedAt = prev.CreatedAt
+	}
+}
+
+// mergePreservedProtocolConfig copies non-empty agent-level overrides from prev onto dst.
+func mergePreservedProtocolConfig(dst, prev *agent.ProtocolConfig) {
+	if dst == nil || prev == nil {
+		return
+	}
+	if dst.AuthToken == "" {
+		dst.AuthToken = prev.AuthToken
+	}
+	if dst.TargetScope == "" {
+		dst.TargetScope = prev.TargetScope
+	}
+	if len(dst.AllowedTools) == 0 && len(prev.AllowedTools) > 0 {
+		dst.AllowedTools = prev.AllowedTools
+	}
+	if (dst.Type == "" || dst.Type == "sse") && prev.Type != "" && prev.Type != "stdio" {
+		dst.Type = prev.Type
+	}
 }

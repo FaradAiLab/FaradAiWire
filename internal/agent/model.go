@@ -507,6 +507,20 @@ func SanitizeToolSegment(raw string) string {
 	return res
 }
 
+// IsHexString reports whether s is a non-empty hexadecimal string (case-insensitive).
+func IsHexString(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 func isLowerHex(s string) bool {
 	if len(s) == 0 {
 		return false
@@ -701,25 +715,52 @@ func GetProtocolSlug(proto *ProtocolConfig) string {
 	return ""
 }
 
+// ResolveToolSlug computes the effective aggregated protocol slug from proto (if resolved)
+// or falls back to ToolMetadata's ProtocolID / ProtocolName fields.
+func ResolveToolSlug(proto *ProtocolConfig, protocolID, protocolName string) string {
+	if proto != nil {
+		if slug := GetProtocolSlug(proto); slug != "" {
+			return slug
+		}
+	}
+	if protocolID != "" && !strings.Contains(protocolID, " ") {
+		return CompactLegacyProtocolSlug(protocolID)
+	}
+	if protocolName != "" {
+		return CompactLegacyProtocolSlug(strings.ReplaceAll(protocolName, " ", "_"))
+	}
+	return ""
+}
+
 // FindProtocol attempts to locate an attached protocol by ID, Name, protocol slug, or narrowed `<stem>_<4hex>` prefix.
 func (r *RouteConfig) FindProtocol(nameOrID string) *ProtocolConfig {
 	if r == nil || nameOrID == "" {
 		return nil
 	}
+
+	// Fast-path: zero-allocation exact case-insensitive match on Name or ID.
 	for i := range r.Protocols {
-		slug := GetProtocolSlug(&r.Protocols[i])
-		if strings.EqualFold(r.Protocols[i].Name, nameOrID) ||
-			strings.EqualFold(r.Protocols[i].ID, nameOrID) ||
-			(slug != "" && strings.EqualFold(slug, nameOrID)) ||
-			(r.Protocols[i].ID != "" && strings.EqualFold(CompactLegacyProtocolSlug(r.Protocols[i].ID), CompactLegacyProtocolSlug(nameOrID))) {
+		if strings.EqualFold(r.Protocols[i].Name, nameOrID) || strings.EqualFold(r.Protocols[i].ID, nameOrID) {
 			return &r.Protocols[i]
 		}
 	}
 
-	// Fallback for narrowed prefixes produced by FormatAggregatedToolName (e.g. `seq_516f` matching `sequential_516f`)
+	// Second pass: hoist CompactLegacyProtocolSlug(nameOrID) outside the loop.
+	compactReq := CompactLegacyProtocolSlug(nameOrID)
+	for i := range r.Protocols {
+		slug := GetProtocolSlug(&r.Protocols[i])
+		if (slug != "" && strings.EqualFold(slug, nameOrID)) ||
+			(compactReq != "" && strings.EqualFold(slug, compactReq)) ||
+			(r.Protocols[i].ID != "" && compactReq != "" && strings.EqualFold(CompactLegacyProtocolSlug(r.Protocols[i].ID), compactReq)) {
+			return &r.Protocols[i]
+		}
+	}
+
+	// Fallback for narrowed prefixes produced by FormatAggregatedToolName (e.g. `seq_516f` matching `sequential_516f`).
+	// Requires unique match across all attached protocols so hash/prefix collisions fail closed.
 	if reqStem, reqHash4, ok := extractTrailingHash4(nameOrID); ok {
-		var hashMatch *ProtocolConfig
-		hashMatchCount := 0
+		var prefixMatches []*ProtocolConfig
+		var hashMatches []*ProtocolConfig
 		for i := range r.Protocols {
 			p := &r.Protocols[i]
 			pSlug := GetProtocolSlug(p)
@@ -730,17 +771,99 @@ func (r *RouteConfig) FindProtocol(nameOrID string) *ProtocolConfig {
 			if !pOk || pHash4 != reqHash4 {
 				continue
 			}
-			hashMatch = p
-			hashMatchCount++
+			hashMatches = append(hashMatches, p)
 			if strings.HasPrefix(pStem, reqStem) {
-				return p
+				prefixMatches = append(prefixMatches, p)
 			}
 		}
-		if hashMatchCount == 1 {
-			return hashMatch
+		if len(prefixMatches) == 1 {
+			return prefixMatches[0]
+		}
+		if len(prefixMatches) == 0 && len(hashMatches) == 1 {
+			return hashMatches[0]
 		}
 	}
 	return nil
+}
+
+// singleProtocolMatchesPrefix tests whether a configured rule prefix (e.g. legacyID, compactSlug,
+// or narrowed `<stem>_<4hex>`) refers to targetProto without scanning r.Protocols (O(1)).
+func singleProtocolMatchesPrefix(targetProto *ProtocolConfig, targetSlug, targetHash4 string, targetHasHash bool, cfgPrefix string) bool {
+	if targetProto == nil || cfgPrefix == "" {
+		return false
+	}
+	if strings.EqualFold(targetProto.Name, cfgPrefix) ||
+		strings.EqualFold(targetProto.ID, cfgPrefix) ||
+		(targetSlug != "" && strings.EqualFold(targetSlug, cfgPrefix)) {
+		return true
+	}
+	if targetSlug != "" {
+		if compactCfg := CompactLegacyProtocolSlug(cfgPrefix); compactCfg != "" && strings.EqualFold(targetSlug, compactCfg) {
+			return true
+		}
+	}
+	if targetHasHash {
+		if _, cfgHash4, ok := extractTrailingHash4(cfgPrefix); ok && cfgHash4 == targetHash4 {
+			return true
+		}
+	}
+	return false
+}
+
+// splitIncomingTool resolves incomingToolName into its clean suffix and optional owning protocol metadata.
+func (r *RouteConfig) splitIncomingTool(toolName string) (cleanName string, incomingProto *ProtocolConfig, incomingSlug, incomingHash4 string, hasHash bool, hasPrefix bool) {
+	cleanName = toolName
+	if idx := strings.Index(toolName, "__"); idx >= 0 {
+		prefix := toolName[:idx]
+		cleanName = toolName[idx+2:]
+		hasPrefix = true
+		incomingProto = r.FindProtocol(prefix)
+		if incomingProto != nil {
+			incomingSlug = GetProtocolSlug(incomingProto)
+			_, incomingHash4, hasHash = extractTrailingHash4(incomingSlug)
+			if !hasHash {
+				_, incomingHash4, hasHash = extractTrailingHash4(incomingProto.ID)
+			}
+		}
+	}
+	return cleanName, incomingProto, incomingSlug, incomingHash4, hasHash, hasPrefix
+}
+
+// ruleEntryMatchesTool checks whether a configured rule key (from EnabledTools or ToolGovernance)
+// matches an incoming tool invocation across exact, unprefixed, legacy-ID, narrowed-prefix, and Tier-3 compacted forms.
+func ruleEntryMatchesTool(configuredEntry, incomingToolName, cleanName string, incomingProto *ProtocolConfig, incomingSlug, incomingHash4 string, hasHash bool, formattedIncoming *string) bool {
+	if strings.EqualFold(configuredEntry, incomingToolName) || strings.EqualFold(configuredEntry, cleanName) {
+		return true
+	}
+	if incomingProto == nil {
+		return false
+	}
+	cfgPrefix, cfgTool, ok := strings.Cut(configuredEntry, "__")
+	if !ok {
+		return false
+	}
+	if !singleProtocolMatchesPrefix(incomingProto, incomingSlug, incomingHash4, hasHash, cfgPrefix) {
+		return false
+	}
+	if strings.EqualFold(cfgTool, cleanName) {
+		return true
+	}
+	if incomingSlug == "" {
+		return false
+	}
+	formattedCfg := FormatAggregatedToolName(incomingSlug, cfgTool)
+	if strings.EqualFold(formattedCfg, incomingToolName) {
+		return true
+	}
+	if formattedIncoming != nil {
+		if *formattedIncoming == "" {
+			*formattedIncoming = FormatAggregatedToolName(incomingSlug, cleanName)
+		}
+		if strings.EqualFold(formattedCfg, *formattedIncoming) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsToolAllowed returns true if toolName is allowed under the agent's Layer 2 scoping rules.
@@ -748,13 +871,6 @@ func (r *RouteConfig) FindProtocol(nameOrID string) *ProtocolConfig {
 func (r *RouteConfig) IsToolAllowed(toolName string) bool {
 	if r == nil {
 		return true
-	}
-	cleanName := toolName
-	var incomingProto *ProtocolConfig
-	if strings.Contains(toolName, "__") {
-		parts := strings.SplitN(toolName, "__", 2)
-		incomingProto = r.FindProtocol(parts[0])
-		cleanName = parts[1]
 	}
 
 	// Resolve enabled list (from ToolOverrides.EnabledTools or EnabledTools)
@@ -769,15 +885,11 @@ func (r *RouteConfig) IsToolAllowed(toolName string) bool {
 		return true // No Layer 2 restriction
 	}
 
+	cleanName, incomingProto, incomingSlug, incomingHash4, hasHash, _ := r.splitIncomingTool(toolName)
+	var formattedIncoming string
 	for _, allowed := range enabledList {
-		if strings.EqualFold(allowed, toolName) || strings.EqualFold(allowed, cleanName) {
+		if ruleEntryMatchesTool(allowed, toolName, cleanName, incomingProto, incomingSlug, incomingHash4, hasHash, &formattedIncoming) {
 			return true
-		}
-		if incomingProto != nil && strings.Contains(allowed, "__") {
-			ap := strings.SplitN(allowed, "__", 2)
-			if strings.EqualFold(ap[1], cleanName) && r.FindProtocol(ap[0]) == incomingProto {
-				return true
-			}
 		}
 	}
 	return false
@@ -792,30 +904,19 @@ func (r *RouteConfig) GetToolGovernanceMode(toolName string) (ToolGovernanceMode
 	if mode, ok := r.ToolGovernance[toolName]; ok && mode.IsValid() {
 		return mode, true
 	}
-	var rawTool string
-	var incomingProto *ProtocolConfig
-	hasPrefix := false
-	if strings.Contains(toolName, "__") {
-		parts := strings.SplitN(toolName, "__", 2)
-		incomingProto = r.FindProtocol(parts[0])
-		rawTool = parts[1]
-		hasPrefix = true
-		if mode, ok := r.ToolGovernance[rawTool]; ok && mode.IsValid() {
+	cleanName, incomingProto, incomingSlug, incomingHash4, hasHash, hasPrefix := r.splitIncomingTool(toolName)
+	if hasPrefix {
+		if mode, ok := r.ToolGovernance[cleanName]; ok && mode.IsValid() {
 			return mode, true
 		}
 	}
+	var formattedIncoming string
 	for configuredName, mode := range r.ToolGovernance {
 		if !mode.IsValid() {
 			continue
 		}
-		if strings.EqualFold(configuredName, toolName) || (hasPrefix && strings.EqualFold(configuredName, rawTool)) {
+		if ruleEntryMatchesTool(configuredName, toolName, cleanName, incomingProto, incomingSlug, incomingHash4, hasHash, &formattedIncoming) {
 			return mode, true
-		}
-		if incomingProto != nil && strings.Contains(configuredName, "__") {
-			cp := strings.SplitN(configuredName, "__", 2)
-			if strings.EqualFold(cp[1], rawTool) && r.FindProtocol(cp[0]) == incomingProto {
-				return mode, true
-			}
 		}
 	}
 	return "", false
