@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 
@@ -478,30 +480,228 @@ func (r *RouteConfig) IsDirect() bool {
 	return strings.EqualFold(r.RoutingMode, "direct")
 }
 
+// MaxWireToolNameLen is the maximum character budget for FaradAiWire tool names in tools/list,
+// leaving 20 characters of headroom for MCP client prefixes (e.g. "mcp__farad-ai-wire__" = 20,
+// "mcp_farad-ai-wire_" = 18) within the 64-character LLM tool-name limit (`^[a-zA-Z0-9_-]{1,64}$`).
+const MaxWireToolNameLen = 44
+
+// SanitizeToolSegment normalizes a single tool or protocol segment to match `^[a-zA-Z0-9_-]+$`
+// while collapsing consecutive underscores so a single segment never contains `"__"`.
+func SanitizeToolSegment(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	lastWasUnderscore := false
+	for _, r := range raw {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+			lastWasUnderscore = false
+		} else if !lastWasUnderscore {
+			b.WriteRune('_')
+			lastWasUnderscore = true
+		}
+	}
+	res := strings.Trim(b.String(), "_-")
+	if res == "" {
+		return "tool"
+	}
+	return res
+}
+
+func isLowerHex(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// extractTrailingHash4 extracts the 4-character hex discriminator from a protocol slug/ID
+// (supporting both new `_[0-9a-f]{4}` and legacy `_[0-9a-f]{6}` where the first 4 hex chars
+// equal `sha256[:2]`), returning `(stemWithoutHash, hash4, true)` when present.
+func extractTrailingHash4(slug string) (string, string, bool) {
+	lower := strings.ToLower(slug)
+	idx := strings.LastIndexByte(lower, '_')
+	if idx <= 0 {
+		return "", "", false
+	}
+	suffix := lower[idx+1:]
+	if len(suffix) == 4 && isLowerHex(suffix) {
+		return lower[:idx], suffix, true
+	}
+	if len(suffix) == 6 && isLowerHex(suffix) {
+		return lower[:idx], suffix[:4], true
+	}
+	return "", "", false
+}
+
+// CompactLegacyProtocolSlug normalizes a raw protocol ID/slug and compacts legacy
+// `<profile>_<full_path>_<6hex>` identifiers (e.g. `antigravity_codegraph_696cf8` or
+// `cline_github_com_..._sequentialthinking_516fbc`) to `<stem_max10>_<4hex>` (`codegraph_696c`,
+// `sequential_516f`). Short or non-hash slugs (e.g. presets `context7`, `filesystem`) stay intact.
+func CompactLegacyProtocolSlug(rawSlug string) string {
+	s := strings.ToLower(strings.TrimSpace(rawSlug))
+	if s == "" {
+		return ""
+	}
+	s = strings.ToLower(SanitizeToolSegment(s))
+	if len(s) <= 15 {
+		return s
+	}
+	idx := strings.LastIndexByte(s, '_')
+	if idx > 0 {
+		suffix := s[idx+1:]
+		if (len(suffix) == 6 || len(suffix) == 4) && isLowerHex(suffix) {
+			hash4 := suffix[:4]
+			prefix := s[:idx]
+			// Take the last meaningful token of `<profile>_<path_tokens>`
+			tokens := strings.Split(prefix, "_")
+			leaf := prefix
+			for i := len(tokens) - 1; i >= 0; i-- {
+				tok := strings.TrimSpace(tokens[i])
+				if tok == "" {
+					continue
+				}
+				// Rejoin short trailing suffix like `_mcp` if preceding token exists (e.g. `context7_mcp` -> `context7_m`)
+				if tok == "mcp" && i > 0 && tokens[i-1] != "" {
+					leaf = tokens[i-1] + "_mcp"
+				} else {
+					leaf = tok
+				}
+				break
+			}
+			if len(leaf) > 10 {
+				leaf = leaf[:10]
+			}
+			leaf = strings.Trim(leaf, "_-")
+			if leaf == "" {
+				leaf = "mcp"
+			}
+			return leaf + "_" + hash4
+		}
+	}
+	if len(s) > 15 {
+		sum := sha256.Sum256([]byte(s))
+		stem := strings.Trim(s[:10], "_-")
+		if stem == "" {
+			stem = "mcp"
+		}
+		return stem + "_" + hex.EncodeToString(sum[:2])
+	}
+	return s
+}
+
+// FormatAggregatedToolName constructs a deterministic, `<= 44`-character aggregated tool name
+// (`<mcpPrefix>__<toolName>`) shared by CompileToolsList and ResolveToolProtocol:
+//  1. If `<protoSlug>__<cleanRaw>` fits in 44 chars, emit it directly.
+//  2. If it exceeds 44 chars and `len(cleanRaw) <= 36`, keep `cleanRaw` 100% intact and narrow
+//     `<protoSlug>` to `<shortStem>_<4hex>` (minimum 6 chars) so FindProtocol still resolves `_<4hex>`.
+//  3. Only if `len(cleanRaw) > 36`, use a 6-char `<1char>_<4hex>` prefix and compact `cleanRaw` with `_[0-9a-f]{4}`.
+func FormatAggregatedToolName(protoSlug, rawName string) string {
+	slug := CompactLegacyProtocolSlug(protoSlug)
+	trimmedRaw := rawName
+	if slug != "" {
+		trimmedRaw = strings.TrimPrefix(trimmedRaw, slug+"__")
+	}
+	if protoSlug != "" {
+		trimmedRaw = strings.TrimPrefix(trimmedRaw, strings.ToLower(protoSlug)+"__")
+		trimmedRaw = strings.TrimPrefix(trimmedRaw, protoSlug+"__")
+	}
+	cleanRaw := SanitizeToolSegment(trimmedRaw)
+	if slug == "" {
+		if len(cleanRaw) <= MaxWireToolNameLen {
+			return cleanRaw
+		}
+		sum := sha256.Sum256([]byte(rawName))
+		prefix := strings.Trim(cleanRaw[:MaxWireToolNameLen-5], "_-")
+		if prefix == "" {
+			prefix = "tool"
+		}
+		return prefix + "_" + hex.EncodeToString(sum[:2])
+	}
+
+	candidate := slug + "__" + cleanRaw
+	if len(candidate) <= MaxWireToolNameLen {
+		return candidate
+	}
+
+	stem, hash4, hasHash := extractTrailingHash4(slug)
+	if !hasHash {
+		sum := sha256.Sum256([]byte(slug))
+		hash4 = hex.EncodeToString(sum[:2])
+		stem = slug
+	}
+	if stem == "" {
+		stem = "p"
+	}
+
+	// Tier 2: Preserve cleanRaw intact by narrowing the MCP prefix stem while retaining `_" + hash4`
+	availSlug := MaxWireToolNameLen - 2 - len(cleanRaw) // space before "__" + cleanRaw
+	availStem := availSlug - 5                          // space before "_" + hash4 (5 chars)
+	if availStem >= 1 {
+		shortStem := stem
+		if len(shortStem) > availStem {
+			shortStem = shortStem[:availStem]
+		}
+		shortStem = strings.Trim(shortStem, "_-")
+		if shortStem == "" {
+			shortStem = stem[:1]
+		}
+		return shortStem + "_" + hash4 + "__" + cleanRaw
+	}
+
+	// Tier 3: Extreme raw tool name (> 36 chars) — minimum 6-char `<1char>_<4hex>` slug + compacted rawName
+	minSlug := strings.Trim(stem[:1], "_-")
+	if minSlug == "" {
+		minSlug = "p"
+	}
+	minSlug = minSlug + "_" + hash4 // 6 chars
+	maxRawPart := MaxWireToolNameLen - len(minSlug) - 2
+	rawSum := sha256.Sum256([]byte(rawName))
+	rawHash4 := hex.EncodeToString(rawSum[:2])
+	rawPrefixLen := maxRawPart - 5
+	if rawPrefixLen < 1 {
+		rawPrefixLen = 1
+	}
+	rawPrefix := cleanRaw
+	if len(rawPrefix) > rawPrefixLen {
+		rawPrefix = rawPrefix[:rawPrefixLen]
+	}
+	rawPrefix = strings.Trim(rawPrefix, "_-")
+	if rawPrefix == "" {
+		rawPrefix = "t"
+	}
+	return minSlug + "__" + rawPrefix + "_" + rawHash4
+}
+
 // GetProtocolSlug returns the clean slug/prefix for an MCP protocol.
 func GetProtocolSlug(proto *ProtocolConfig) string {
 	if proto == nil {
 		return ""
 	}
 	if proto.Name != "" && !strings.Contains(proto.Name, " ") && strings.HasSuffix(proto.ID, "-proto") {
-		return strings.ToLower(proto.Name)
+		return CompactLegacyProtocolSlug(proto.Name)
 	}
 	if proto.ID != "" && !strings.Contains(proto.ID, " ") {
-		return strings.ToLower(proto.ID)
+		return CompactLegacyProtocolSlug(proto.ID)
 	}
 	if proto.Name != "" {
 		if !strings.Contains(proto.Name, " ") {
-			return strings.ToLower(proto.Name)
+			return CompactLegacyProtocolSlug(proto.Name)
 		}
 		if proto.ID != "" {
-			return strings.ToLower(strings.ReplaceAll(proto.ID, " ", "_"))
+			return CompactLegacyProtocolSlug(strings.ReplaceAll(proto.ID, " ", "_"))
 		}
-		return strings.ToLower(strings.ReplaceAll(proto.Name, " ", "_"))
+		return CompactLegacyProtocolSlug(strings.ReplaceAll(proto.Name, " ", "_"))
 	}
 	return ""
 }
 
-// FindProtocol attempts to locate an attached protocol by ID or Name (case-insensitive) or protocol slug.
+// FindProtocol attempts to locate an attached protocol by ID, Name, protocol slug, or narrowed `<stem>_<4hex>` prefix.
 func (r *RouteConfig) FindProtocol(nameOrID string) *ProtocolConfig {
 	if r == nil || nameOrID == "" {
 		return nil
@@ -510,8 +710,34 @@ func (r *RouteConfig) FindProtocol(nameOrID string) *ProtocolConfig {
 		slug := GetProtocolSlug(&r.Protocols[i])
 		if strings.EqualFold(r.Protocols[i].Name, nameOrID) ||
 			strings.EqualFold(r.Protocols[i].ID, nameOrID) ||
-			(slug != "" && strings.EqualFold(slug, nameOrID)) {
+			(slug != "" && strings.EqualFold(slug, nameOrID)) ||
+			(r.Protocols[i].ID != "" && strings.EqualFold(CompactLegacyProtocolSlug(r.Protocols[i].ID), CompactLegacyProtocolSlug(nameOrID))) {
 			return &r.Protocols[i]
+		}
+	}
+
+	// Fallback for narrowed prefixes produced by FormatAggregatedToolName (e.g. `seq_516f` matching `sequential_516f`)
+	if reqStem, reqHash4, ok := extractTrailingHash4(nameOrID); ok {
+		var hashMatch *ProtocolConfig
+		hashMatchCount := 0
+		for i := range r.Protocols {
+			p := &r.Protocols[i]
+			pSlug := GetProtocolSlug(p)
+			pStem, pHash4, pOk := extractTrailingHash4(pSlug)
+			if !pOk {
+				pStem, pHash4, pOk = extractTrailingHash4(p.ID)
+			}
+			if !pOk || pHash4 != reqHash4 {
+				continue
+			}
+			hashMatch = p
+			hashMatchCount++
+			if strings.HasPrefix(pStem, reqStem) {
+				return p
+			}
+		}
+		if hashMatchCount == 1 {
+			return hashMatch
 		}
 	}
 	return nil
@@ -524,8 +750,10 @@ func (r *RouteConfig) IsToolAllowed(toolName string) bool {
 		return true
 	}
 	cleanName := toolName
+	var incomingProto *ProtocolConfig
 	if strings.Contains(toolName, "__") {
 		parts := strings.SplitN(toolName, "__", 2)
+		incomingProto = r.FindProtocol(parts[0])
 		cleanName = parts[1]
 	}
 
@@ -545,6 +773,12 @@ func (r *RouteConfig) IsToolAllowed(toolName string) bool {
 		if strings.EqualFold(allowed, toolName) || strings.EqualFold(allowed, cleanName) {
 			return true
 		}
+		if incomingProto != nil && strings.Contains(allowed, "__") {
+			ap := strings.SplitN(allowed, "__", 2)
+			if strings.EqualFold(ap[1], cleanName) && r.FindProtocol(ap[0]) == incomingProto {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -559,9 +793,11 @@ func (r *RouteConfig) GetToolGovernanceMode(toolName string) (ToolGovernanceMode
 		return mode, true
 	}
 	var rawTool string
+	var incomingProto *ProtocolConfig
 	hasPrefix := false
 	if strings.Contains(toolName, "__") {
 		parts := strings.SplitN(toolName, "__", 2)
+		incomingProto = r.FindProtocol(parts[0])
 		rawTool = parts[1]
 		hasPrefix = true
 		if mode, ok := r.ToolGovernance[rawTool]; ok && mode.IsValid() {
@@ -574,6 +810,12 @@ func (r *RouteConfig) GetToolGovernanceMode(toolName string) (ToolGovernanceMode
 		}
 		if strings.EqualFold(configuredName, toolName) || (hasPrefix && strings.EqualFold(configuredName, rawTool)) {
 			return mode, true
+		}
+		if incomingProto != nil && strings.Contains(configuredName, "__") {
+			cp := strings.SplitN(configuredName, "__", 2)
+			if strings.EqualFold(cp[1], rawTool) && r.FindProtocol(cp[0]) == incomingProto {
+				return mode, true
+			}
 		}
 	}
 	return "", false

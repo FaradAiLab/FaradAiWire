@@ -70,6 +70,7 @@ func (m *mockClientAdapter) RestoreBackup(backupPath string) error {
 }
 
 func TestExecuteAdopt_NoServers(t *testing.T) {
+	tmpDir := t.TempDir()
 	mockAdapter := &mockClientAdapter{
 		id:          mcpconfig.ClientCursor,
 		displayName: "Cursor",
@@ -77,7 +78,12 @@ func TestExecuteAdopt_NoServers(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := executeAdoptWithAdapters(adoptOptions{yes: true}, strings.NewReader(""), &out, []mcpconfig.ClientAdapter{mockAdapter})
+	code := executeAdoptWithAdapters(adoptOptions{
+		yes:          true,
+		backupDir:    filepath.Join(tmpDir, "backups"),
+		protocolsDir: filepath.Join(tmpDir, "protocols"),
+		agentsDir:    filepath.Join(tmpDir, "agents"),
+	}, strings.NewReader(""), &out, []mcpconfig.ClientAdapter{mockAdapter})
 
 	if code != 0 {
 		t.Fatalf("expected code 0, got %d", code)
@@ -225,10 +231,10 @@ func TestExecuteAdopt_Success(t *testing.T) {
 		t.Errorf("expected backup file to exist for cursor config %s", cfgFile)
 	}
 
-	// Verify protocol file was written with collision-safe SHA-256 suffix
-	matches, globErr := filepath.Glob(filepath.Join(protocolsDir, "cursor_test_server_*.json"))
+	// Verify protocol file was written with compact `<stem_max10>_<4hex>` suffix
+	matches, globErr := filepath.Glob(filepath.Join(protocolsDir, "test_serve_*.json"))
 	if globErr != nil || len(matches) != 1 {
-		t.Errorf("expected 1 protocol file matching cursor_test_server_*.json, got %v (err=%v)", matches, globErr)
+		t.Errorf("expected 1 protocol file matching test_serve_*.json, got %v (err=%v)", matches, globErr)
 	}
 	if _, err := os.Stat(filepath.Join(tmpDir, ".gitignore")); os.IsNotExist(err) {
 		t.Errorf("expected .gitignore to be created alongside protocols directory")
@@ -497,8 +503,8 @@ func TestExecuteAdopt_ServersFilterAndProbeTimeoutFromDuckDB(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected code 0 with --servers filter, got %d; out:\n%s", code, out.String())
 	}
-	alphaMatches, _ := filepath.Glob(filepath.Join(protocolsDir, "cursor_alpha_*.json"))
-	betaMatches, _ := filepath.Glob(filepath.Join(protocolsDir, "cursor_beta_*.json"))
+	alphaMatches, _ := filepath.Glob(filepath.Join(protocolsDir, "alpha_*.json"))
+	betaMatches, _ := filepath.Glob(filepath.Join(protocolsDir, "beta_*.json"))
 	if len(alphaMatches) != 1 || len(betaMatches) != 0 {
 		t.Fatalf("expected only alpha adopted, got alpha=%v beta=%v", alphaMatches, betaMatches)
 	}
@@ -756,3 +762,69 @@ func TestAttachAdminBearerAuth(t *testing.T) {
 		})
 	}
 }
+
+func TestExecuteAdopt_DryRunPreservesLegacyIDs_AndConfirmedAdoptMigrates(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	protocolsDir := filepath.Join(tmpDir, "protocols")
+	agentsDir := filepath.Join(tmpDir, "agents")
+	if err := os.MkdirAll(protocolsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(agentsDir, "antigravity", "current"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyFile := filepath.Join(protocolsDir, "antigravity_codegraph_696cf8.json")
+	if err := os.WriteFile(legacyFile, []byte(`{"id":"antigravity_codegraph_696cf8","name":"codegraph (antigravity)","type":"stdio","command":"codegraph","url_or_command":"codegraph"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfgFile := filepath.Join(agentsDir, "antigravity", "current", "config.json")
+	if err := os.WriteFile(cfgFile, []byte(`{"agent_id":"antigravity","agent_name":"antigravity","routing_mode":"aggregated","protocols":[{"protocol_id":"antigravity_codegraph_696cf8","protocol_name":"codegraph (antigravity)","type":"stdio","command":"codegraph","url_or_command":"codegraph"}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	emptyAdapter := &mockClientAdapter{
+		id:          mcpconfig.ClientAntigravity,
+		displayName: "Google Antigravity",
+		cfgPath:     filepath.Join(tmpDir, "mcp_config.json"),
+		detected:    true,
+		servers:     nil,
+	}
+
+	// 1. --dry-run must NOT mutate legacy protocol files
+	var outDry bytes.Buffer
+	if code := executeAdoptWithAdapters(adoptOptions{
+		dryRun:       true,
+		yes:          true,
+		backupDir:    filepath.Join(tmpDir, "backups"),
+		protocolsDir: protocolsDir,
+		agentsDir:    agentsDir,
+	}, strings.NewReader(""), &outDry, []mcpconfig.ClientAdapter{emptyAdapter}); code != 0 {
+		t.Fatalf("dry-run adopt returned %d", code)
+	}
+	if _, err := os.Stat(legacyFile); err != nil {
+		t.Fatalf("expected legacy protocol file to remain untouched during --dry-run: %v", err)
+	}
+
+	// 2. Confirmed adopt (--yes) with 0 new servers migrates existing legacy IDs to codegraph_696c
+	var outLive bytes.Buffer
+	if code := executeAdoptWithAdapters(adoptOptions{
+		dryRun:       false,
+		yes:          true,
+		backupDir:    filepath.Join(tmpDir, "backups"),
+		protocolsDir: protocolsDir,
+		agentsDir:    agentsDir,
+	}, strings.NewReader(""), &outLive, []mcpconfig.ClientAdapter{emptyAdapter}); code != 0 {
+		t.Fatalf("confirmed adopt returned %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(protocolsDir, "codegraph_696c.json")); err != nil {
+		t.Fatalf("expected migrated codegraph_696c.json to exist: %v", err)
+	}
+	if _, err := os.Stat(legacyFile); !os.IsNotExist(err) {
+		t.Errorf("expected legacy antigravity_codegraph_696cf8.json to be removed after migration")
+	}
+}
+

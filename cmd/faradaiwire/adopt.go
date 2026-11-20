@@ -437,6 +437,24 @@ func executeAdoptWithAdapters(opts adoptOptions, in io.Reader, out io.Writer, ad
 	}
 
 	if totalServers == 0 {
+		if !opts.dryRun && opts.yes {
+			var schemaStore schema.Store
+			if dbPath != "" {
+				if _, statErr := os.Stat(dbPath); statErr == nil {
+					if ss, sErr := schema.OpenDuckDBSchemaStore(dbPath); sErr == nil && ss != nil {
+						schemaStore = ss
+						defer func() { _ = ss.Close() }()
+					}
+				}
+			}
+			if migrated, mErr := mcpconfig.MigrateLegacyProtocolIDs(context.Background(), mcpconfig.MigrateOptions{
+				ProtocolsDir: opts.protocolsDir,
+				AgentsDir:    opts.agentsDir,
+				SchemaStore:  schemaStore,
+			}); mErr == nil && migrated > 0 {
+				fmt.Fprintf(out, "\n[✓] Migrated %d legacy Tool Source ID(s) to compact format.\n", migrated)
+			}
+		}
 		fmt.Fprintln(out, "\nNo MCP servers detected across supported AI clients.")
 		fmt.Fprintln(out, "To manually connect an agent, run: faradaiwire run")
 		return 0
@@ -563,6 +581,15 @@ func executeAdoptWithAdapters(opts adoptOptions, in io.Reader, out io.Writer, ad
 	}
 
 	fmt.Fprintln(out, "\nExecuting adoption and security shielding...")
+
+	if migrated, mErr := mcpconfig.MigrateLegacyProtocolIDs(context.Background(), mcpconfig.MigrateOptions{
+		ProtocolsDir:  opts.protocolsDir,
+		AgentsDir:     opts.agentsDir,
+		ProtocolStore: protoStore,
+		SchemaStore:   schemaStore,
+	}); mErr == nil && migrated > 0 {
+		fmt.Fprintf(out, "[✓] Normalized %d legacy Tool Source ID(s) to compact format\n", migrated)
+	}
 
 	succeededCount := 0
 	failedCount := 0

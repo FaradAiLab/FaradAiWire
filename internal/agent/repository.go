@@ -263,12 +263,8 @@ func (r *FSRepository) ResolveToolProtocol(agentName, toolName string) (*ToolTar
 		return nil, NewProtocolNotFoundError(agentName, "default")
 	}
 
-	// Single protocol shortcut
-	if len(agentCfg.Protocols) == 1 && (agentCfg.Protocols[0].URLOrCommand != "" || agentCfg.Protocols[0].Command != "") {
-		return buildToolTargetInfo(&agentCfg.Protocols[0], toolName), nil
-	}
-
-	// Lookup via tools manifest
+	// Lookup via tools manifest first so compacted (>36-char) or sanitized raw names
+	// always recover their exact t.RawName even on single-protocol agents.
 	tools, mErr := r.GetAgentManifest(agentName)
 	if mErr == nil {
 		for _, t := range tools {
@@ -281,9 +277,9 @@ func (r *FSRepository) ResolveToolProtocol(agentName, toolName string) (*ToolTar
 				protoSlug = GetProtocolSlug(proto)
 			} else {
 				if t.ProtocolID != "" && !strings.Contains(t.ProtocolID, " ") {
-					protoSlug = strings.ToLower(t.ProtocolID)
+					protoSlug = CompactLegacyProtocolSlug(t.ProtocolID)
 				} else if t.ProtocolName != "" {
-					protoSlug = strings.ToLower(strings.ReplaceAll(t.ProtocolName, " ", "_"))
+					protoSlug = CompactLegacyProtocolSlug(strings.ReplaceAll(t.ProtocolName, " ", "_"))
 				}
 			}
 
@@ -298,15 +294,18 @@ func (r *FSRepository) ResolveToolProtocol(agentName, toolName string) (*ToolTar
 			}
 
 			prefixedName := ""
+			formattedName := ""
 			if protoSlug != "" && raw != "" {
 				cleanRaw := strings.TrimPrefix(raw, protoSlug+"__")
 				prefixedName = fmt.Sprintf("%s__%s", protoSlug, cleanRaw)
+				formattedName = FormatAggregatedToolName(protoSlug, raw)
 			}
 
 			matches := strings.EqualFold(t.Name, toolName) ||
 				strings.EqualFold(t.RawName, toolName) ||
 				strings.EqualFold(t.CanonicalName, toolName) ||
-				(prefixedName != "" && strings.EqualFold(prefixedName, toolName))
+				(prefixedName != "" && strings.EqualFold(prefixedName, toolName)) ||
+				(formattedName != "" && strings.EqualFold(formattedName, toolName))
 
 			if matches {
 				if proto != nil && (proto.URLOrCommand != "" || proto.Command != "") {
@@ -318,6 +317,11 @@ func (r *FSRepository) ResolveToolProtocol(agentName, toolName string) (*ToolTar
 				}
 			}
 		}
+	}
+
+	// Single protocol shortcut (when manifest is absent or tool is unmanifested)
+	if len(agentCfg.Protocols) == 1 && (agentCfg.Protocols[0].URLOrCommand != "" || agentCfg.Protocols[0].Command != "") {
+		return buildToolTargetInfo(&agentCfg.Protocols[0], toolName), nil
 	}
 
 	// Prefix-based resolution (e.g. database__query_users -> database or context7__resolve-library-id -> context7)

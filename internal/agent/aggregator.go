@@ -80,15 +80,14 @@ func (a *DefaultManifestAggregator) CompileToolsList(ctx context.Context, agentN
 			}
 			if protoSlug == "" {
 				if t.ProtocolID != "" && !strings.Contains(t.ProtocolID, " ") {
-					protoSlug = strings.ToLower(t.ProtocolID)
+					protoSlug = CompactLegacyProtocolSlug(t.ProtocolID)
 				} else if t.ProtocolName != "" {
-					protoSlug = strings.ToLower(strings.ReplaceAll(t.ProtocolName, " ", "_"))
+					protoSlug = CompactLegacyProtocolSlug(strings.ReplaceAll(t.ProtocolName, " ", "_"))
 				}
 			}
 
 			if protoSlug != "" {
-				cleanRaw := strings.TrimPrefix(rawName, protoSlug+"__")
-				toolName = fmt.Sprintf("%s__%s", protoSlug, cleanRaw)
+				toolName = FormatAggregatedToolName(protoSlug, rawName)
 			}
 		}
 

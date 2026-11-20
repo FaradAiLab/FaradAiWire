@@ -22,6 +22,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/schema"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/logger"
+	"github.com/FaradAiLab/FaradAiWire/internal/mcpconfig"
 	"github.com/FaradAiLab/FaradAiWire/internal/policy"
 	"github.com/FaradAiLab/FaradAiWire/internal/proxy"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
@@ -276,6 +277,25 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		cancel()
 		deps.PolicyStore = ps
 		deps.SchemaStore = ss
+	}
+
+	// 5.c. Normalize any legacy bloated protocol IDs (<profile>_<full_path>_<6hex> -> <stem_max10>_<4hex>)
+	// before BuildPipeline (SchemaFilter.LoadSchemasFromDisk / AgentFileProvider) and FSRepository populate caches.
+	{
+		migCtx, migCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		migratedCount, migErr := mcpconfig.MigrateLegacyProtocolIDs(migCtx, mcpconfig.MigrateOptions{
+			ProtocolsDir: cfg.GetProtocolsDir(),
+			AgentsDir:    cfg.GetAgentsDir(),
+			SchemasDir:   cfg.Filters.SchemaValidation.SchemasDir,
+			SchemaStore:  deps.SchemaStore,
+			PolicyStore:  deps.PolicyStore,
+		})
+		migCancel()
+		if migErr != nil {
+			slog.Warn("Legacy protocol ID migration encountered an error", slog.String("error", migErr.Error()))
+		} else if migratedCount > 0 {
+			slog.Info("Migrated legacy bloated protocol IDs to compact format", slog.Int("count", migratedCount))
+		}
 	}
 
 	// 6. Compose audit loggers into a single unified logger

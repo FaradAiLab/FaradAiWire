@@ -304,3 +304,84 @@ func (s *DuckDBSchemaStore) PinSchema(ctx context.Context, toolName string, pinn
 	}
 	return nil
 }
+
+// MigrateProtocolSchemas renames all schema records belonging to oldProtoID to newProtoID,
+// using formatToolName (or `<newProtoID>__<rawTool>` if nil) while preserving `is_pinned`,
+// `schema_json`, `sha256_hash`, and `first_seen_at`.
+func (s *DuckDBSchemaStore) MigrateProtocolSchemas(ctx context.Context, oldProtoID, newProtoID string, formatToolName func(protoID, rawTool string) string) error {
+	if s == nil {
+		return nil
+	}
+	oldProtoID = strings.TrimSpace(oldProtoID)
+	newProtoID = strings.TrimSpace(newProtoID)
+	if oldProtoID == "" || newProtoID == "" || strings.EqualFold(oldProtoID, newProtoID) {
+		return nil
+	}
+
+	if err := s.Migrate(ctx); err != nil {
+		return err
+	}
+
+	records, err := s.ListSchemas(ctx)
+	if err != nil {
+		return err
+	}
+
+	s.mu.RLock()
+	db := s.db
+	s.mu.RUnlock()
+	if db == nil {
+		return errors.New("duckdb connection is closed")
+	}
+
+	oldPrefixLower := strings.ToLower(oldProtoID) + "__"
+	for _, rec := range records {
+		toolLower := strings.ToLower(rec.ToolName)
+		if !strings.EqualFold(rec.ProtocolID, oldProtoID) && !strings.HasPrefix(toolLower, oldPrefixLower) {
+			continue
+		}
+		rawTool := rec.ToolName
+		if strings.Contains(rec.ToolName, "__") {
+			parts := strings.SplitN(rec.ToolName, "__", 2)
+			rawTool = parts[1]
+		}
+		newToolName := newProtoID + "__" + rawTool
+		if formatToolName != nil {
+			newToolName = formatToolName(newProtoID, rawTool)
+		}
+		if newToolName == rec.ToolName && rec.ProtocolID == newProtoID {
+			continue
+		}
+
+		existingTarget, gErr := s.GetSchema(ctx, newToolName)
+		if gErr != nil && !errors.Is(gErr, ErrSchemaNotFound) {
+			return gErr
+		}
+
+		if existingTarget == nil {
+			insertQuery := `
+				INSERT INTO mcp_tool_schemas (tool_name, protocol_id, schema_json, sha256_hash, first_seen_at, last_seen_at, is_pinned)
+				VALUES (?, ?, ?, ?, ?, ?, ?)
+			`
+			if _, err := db.ExecContext(ctx, insertQuery, newToolName, newProtoID, string(rec.SchemaJSON), rec.SHA256Hash, rec.FirstSeenAt, rec.LastSeenAt, rec.IsPinned); err != nil {
+				return fmt.Errorf("failed to insert migrated schema '%s': %w", newToolName, err)
+			}
+		} else if rec.IsPinned && !existingTarget.IsPinned {
+			updateQuery := `
+				UPDATE mcp_tool_schemas
+				SET protocol_id = ?, schema_json = ?, sha256_hash = ?, first_seen_at = ?, is_pinned = TRUE
+				WHERE tool_name = ?
+			`
+			if _, err := db.ExecContext(ctx, updateQuery, newProtoID, string(rec.SchemaJSON), rec.SHA256Hash, rec.FirstSeenAt, newToolName); err != nil {
+				return fmt.Errorf("failed to preserve pinned baseline for '%s': %w", newToolName, err)
+			}
+		}
+
+		if newToolName != rec.ToolName {
+			if _, err := db.ExecContext(ctx, `DELETE FROM mcp_tool_schemas WHERE tool_name = ?`, rec.ToolName); err != nil {
+				return fmt.Errorf("failed to remove legacy schema row '%s': %w", rec.ToolName, err)
+			}
+		}
+	}
+	return nil
+}

@@ -94,10 +94,33 @@ func (m *BackupManager) HasBackupForConfig(client ClientID, configPath string) b
 	return err == nil && !fi.IsDir()
 }
 
-// sanitizeIdentifier converts a profile and server name into a deterministic, collision-safe slug
-// combining a human-readable prefix with a short SHA-256 discriminator so distinct punctuation/separators
-// (e.g., "a_b"+"c" vs "a"+"b-c") never overwrite each other's protocol or schema records.
+const maxProtocolStemLen = 10
+
+// genericURLSegments lists generic endpoint tokens that should be skipped when
+// extracting a human-readable server stem from a URL or path.
+var genericURLSegments = map[string]bool{
+	"mcp":      true,
+	"sse":      true,
+	"v1":       true,
+	"v2":       true,
+	"api":      true,
+	"message":  true,
+	"messages": true,
+}
+
+// sanitizeIdentifier converts a profile and server name into a compact, deterministic,
+// collision-safe slug (`<stem_max10>_<4hex>`, max 15 chars, strictly lowercase `[a-z0-9_]`,
+// never containing `__`). Uniqueness across profiles and punctuation variants is guaranteed
+// by hashing `profile + "\x00" + name`.
 func sanitizeIdentifier(profile, name string) string {
+	stem := sanitizeLowerStem(extractServerStem(name), maxProtocolStemLen, "mcp")
+	sum := sha256.Sum256([]byte(profile + "\x00" + name))
+	return stem + "_" + hex.EncodeToString(sum[:2])
+}
+
+// legacySanitizeIdentifier reproduces the historical `<profile>_<full_sanitized>_<6hex>`
+// format so existing installations can be detected and migrated deterministically.
+func legacySanitizeIdentifier(profile, name string) string {
 	raw := fmt.Sprintf("%s_%s", profile, name)
 	var b strings.Builder
 	b.Grow(len(raw))
@@ -117,6 +140,103 @@ func sanitizeIdentifier(profile, name string) string {
 	}
 	sum := sha256.Sum256([]byte(profile + "\x00" + name))
 	return filepath.Base(res) + "_" + hex.EncodeToString(sum[:3])
+}
+
+// extractServerStem extracts the most meaningful leaf identifier from a server name,
+// npm package name, repository path, or HTTP/SSE URL.
+func extractServerStem(name string) string {
+	s := strings.TrimSpace(name)
+	if s == "" {
+		return ""
+	}
+	if idx := strings.IndexAny(s, "?#"); idx >= 0 {
+		s = s[:idx]
+	}
+	s = strings.ReplaceAll(s, "\\", "/")
+
+	lower := strings.ToLower(s)
+	isURL := false
+	if strings.HasPrefix(lower, "http://") {
+		s = s[len("http://"):]
+		isURL = true
+	} else if strings.HasPrefix(lower, "https://") {
+		s = s[len("https://"):]
+		isURL = true
+	}
+
+	if strings.Contains(s, "/") {
+		parts := strings.Split(s, "/")
+		// Walk backward for the last meaningful path segment
+		startIdx := 0
+		if isURL {
+			startIdx = 1 // parts[0] is host:port
+		}
+		for i := len(parts) - 1; i >= startIdx; i-- {
+			seg := strings.TrimSpace(parts[i])
+			if seg == "" || seg == "." || seg == ".." {
+				continue
+			}
+			if genericURLSegments[strings.ToLower(seg)] && (i > startIdx || isURL) {
+				continue
+			}
+			return seg
+		}
+		if isURL && len(parts) > 0 {
+			s = parts[0]
+		}
+	}
+
+	if isURL {
+		if colonIdx := strings.Index(s, ":"); colonIdx >= 0 {
+			s = s[:colonIdx]
+		}
+		labels := strings.Split(s, ".")
+		var filtered []string
+		for _, lbl := range labels {
+			l := strings.ToLower(strings.TrimSpace(lbl))
+			if l == "" || l == "mcp" || l == "api" || l == "www" ||
+				l == "com" || l == "io" || l == "ai" || l == "dev" ||
+				l == "org" || l == "net" || l == "app" || l == "local" {
+				continue
+			}
+			filtered = append(filtered, lbl)
+		}
+		if len(filtered) > 0 {
+			return filtered[len(filtered)-1]
+		}
+	}
+
+	return s
+}
+
+// sanitizeLowerStem normalizes raw into lowercase `[a-z0-9_]` with single underscores,
+// truncates to maxLen BEFORE trimming trailing underscores (so `__` can never be formed
+// when a suffix is appended), and returns fallback if empty.
+func sanitizeLowerStem(raw string, maxLen int, fallback string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	lastWasUnderscore := false
+	for _, r := range raw {
+		if r >= 'A' && r <= 'Z' {
+			r = r + ('a' - 'A')
+		}
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastWasUnderscore = false
+		} else if !lastWasUnderscore {
+			b.WriteRune('_')
+			lastWasUnderscore = true
+		}
+	}
+	stem := strings.Trim(b.String(), "_")
+	if maxLen > 0 && len(stem) > maxLen {
+		stem = stem[:maxLen]
+	}
+	stem = strings.Trim(stem, "_")
+	if stem == "" {
+		return fallback
+	}
+	return stem
 }
 
 // CreateBackup copies the client's current configuration to the backup store with 0600 permissions.
@@ -222,6 +342,39 @@ func PersistAdoptedProtocols(
 			Headers:      s.Headers,
 		}
 
+		// Preserve user-customized fields (AuthToken, Type, TransportMode, AllowedTools, TargetScope, CreatedAt)
+		// if a protocol definition already exists in the protocol store or on disk.
+		var existingProto *protocol.Protocol
+		if protoStore != nil {
+			if ep, err := protoStore.Get(protoID); err == nil && ep != nil {
+				existingProto = ep
+			}
+		} else if pPath, pErr := pathguard.ResolveSandboxedPath(protocolsDir, fmt.Sprintf("%s.json", protoID)); pErr == nil {
+			if rawBytes, rErr := os.ReadFile(pPath); rErr == nil {
+				var ep protocol.Protocol
+				if json.Unmarshal(rawBytes, &ep) == nil {
+					existingProto = &ep
+				}
+			}
+		}
+		if existingProto != nil {
+			if p.AuthToken == "" {
+				p.AuthToken = existingProto.AuthToken
+			}
+			if s.URL != "" && existingProto.Type != "" && existingProto.Type != "stdio" {
+				p.Type = existingProto.Type
+			}
+			if existingProto.TransportMode != "" {
+				p.TransportMode = existingProto.TransportMode
+			}
+			if len(p.AllowedTools) == 0 && len(existingProto.AllowedTools) > 0 {
+				p.AllowedTools = existingProto.AllowedTools
+			}
+			if !existingProto.CreatedAt.IsZero() {
+				p.CreatedAt = existingProto.CreatedAt
+			}
+		}
+
 		if protoStore != nil {
 			if err := protoStore.Save(p); err != nil {
 				return fmt.Errorf("save protocol '%s' to store: %w", protoID, err)
@@ -243,12 +396,14 @@ func PersistAdoptedProtocols(
 		attachedProtocols = append(attachedProtocols, agent.ProtocolConfig{
 			ID:           protoID,
 			Name:         p.Name,
-			Type:         protoType,
+			Type:         p.Type,
 			URLOrCommand: urlOrCmd,
 			Command:      s.Command,
 			Args:         s.Args,
 			Env:          envSlice,
+			AuthToken:    p.AuthToken,
 			Headers:      s.Headers,
+			AllowedTools: p.AllowedTools,
 		})
 	}
 
@@ -298,8 +453,22 @@ func PersistAdoptedProtocols(
 		return fmt.Errorf("read existing profile config '%s': %w", cfgPath, err)
 	}
 
-	// Add/update with newly attached protocols
+	// Add/update with newly attached protocols while preserving existing agent-level overrides
 	for _, ap := range attachedProtocols {
+		if prev, exists := protocolMap[ap.ID]; exists {
+			if ap.AuthToken == "" {
+				ap.AuthToken = prev.AuthToken
+			}
+			if ap.TargetScope == "" {
+				ap.TargetScope = prev.TargetScope
+			}
+			if len(ap.AllowedTools) == 0 && len(prev.AllowedTools) > 0 {
+				ap.AllowedTools = prev.AllowedTools
+			}
+			if ap.Type == "sse" && prev.Type != "" && prev.Type != "stdio" {
+				ap.Type = prev.Type
+			}
+		}
 		protocolMap[ap.ID] = ap
 	}
 

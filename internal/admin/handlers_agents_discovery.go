@@ -19,10 +19,14 @@ import (
 // toolBelongsToProtocol determines if a tool is owned by a given protocol (via prefix or manifest lookup).
 func toolBelongsToProtocol(toolName, protoID, protoName string, manifest []agent.ToolMetadata) bool {
 	protoIDLower := strings.ToLower(strings.TrimSpace(protoID))
+	protoSlugLower := agent.CompactLegacyProtocolSlug(protoIDLower)
 	protoNameLower := strings.ToLower(strings.TrimSpace(protoName))
 	toolLower := strings.ToLower(toolName)
 
 	if protoIDLower != "" && strings.HasPrefix(toolLower, protoIDLower+"__") {
+		return true
+	}
+	if protoSlugLower != "" && strings.HasPrefix(toolLower, protoSlugLower+"__") {
 		return true
 	}
 	if protoNameLower != "" && strings.HasPrefix(toolLower, protoNameLower+"__") {
@@ -281,14 +285,17 @@ func (a *AdminServer) syncAgentToolsProbed(ctx context.Context, agentName string
 				rawName, _ = t["raw_name"].(string)
 			}
 			toolCopy["raw_name"] = rawName
-			protoSlug := protoID
+			protoSlug := agent.GetProtocolSlug(&proto)
+			if protoSlug == "" {
+				protoSlug = protoID
+			}
 			if protoSlug == "" {
 				protoSlug = protoName
 			}
 			if agentCfg.IsAggregated() && protoSlug != "" {
-				cleanRaw := strings.TrimPrefix(rawName, protoSlug+"__")
-				toolCopy["name"] = fmt.Sprintf("%s__%s", protoSlug, cleanRaw)
-				toolCopy["canonical_name"] = fmt.Sprintf("%s__%s", protoSlug, cleanRaw)
+				formatted := agent.FormatAggregatedToolName(protoSlug, rawName)
+				toolCopy["name"] = formatted
+				toolCopy["canonical_name"] = formatted
 			} else {
 				toolCopy["name"] = rawName
 				toolCopy["canonical_name"] = rawName

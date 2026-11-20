@@ -129,29 +129,70 @@ func TestSanitizeIdentifier(t *testing.T) {
 	tests := []struct {
 		profile string
 		name    string
+		want    string
 		prefix  string
 	}{
 		{
+			profile: "antigravity",
+			name:    "codegraph",
+			want:    "codegraph_696c",
+			prefix:  "codegraph_",
+		},
+		{
+			profile: "cline",
+			name:    "github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
+			want:    "sequential_516f",
+			prefix:  "sequential_",
+		},
+		{
 			profile: "cline",
 			name:    "github.com/upstash/context7-mcp",
-			prefix:  "cline_github_com_upstash_context7_mcp_",
+			want:    "context7_m_909c",
+			prefix:  "context7_m_",
 		},
 		{
 			profile: "cursor",
 			name:    "../../../../etc/passwd",
-			prefix:  "cursor_etc_passwd_",
+			prefix:  "passwd_",
 		},
 		{
 			profile: "antigravity",
 			name:    "@modelcontextprotocol/server-postgres",
-			prefix:  "antigravity_modelcontextprotocol_server_postgres_",
+			prefix:  "server_pos_",
+		},
+		{
+			profile: "cursor",
+			name:    "https://mcp.context7.com/mcp/",
+			prefix:  "context7_",
+		},
+		{
+			profile: "cursor",
+			name:    "https://mcp.tavily.com/sse?apiKey=secret",
+			prefix:  "tavily_",
+		},
+		{
+			profile: "cursor",
+			name:    "my_mcp_ser_ver", // 10th char is '_' -> must trim after truncation so no '__'
+			prefix:  "my_mcp_ser_",
 		},
 	}
 
 	for _, tc := range tests {
 		got := sanitizeIdentifier(tc.profile, tc.name)
+		if tc.want != "" && got != tc.want {
+			t.Errorf("sanitizeIdentifier(%q, %q) = %q; want %q", tc.profile, tc.name, got, tc.want)
+		}
 		if !strings.HasPrefix(got, tc.prefix) {
 			t.Errorf("sanitizeIdentifier(%q, %q) = %q; want prefix %q", tc.profile, tc.name, got, tc.prefix)
+		}
+		if len(got) > 15 {
+			t.Errorf("sanitizeIdentifier(%q, %q) = %q (len=%d); want len <= 15", tc.profile, tc.name, got, len(got))
+		}
+		if strings.Contains(got, "__") {
+			t.Errorf("sanitizeIdentifier(%q, %q) = %q; must never contain '__'", tc.profile, tc.name, got)
+		}
+		if strings.ToLower(got) != got {
+			t.Errorf("sanitizeIdentifier(%q, %q) = %q; must be strictly lowercase", tc.profile, tc.name, got)
 		}
 		if sanitizeIdentifier(tc.profile, tc.name) != got {
 			t.Errorf("sanitizeIdentifier must be deterministic for (%q, %q)", tc.profile, tc.name)
@@ -163,6 +204,9 @@ func TestSanitizeIdentifier(t *testing.T) {
 	}
 	if sanitizeIdentifier("a_b", "c") == sanitizeIdentifier("a", "b_c") {
 		t.Fatal("expected distinct identifiers for profile/name boundary split")
+	}
+	if gotLegacy := legacySanitizeIdentifier("antigravity", "codegraph"); gotLegacy != "antigravity_codegraph_696cf8" {
+		t.Fatalf("legacySanitizeIdentifier(\"antigravity\", \"codegraph\") = %q; want \"antigravity_codegraph_696cf8\"", gotLegacy)
 	}
 }
 

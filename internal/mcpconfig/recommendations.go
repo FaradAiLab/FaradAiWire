@@ -123,7 +123,7 @@ func PersistMatchRecommendations(profileName string, servers []DiscoveredServer,
 				continue
 			}
 			destructiveSet[hitlTool] = struct{}{}
-			canonical := fmt.Sprintf("%s__%s", protoSlug, hitlTool)
+			canonical := agent.FormatAggregatedToolName(protoSlug, hitlTool)
 			desiredHITLByTool[canonical] = agent.ModeStrictAlwaysHITL
 		}
 	}
@@ -254,8 +254,7 @@ func SeedDiscoveredSchemas(ctx context.Context, profileName string, servers []Di
 			if rawName == "" {
 				continue
 			}
-			cleanRaw := strings.TrimPrefix(rawName, protoSlug+"__")
-			canonical := fmt.Sprintf("%s__%s", protoSlug, cleanRaw)
+			canonical := agent.FormatAggregatedToolName(protoSlug, rawName)
 
 			inputSchema, _ := rt["inputSchema"].(map[string]interface{})
 			if inputSchema == nil {

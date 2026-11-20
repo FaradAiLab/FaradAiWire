@@ -360,4 +360,105 @@ func TestManifestAggregator_CompileToolsList_DirectRoutingMode(t *testing.T) {
 	}
 }
 
+func TestFormatAggregatedToolName_ToolFirstBudgetAndFindProtocol(t *testing.T) {
+	tests := []struct {
+		name      string
+		protoSlug string
+		rawName   string
+		want      string
+		wantMax   int
+	}{
+		{
+			name:      "compact_slug_normal_tool",
+			protoSlug: "codegraph_696c",
+			rawName:   "codegraph_explore",
+			want:      "codegraph_696c__codegraph_explore",
+			wantMax:   MaxWireToolNameLen,
+		},
+		{
+			name:      "legacy_bloated_slug_auto_compacted",
+			protoSlug: "antigravity_codegraph_696cf8",
+			rawName:   "codegraph_explore",
+			want:      "codegraph_696c__codegraph_explore",
+			wantMax:   MaxWireToolNameLen,
+		},
+		{
+			name:      "legacy_85_char_sequentialthinking_auto_compacted",
+			protoSlug: "cline_github_com_modelcontextprotocol_servers_tree_main_src_sequentialthinking_516fbc",
+			rawName:   "sequentialthinking",
+			want:      "sequential_516f__sequentialthinking",
+			wantMax:   MaxWireToolNameLen,
+		},
+		{
+			name:      "tier2_34_char_tool_preserves_full_tool_name_and_shrinks_prefix",
+			protoSlug: "sequential_516f",
+			rawName:   "create_pull_request_review_comment",
+			want:      "seq_516f__create_pull_request_review_comment",
+			wantMax:   MaxWireToolNameLen,
+		},
+		{
+			name:      "tier3_45_char_tool_compacts_within_44_budget",
+			protoSlug: "sequential_516f",
+			rawName:   "create_or_update_repository_dependabot_secret",
+			wantMax:   MaxWireToolNameLen,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FormatAggregatedToolName(tc.protoSlug, tc.rawName)
+			if tc.want != "" && got != tc.want {
+				t.Errorf("FormatAggregatedToolName(%q, %q) = %q; want %q", tc.protoSlug, tc.rawName, got, tc.want)
+			}
+			if len(got) > tc.wantMax {
+				t.Errorf("FormatAggregatedToolName(%q, %q) = %q (len=%d); exceeds max %d", tc.protoSlug, tc.rawName, got, len(got), tc.wantMax)
+			}
+		})
+	}
+
+	// Verify FindProtocol, IsToolAllowed, and GetToolGovernanceMode across legacy, compact, and narrowed prefixes
+	cfg := &RouteConfig{
+		AgentName:   "antigravity",
+		RoutingMode: "aggregated",
+		Protocols: []ProtocolConfig{
+			{
+				ID:      "antigravity_codegraph_696cf8",
+				Name:    "codegraph (antigravity)",
+				Type:    "stdio",
+				Command: "codegraph",
+			},
+			{
+				ID:      "sequential_516f",
+				Name:    "sequentialthinking (cline)",
+				Type:    "stdio",
+				Command: "npx",
+			},
+		},
+		EnabledTools: []string{
+			"antigravity_codegraph_696cf8__codegraph_explore",
+			"sequential_516f__create_pull_request_review_comment",
+		},
+		ToolGovernance: map[string]ToolGovernanceMode{
+			"antigravity_codegraph_696cf8__codegraph_explore": ModeStrictAlwaysHITL,
+		},
+	}
+
+	if p := cfg.FindProtocol("codegraph_696c"); p == nil || p.ID != "antigravity_codegraph_696cf8" {
+		t.Fatalf("FindProtocol(\"codegraph_696c\") failed to resolve legacy protocol: %+v", p)
+	}
+	if p := cfg.FindProtocol("seq_516f"); p == nil || p.ID != "sequential_516f" {
+		t.Fatalf("FindProtocol(\"seq_516f\") failed to resolve narrowed prefix: %+v", p)
+	}
+	if !cfg.IsToolAllowed("codegraph_696c__codegraph_explore") {
+		t.Errorf("IsToolAllowed should permit compact slug matching legacy enabled_tools entry")
+	}
+	if !cfg.IsToolAllowed("seq_516f__create_pull_request_review_comment") {
+		t.Errorf("IsToolAllowed should permit narrowed prefix matching enabled_tools entry")
+	}
+	if mode, ok := cfg.GetToolGovernanceMode("codegraph_696c__codegraph_explore"); !ok || mode != ModeStrictAlwaysHITL {
+		t.Errorf("GetToolGovernanceMode failed to match legacy rule for compact slug: got (%q, %v)", mode, ok)
+	}
+}
+
+
 

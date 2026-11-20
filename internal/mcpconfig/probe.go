@@ -89,8 +89,7 @@ func ProbeAndCompileManifest(ctx context.Context, profileName string, servers []
 					desc, _ := rt["description"].(string)
 					schema, _ := rt["inputSchema"].(map[string]interface{})
 
-					cleanRaw := strings.TrimPrefix(rawName, protoSlug+"__")
-					canonical := fmt.Sprintf("%s__%s", protoSlug, cleanRaw)
+					canonical := agent.FormatAggregatedToolName(protoSlug, rawName)
 
 					allTools = append(allTools, agent.ToolMetadata{
 						Name:          canonical,
