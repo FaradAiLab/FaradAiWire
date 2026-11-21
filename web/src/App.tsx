@@ -5,6 +5,7 @@ import { HITLModal } from './components/HITLModal'
 import { GatewayStatus, ThemeMode } from './types'
 import { api } from './api'
 import { getAdminConsoleHost } from './constants'
+import type { GuardrailSubTab } from './components/SecurityGuardrailsTab'
 
 // Lazy-loaded domain tabs for code-splitting and faster initial page paint
 const OverviewTab = React.lazy(() =>
@@ -42,6 +43,13 @@ const resolveCanonicalTab = (rawHash: string): TabId => {
   return 'overview'
 }
 
+const resolveGuardrailSubTab = (rawHash: string): GuardrailSubTab | null => {
+  const clean = rawHash.replace('#', '')
+  if (clean === 'guards') return 'guard'
+  if (clean === 'policy-packs') return 'dlp'
+  return null
+}
+
 const getInitialTab = (): TabId => {
   if (typeof window !== 'undefined') {
     return resolveCanonicalTab(window.location.hash)
@@ -49,8 +57,16 @@ const getInitialTab = (): TabId => {
   return 'overview'
 }
 
+const getInitialGuardrailSubTab = (): GuardrailSubTab => {
+  if (typeof window !== 'undefined') {
+    return resolveGuardrailSubTab(window.location.hash) ?? 'dlp'
+  }
+  return 'dlp'
+}
+
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabId>(getInitialTab)
+  const [guardrailSubTab, setGuardrailSubTab] = useState<GuardrailSubTab>(getInitialGuardrailSubTab)
   const [status, setStatus] = useState<GatewayStatus | null>(null)
   const [isReloading, setIsReloading] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
@@ -117,6 +133,13 @@ export const App: React.FC = () => {
     }
   }, [])
 
+  const handleGuardrailSubTabChange = useCallback((subTab: GuardrailSubTab) => {
+    setGuardrailSubTab(subTab)
+    if (typeof window !== 'undefined') {
+      window.location.hash = subTab === 'guard' ? 'guards' : 'policy-packs'
+    }
+  }, [])
+
   useEffect(() => {
     const onHashChange = () => {
       const raw = window.location.hash.replace('#', '')
@@ -134,6 +157,10 @@ export const App: React.FC = () => {
         setSettingsInitialTab('operational')
         setIsSettingsOpen(true)
         return
+      }
+      const nextSubTab = resolveGuardrailSubTab(raw)
+      if (nextSubTab !== null) {
+        setGuardrailSubTab(nextSubTab)
       }
       const canonical = resolveCanonicalTab(raw)
       setActiveTab(canonical)
@@ -203,7 +230,12 @@ export const App: React.FC = () => {
       case 'agents':
         return <AgentsTab status={status} />
       case 'guardrails':
-        return <SecurityGuardrailsTab />
+        return (
+          <SecurityGuardrailsTab
+            initialSubTab={guardrailSubTab}
+            onSubTabChange={handleGuardrailSubTabChange}
+          />
+        )
       case 'audit':
         return <AuditLogsTab />
       default:
