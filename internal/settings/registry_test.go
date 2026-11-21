@@ -457,4 +457,16 @@ func TestGuardDesktopAlertSettings(t *testing.T) {
 	if len(cats) != 4 {
 		t.Fatalf("expected exactly 4 categories, got %d (%v)", len(cats), cats)
 	}
+
+	// Verify coerceIntSetting rejects NaN/Inf/overflow cleanly and validateMeta enforces Min: 0 on TypeFloat.
+	for _, badFloat := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), 1e20} {
+		target := DefaultOperationalSettings()
+		if err := ApplySetting(target, "guard.alert_cooldown_sec", badFloat); !errors.Is(err, ErrInvalidValue) {
+			t.Fatalf("expected ErrInvalidValue for %v, got %v", badFloat, err)
+		}
+	}
+	floatMeta := SettingMeta{Key: "test.zero_min_float", Type: TypeFloat, Min: 0, Max: 1}
+	if err := validateMeta(floatMeta.Key, floatMeta, -0.01); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("expected ErrInvalidValue for negative float with Min: 0, got %v", err)
+	}
 }

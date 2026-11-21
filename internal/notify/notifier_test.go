@@ -125,6 +125,7 @@ func TestValidateHTTPURL(t *testing.T) {
 		{name: "file scheme rejected", raw: "file:///etc/passwd", want: false},
 		{name: "control char rejected", raw: "http://127.0.0.1:19415/admin\n#audit", want: false},
 		{name: "missing host rejected", raw: "http:///admin/dashboard", want: false},
+		{name: "userinfo rejected", raw: "http://evil@127.0.0.1:19415/admin/dashboard#audit", want: false},
 	}
 
 	for _, tc := range tests {

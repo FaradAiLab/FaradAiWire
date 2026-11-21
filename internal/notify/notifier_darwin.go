@@ -4,6 +4,7 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +22,8 @@ import (
 const (
 	defaultNotifyMaxConcurrent = 4
 	defaultDispatchTimeout     = 3 * time.Second
+	defaultHelperBuildTimeout  = 10 * time.Second
+	helperBuildRetryBackoff    = 30 * time.Second
 	notifierBundleID           = "com.faradailab.faradaiwire.notifier"
 	notifierAppName            = "FaradAiWire"
 	notifierAppletVersion      = "1"
@@ -87,14 +91,27 @@ type darwinNotifier struct {
 	cooldowns     *cooldownTracker
 	sem           chan struct{}
 
-	helperOnce sync.Once
-	helperMu   sync.Mutex
-	helperPath string
-	helperErr  error
+	baseCtx      context.Context
+	baseCancel   context.CancelFunc
+	wg           sync.WaitGroup
+	closed       atomic.Bool
+	droppedCount atomic.Int64
+
+	helperBuildMu    sync.Mutex
+	helperPath       string
+	helperErr        error
+	helperRetryAfter time.Time
+
+	helperLockOnce sync.Once
+	helperLock     chan struct{}
+
+	lookPathOnce       sync.Once
+	cachedTermNotifier string
 
 	runner   func(ctx context.Context, name string, args ...string) error
 	lookPath func(string) (string, error)
 	homeDir  func() (string, error)
+	nowFn    func() time.Time
 }
 
 var defaultDarwinNotifier = newDarwinNotifier("", nil)
@@ -104,12 +121,28 @@ func newPlatformNotifier(adminBaseURL string, settingsCache *settings.Cache) Des
 }
 
 func newDarwinNotifier(adminBaseURL string, settingsCache *settings.Cache) *darwinNotifier {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &darwinNotifier{
 		adminBaseURL:  strings.TrimRight(strings.TrimSpace(adminBaseURL), "/"),
 		settingsCache: settingsCache,
 		cooldowns:     newCooldownTracker(nil),
 		sem:           make(chan struct{}, defaultNotifyMaxConcurrent),
+		baseCtx:       ctx,
+		baseCancel:    cancel,
+		helperLock:    make(chan struct{}, 1),
 	}
+}
+
+// Close cancels in-flight desktop notification subprocesses and waits for worker exit.
+func (n *darwinNotifier) Close() {
+	if n == nil {
+		return
+	}
+	n.closed.Store(true)
+	if n.baseCancel != nil {
+		n.baseCancel()
+	}
+	n.wg.Wait()
 }
 
 // NotifyDefault triggers a platform desktop notification using package defaults.
@@ -134,17 +167,28 @@ func (n *darwinNotifier) AdminBaseURL() string {
 	return n.adminBaseURL
 }
 
+func (n *darwinNotifier) rootContext() context.Context {
+	if n.baseCtx != nil {
+		return n.baseCtx
+	}
+	return context.Background()
+}
+
+func (n *darwinNotifier) now() time.Time {
+	if n.nowFn != nil {
+		return n.nowFn()
+	}
+	return time.Now()
+}
+
 func (n *darwinNotifier) Notify(event AlertEvent) bool {
+	if n.closed.Load() {
+		return false
+	}
 	if !isCategoryEnabled(event.Category, n.settingsCache) {
 		return false
 	}
-
-	title := sanitizeSingleLine(event.Title)
-	msg := sanitizeSingleLine(event.Message)
-	if title == "" {
-		title = notifierAppName
-	}
-	if msg == "" {
+	if strings.TrimSpace(event.Message) == "" {
 		return false
 	}
 
@@ -159,6 +203,12 @@ func (n *darwinNotifier) Notify(event AlertEvent) bool {
 		return true
 	}
 
+	title := sanitizeSingleLine(event.Title)
+	if title == "" {
+		title = notifierAppName
+	}
+	msg := sanitizeSingleLine(event.Message)
+
 	frag := event.TargetFragment
 	if frag == "" {
 		frag = DefaultFragmentForCategory(event.Category)
@@ -168,12 +218,20 @@ func (n *darwinNotifier) Notify(event AlertEvent) bool {
 	select {
 	case n.sem <- struct{}{}:
 	default:
+		dropped := n.droppedCount.Add(1)
+		slog.Warn("desktop alert dropped due to concurrent dispatch backpressure",
+			slog.String("category", string(event.Category)),
+			slog.Int64("dropped_total", dropped),
+		)
 		return false
 	}
 
+	n.wg.Add(1)
 	go func() {
+		defer n.wg.Done()
 		defer func() { <-n.sem }()
-		ctx, cancel := context.WithTimeout(context.Background(), defaultDispatchTimeout)
+
+		ctx, cancel := context.WithTimeout(n.rootContext(), defaultDispatchTimeout)
 		defer cancel()
 		n.dispatch(ctx, event.Category, title, msg, targetURL)
 	}()
@@ -189,7 +247,7 @@ func (n *darwinNotifier) dispatch(ctx context.Context, cat AlertCategory, title,
 		return
 	}
 	if err := n.dispatchTier3(ctx, title, msg); err != nil {
-		slog.Debug("desktop alert dispatch failed across all tiers",
+		slog.WarnContext(ctx, "desktop alert dispatch failed across all tiers",
 			slog.String("category", string(cat)),
 			slog.String("error", err.Error()),
 		)
@@ -197,8 +255,8 @@ func (n *darwinNotifier) dispatch(ctx context.Context, cat AlertCategory, title,
 }
 
 func (n *darwinNotifier) dispatchTier1(ctx context.Context, cat AlertCategory, title, msg, targetURL string) bool {
-	bin, err := n.findPath("terminal-notifier")
-	if err != nil || bin == "" {
+	bin := n.terminalNotifierPath()
+	if bin == "" {
 		return false
 	}
 
@@ -218,7 +276,7 @@ func (n *darwinNotifier) dispatchTier1(ctx context.Context, cat AlertCategory, t
 	}
 
 	if err := n.runCmd(ctx, bin, args...); err != nil {
-		slog.Debug("terminal-notifier dispatch failed, falling back to helper app",
+		slog.DebugContext(ctx, "terminal-notifier dispatch failed, falling back to helper app",
 			slog.String("error", err.Error()),
 		)
 		return false
@@ -229,32 +287,33 @@ func (n *darwinNotifier) dispatchTier1(ctx context.Context, cat AlertCategory, t
 func (n *darwinNotifier) dispatchTier2(ctx context.Context, title, msg, targetURL string) bool {
 	baseDir, appPath, err := n.ensureHelperApp(ctx)
 	if err != nil {
-		slog.Debug("macOS helper app preparation failed, falling back to osascript",
-			slog.String("error", err.Error()),
-		)
 		return false
 	}
 
-	n.helperMu.Lock()
-	defer n.helperMu.Unlock()
+	unlock, ok := n.acquireTier2Lock(ctx)
+	if !ok {
+		slog.DebugContext(ctx, "desktop alert helper launch canceled while waiting on lock")
+		return false
+	}
+	defer unlock()
 
 	urlPayload := ""
 	if ValidateHTTPURL(targetURL) {
 		urlPayload = targetURL + "\n"
 	}
 	if err := atomicWriteFile(filepath.Join(baseDir, "last_alert_url.txt"), []byte(urlPayload), 0o600); err != nil {
-		slog.Debug("failed writing desktop alert URL state", slog.String("error", err.Error()))
+		slog.WarnContext(ctx, "failed writing desktop alert URL state", slog.String("error", err.Error()))
 		return false
 	}
 
 	pendingPayload := title + "\n" + msg + "\n"
 	if err := atomicWriteFile(filepath.Join(baseDir, "pending_alert.txt"), []byte(pendingPayload), 0o600); err != nil {
-		slog.Debug("failed writing pending desktop alert payload", slog.String("error", err.Error()))
+		slog.WarnContext(ctx, "failed writing pending desktop alert payload", slog.String("error", err.Error()))
 		return false
 	}
 
 	if err := n.runCmd(ctx, "/usr/bin/open", "-W", "-g", "-a", appPath); err != nil {
-		slog.Debug("failed launching desktop alert helper app", slog.String("error", err.Error()))
+		slog.DebugContext(ctx, "failed launching desktop alert helper app", slog.String("error", err.Error()))
 		return false
 	}
 	return true
@@ -264,6 +323,20 @@ func (n *darwinNotifier) dispatchTier3(ctx context.Context, title, msg string) e
 	return n.runCmd(ctx, "/usr/bin/osascript", "-e", osascriptDisplayNotification, msg, title)
 }
 
+func (n *darwinNotifier) acquireTier2Lock(ctx context.Context) (func(), bool) {
+	n.helperLockOnce.Do(func() {
+		if n.helperLock == nil {
+			n.helperLock = make(chan struct{}, 1)
+		}
+	})
+	select {
+	case n.helperLock <- struct{}{}:
+		return func() { <-n.helperLock }, true
+	case <-ctx.Done():
+		return nil, false
+	}
+}
+
 func (n *darwinNotifier) ensureHelperApp(ctx context.Context) (string, string, error) {
 	home, err := n.resolveHomeDir()
 	if err != nil {
@@ -271,30 +344,81 @@ func (n *darwinNotifier) ensureHelperApp(ctx context.Context) (string, string, e
 	}
 	baseDir := filepath.Join(home, ".faradaiwire", "notifier")
 
-	n.helperOnce.Do(func() {
-		if err := os.MkdirAll(baseDir, 0o700); err != nil {
-			n.helperErr = fmt.Errorf("create notifier dir: %w", err)
-			return
-		}
+	n.helperBuildMu.Lock()
+	defer n.helperBuildMu.Unlock()
 
-		appPath := filepath.Join(baseDir, "FaradAiWireNotifier.app")
-		versionFile := filepath.Join(baseDir, ".applet-version")
-		if isHelperAppCurrent(appPath, versionFile) {
-			n.helperPath = appPath
-			return
-		}
-
-		if err := n.buildHelperApp(ctx, baseDir, appPath, versionFile); err != nil {
-			n.helperErr = err
-			return
-		}
-		n.helperPath = appPath
-	})
-
-	if n.helperErr != nil {
+	if n.helperPath != "" {
+		return baseDir, n.helperPath, nil
+	}
+	now := n.now()
+	if n.helperErr != nil && now.Before(n.helperRetryAfter) {
 		return "", "", n.helperErr
 	}
-	return baseDir, n.helperPath, nil
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+
+	if err := ensureSecureNotifierDir(baseDir); err != nil {
+		n.helperErr = err
+		n.helperRetryAfter = n.now().Add(helperBuildRetryBackoff)
+		slog.WarnContext(ctx, "desktop notifier directory validation failed; falling back to osascript",
+			slog.String("error", err.Error()),
+		)
+		return "", "", err
+	}
+
+	appPath := filepath.Join(baseDir, "FaradAiWireNotifier.app")
+	versionFile := filepath.Join(baseDir, ".applet-version")
+	if isHelperAppCurrent(appPath, versionFile) {
+		n.helperPath = appPath
+		n.helperErr = nil
+		n.helperRetryAfter = time.Time{}
+		return baseDir, appPath, nil
+	}
+
+	buildCtx, cancel := context.WithTimeout(n.rootContext(), defaultHelperBuildTimeout)
+	defer cancel()
+
+	if err := n.buildHelperApp(buildCtx, baseDir, appPath, versionFile); err != nil {
+		n.helperErr = err
+		n.helperRetryAfter = n.now().Add(helperBuildRetryBackoff)
+		slog.WarnContext(ctx, "macOS helper app preparation failed; temporarily falling back to osascript",
+			slog.String("error", err.Error()),
+			slog.Time("retry_after", n.helperRetryAfter),
+		)
+		return "", "", err
+	}
+
+	n.helperPath = appPath
+	n.helperErr = nil
+	n.helperRetryAfter = time.Time{}
+	return baseDir, appPath, nil
+}
+
+func ensureSecureNotifierDir(baseDir string) error {
+	parentDir := filepath.Dir(baseDir)
+	for _, dir := range []string{parentDir, baseDir} {
+		fi, err := os.Lstat(dir)
+		if err == nil {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("notifier path %q must not be a symlink", dir)
+			}
+			if !fi.IsDir() {
+				return fmt.Errorf("notifier path %q is not a directory", dir)
+			}
+			if fi.Mode().Perm()&0o077 != 0 {
+				if err := os.Chmod(dir, 0o700); err != nil {
+					return fmt.Errorf("chmod notifier dir %q: %w", dir, err)
+				}
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("lstat notifier dir %q: %w", dir, err)
+		}
+	}
+	if err := os.MkdirAll(baseDir, 0o700); err != nil {
+		return fmt.Errorf("create notifier dir: %w", err)
+	}
+	return os.Chmod(baseDir, 0o700)
 }
 
 func (n *darwinNotifier) buildHelperApp(ctx context.Context, baseDir, appPath, versionFile string) error {
@@ -313,10 +437,13 @@ func (n *darwinNotifier) buildHelperApp(ctx context.Context, baseDir, appPath, v
 		return fmt.Errorf("close temporary script: %w", err)
 	}
 
-	stagingApp := filepath.Join(baseDir, "FaradAiWireNotifier.app.tmp")
-	_ = os.RemoveAll(stagingApp)
-	defer func() { _ = os.RemoveAll(stagingApp) }()
+	stagingDir, err := os.MkdirTemp(baseDir, "staging-*")
+	if err != nil {
+		return fmt.Errorf("create staging dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(stagingDir) }()
 
+	stagingApp := filepath.Join(stagingDir, "FaradAiWireNotifier.app")
 	if err := n.runCmd(ctx, "/usr/bin/osacompile", "-o", stagingApp, srcPath); err != nil {
 		return fmt.Errorf("osacompile helper app: %w", err)
 	}
@@ -387,18 +514,27 @@ func swapAppBundle(stagingApp, targetApp string) error {
 	return nil
 }
 
+func (n *darwinNotifier) terminalNotifierPath() string {
+	n.lookPathOnce.Do(func() {
+		var bin string
+		var err error
+		if n.lookPath != nil {
+			bin, err = n.lookPath("terminal-notifier")
+		} else {
+			bin, err = exec.LookPath("terminal-notifier")
+		}
+		if err == nil {
+			n.cachedTermNotifier = bin
+		}
+	})
+	return n.cachedTermNotifier
+}
+
 func (n *darwinNotifier) runCmd(ctx context.Context, name string, args ...string) error {
 	if n.runner != nil {
 		return n.runner(ctx, name, args...)
 	}
 	return exec.CommandContext(ctx, name, args...).Run()
-}
-
-func (n *darwinNotifier) findPath(bin string) (string, error) {
-	if n.lookPath != nil {
-		return n.lookPath(bin)
-	}
-	return exec.LookPath(bin)
 }
 
 func (n *darwinNotifier) resolveHomeDir() (string, error) {
@@ -416,6 +552,9 @@ func escapeTerminalNotifierArg(s string) string {
 }
 
 func sanitizeSingleLine(s string) string {
+	if !strings.ContainsAny(s, "\r\n") {
+		return strings.TrimSpace(s)
+	}
 	s = strings.ReplaceAll(s, "\r\n", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.ReplaceAll(s, "\r", " ")

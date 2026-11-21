@@ -635,3 +635,225 @@ func TestNotifyDefault_AndResetCooldowns(t *testing.T) {
 		t.Fatal("expected NotifyDefault immediately after ResetCooldowns() to succeed")
 	}
 }
+
+func TestDarwinNotifier_SymlinkBaseDirRejected(t *testing.T) {
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("FARADAI_ALERT_DESKTOP_ENABLED", "true")
+
+	home := t.TempDir()
+	evilTarget := t.TempDir()
+	faradaiDir := filepath.Join(home, ".faradaiwire")
+	if err := os.MkdirAll(faradaiDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(evilTarget, filepath.Join(faradaiDir, "notifier")); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+
+	osascriptCalled := make(chan struct{}, 1)
+	var osacompileCalled atomic.Bool
+	n := &darwinNotifier{
+		adminBaseURL:  "http://127.0.0.1:19415",
+		settingsCache: settings.NewCache(settings.DefaultOperationalSettings()),
+		cooldowns:     newCooldownTracker(nil),
+		sem:           make(chan struct{}, 4),
+		homeDir:       func() (string, error) { return home, nil },
+		lookPath:      func(string) (string, error) { return "", errors.New("not found") },
+		runner: func(_ context.Context, name string, _ ...string) error {
+			if name == "/usr/bin/osacompile" {
+				osacompileCalled.Store(true)
+			}
+			if name == "/usr/bin/osascript" {
+				select {
+				case osascriptCalled <- struct{}{}:
+				default:
+				}
+			}
+			return nil
+		},
+	}
+
+	if !n.Notify(AlertEvent{Category: CategoryBlock, Title: "Symlink", Message: "Symlink guard", TargetFragment: "audit"}) {
+		t.Fatal("expected Notify to fall back to Tier 3 when Tier 2 symlink dir is rejected")
+	}
+	select {
+	case <-osascriptCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Tier 3 fallback after symlink dir rejection")
+	}
+	if osacompileCalled.Load() {
+		t.Fatal("expected osacompile not to run when notifier directory is a symlink")
+	}
+}
+
+func TestDarwinNotifier_HelperBuildRetriesAfterBackoff(t *testing.T) {
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("FARADAI_ALERT_DESKTOP_ENABLED", "true")
+
+	home := t.TempDir()
+	var clockMu sync.Mutex
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+
+	var compileAttempts atomic.Int32
+	var shouldFailBuild atomic.Bool
+	shouldFailBuild.Store(true)
+
+	osascriptDone := make(chan struct{}, 2)
+	openDone := make(chan struct{}, 1)
+
+	n := &darwinNotifier{
+		adminBaseURL:  "http://127.0.0.1:19415",
+		settingsCache: settings.NewCache(settings.DefaultOperationalSettings()),
+		cooldowns:     newCooldownTracker(nil),
+		sem:           make(chan struct{}, 4),
+		homeDir:       func() (string, error) { return home, nil },
+		lookPath:      func(string) (string, error) { return "", errors.New("not found") },
+		nowFn: func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		},
+		runner: func(_ context.Context, name string, args ...string) error {
+			if name == "/usr/bin/osacompile" {
+				compileAttempts.Add(1)
+				if shouldFailBuild.Load() {
+					return errors.New("transient build failure")
+				}
+				return simulateOsacompileBundle(name, args)
+			}
+			if name == "/usr/bin/osascript" {
+				osascriptDone <- struct{}{}
+			}
+			if name == "/usr/bin/open" {
+				openDone <- struct{}{}
+			}
+			return nil
+		},
+	}
+
+	// 1. Initial failure records helperErr and falls back to Tier 3.
+	n.Notify(AlertEvent{Category: CategoryHITLPending, Title: "HITL", Message: "Try 1", TargetFragment: "audit"})
+	select {
+	case <-osascriptDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Tier 3 after initial failure")
+	}
+	if compileAttempts.Load() != 1 {
+		t.Fatalf("expected 1 compile attempt, got %d", compileAttempts.Load())
+	}
+
+	// 2. Before backoff expires, cached error short-circuits without retrying osacompile.
+	n.Notify(AlertEvent{Category: CategoryHITLPending, Title: "HITL", Message: "Try 2", TargetFragment: "audit"})
+	select {
+	case <-osascriptDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for cached Tier 3 fallback")
+	}
+	if compileAttempts.Load() != 1 {
+		t.Fatalf("expected cached backoff to skip osacompile, got %d attempts", compileAttempts.Load())
+	}
+
+	// 3. Advance clock past helperBuildRetryBackoff and allow build to succeed.
+	clockMu.Lock()
+	now = now.Add(helperBuildRetryBackoff + time.Second)
+	clockMu.Unlock()
+	shouldFailBuild.Store(false)
+
+	n.Notify(AlertEvent{Category: CategoryHITLPending, Title: "HITL", Message: "Try 3", TargetFragment: "audit"})
+	select {
+	case <-openDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Tier 2 recovery after backoff expiry")
+	}
+	if compileAttempts.Load() != 2 {
+		t.Fatalf("expected second compile attempt after backoff, got %d", compileAttempts.Load())
+	}
+}
+
+func TestDarwinNotifier_CloseDrainsInFlight(t *testing.T) {
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("FARADAI_ALERT_DESKTOP_ENABLED", "true")
+
+	n := newDarwinNotifier("http://127.0.0.1:19415", settings.NewCache(settings.DefaultOperationalSettings()))
+	started := make(chan struct{}, 1)
+	canceled := make(chan struct{}, 1)
+	n.lookPath = func(bin string) (string, error) {
+		if bin == "terminal-notifier" {
+			return "/opt/homebrew/bin/terminal-notifier", nil
+		}
+		return "", errors.New("not found")
+	}
+	n.runner = func(ctx context.Context, _ string, _ ...string) error {
+		started <- struct{}{}
+		<-ctx.Done()
+		canceled <- struct{}{}
+		return ctx.Err()
+	}
+
+	if !n.Notify(AlertEvent{Category: CategoryHITLPending, Title: "HITL", Message: "In-flight", TargetFragment: "audit"}) {
+		t.Fatal("expected Notify to start worker")
+	}
+	<-started
+
+	closeDone := make(chan struct{})
+	go func() {
+		n.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected Close() to cancel in-flight worker context")
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected Close() to return once worker drained")
+	}
+
+	if n.Notify(AlertEvent{Category: CategoryHITLPending, Title: "HITL", Message: "After close", TargetFragment: "audit"}) {
+		t.Fatal("expected Notify after Close() to return false")
+	}
+}
+
+func TestDarwinNotifier_LookPathCached(t *testing.T) {
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("FARADAI_ALERT_DESKTOP_ENABLED", "true")
+
+	var lookPathCalls atomic.Int32
+	done := make(chan struct{}, 3)
+	n := newDarwinNotifier("http://127.0.0.1:19415", settings.NewCache(settings.DefaultOperationalSettings()))
+	n.lookPath = func(bin string) (string, error) {
+		lookPathCalls.Add(1)
+		if bin == "terminal-notifier" {
+			return "/opt/homebrew/bin/terminal-notifier", nil
+		}
+		return "", errors.New("not found")
+	}
+	n.runner = func(_ context.Context, _ string, _ ...string) error {
+		done <- struct{}{}
+		return nil
+	}
+
+	for i := 0; i < 3; i++ {
+		if !n.Notify(AlertEvent{Category: CategoryHITLPending, Title: "HITL", Message: "Cached lookPath", TargetFragment: "audit"}) {
+			t.Fatalf("call %d should succeed", i)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for dispatch #%d", i)
+		}
+	}
+
+	if got := lookPathCalls.Load(); got != 1 {
+		t.Fatalf("expected LookPath to execute once (cached), got %d calls", got)
+	}
+}

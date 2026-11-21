@@ -72,6 +72,9 @@ func ValidateHTTPURL(raw string) bool {
 	if err != nil {
 		return false
 	}
+	if parsed.User != nil {
+		return false
+	}
 	return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 

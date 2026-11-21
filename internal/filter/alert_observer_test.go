@@ -437,3 +437,28 @@ func TestPipeline_EndToEnd_GuardHITLAndAlertAuditLogger(t *testing.T) {
 		}
 	})
 }
+
+func TestAlertAuditLogger_ZeroAllocsOnAllowedHotPath(t *testing.T) {
+	notifier := &recordingDesktopNotifier{}
+	observer := NewAlertAuditLogger(notifier)
+
+	allowedEv := &AuditEvent{
+		Decision:   DecisionAllowed,
+		ToolName:   "read_file",
+		FilterName: "dlp",
+	}
+	maskedEv := &AuditEvent{
+		Decision:   DecisionMasked,
+		ToolName:   "read_file",
+		FilterName: "dlp",
+	}
+
+	for _, ev := range []*AuditEvent{allowedEv, maskedEv} {
+		allocs := testing.AllocsPerRun(100, func() {
+			observer.LogEvent(ev)
+		})
+		if allocs != 0 {
+			t.Fatalf("expected 0 allocs on %s hot path, got %v", ev.Decision, allocs)
+		}
+	}
+}

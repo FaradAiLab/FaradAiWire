@@ -31,8 +31,11 @@ func (a *AlertAuditLogger) LogEvent(event *AuditEvent) {
 		return
 	}
 
-	subject := eventSubject(event)
-	source := eventSource(event)
+	// Zero-alloc hot-path exit for normal allowed/masked/pending/error events.
+	switch event.Decision {
+	case DecisionAllowed, DecisionMasked, DecisionPending, DecisionError:
+		return
+	}
 
 	switch normalizeDecisionName(event.Decision) {
 	case DecisionBlocked, DecisionCritical:
@@ -42,7 +45,7 @@ func (a *AlertAuditLogger) LogEvent(event *AuditEvent) {
 		a.notifier.Notify(notify.AlertEvent{
 			Category:       notify.CategoryBlock,
 			Title:          "FaradAiWire Request Blocked",
-			Message:        fmt.Sprintf("Blocked %s via %s.", subject, source),
+			Message:        fmt.Sprintf("Blocked %s via %s.", eventSubject(event), eventSource(event)),
 			TargetFragment: "audit",
 		})
 
@@ -50,7 +53,7 @@ func (a *AlertAuditLogger) LogEvent(event *AuditEvent) {
 		a.notifier.Notify(notify.AlertEvent{
 			Category:       notify.CategoryAudit,
 			Title:          "FaradAiWire Audit Match",
-			Message:        fmt.Sprintf("Audit verdict on %s (%s).", subject, source),
+			Message:        fmt.Sprintf("Audit verdict on %s (%s).", eventSubject(event), eventSource(event)),
 			TargetFragment: "audit",
 		})
 	}

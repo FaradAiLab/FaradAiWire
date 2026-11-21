@@ -566,6 +566,11 @@ func (s *Server) doShutdown(ctx context.Context) error {
 		}
 	}
 
+	// Cancel and drain any in-flight workstation notification subprocesses
+	if closer, ok := s.desktopNotifier.(interface{ Close() }); ok {
+		closer.Close()
+	}
+
 	// =========================================================================
 	// Phase 4: Storage & Telemetry Flush
 	// =========================================================================
@@ -695,9 +700,6 @@ func (s *Server) reloadWithConfigLocked(newCfg *config.Config) error {
 	s.mu.Lock()
 	s.cfg = newCfg
 	s.router = newRouter
-	if s.desktopNotifier != nil {
-		s.desktopNotifier.SetAdminBaseURL(notify.BuildAdminBaseURL(newCfg.GetAdminHost(), newCfg.GetAdminPort(), newCfg.AdminTLS.Enabled))
-	}
 
 	bootstrap.WireFilterDependencies(newPipeline, newCfg, bootstrap.FilterWiringDependencies{
 		SchemaStore:     s.schemaStore,
@@ -709,6 +711,10 @@ func (s *Server) reloadWithConfigLocked(newCfg *config.Config) error {
 		AgentRepo:       s.agentRepo,
 	})
 	s.mu.Unlock()
+
+	if s.desktopNotifier != nil {
+		s.desktopNotifier.SetAdminBaseURL(notify.BuildAdminBaseURL(newCfg.GetAdminHost(), newCfg.GetAdminPort(), newCfg.AdminTLS.Enabled))
+	}
 
 	s.pipeline.Swap(newPipeline.GetFilters(), newRouter)
 	s.pipeline.SetDebugRetainUnmaskedDiff(newCfg.Filters.DLP.DebugRetainUnmaskedDiff)

@@ -326,7 +326,7 @@ func validateMeta(key string, meta SettingMeta, val any) error {
 		if math.IsNaN(floatVal) || math.IsInf(floatVal, 0) {
 			return fmt.Errorf("%w: key %q must be a finite number", ErrInvalidValue, key)
 		}
-		if meta.Min > 0 && floatVal < meta.Min {
+		if (meta.Min > 0 || meta.Max > 0) && floatVal < meta.Min {
 			return fmt.Errorf("%w: key %q value %v is below minimum allowed %v", ErrInvalidValue, key, floatVal, meta.Min)
 		}
 		if meta.Max > 0 && floatVal > meta.Max {
@@ -679,7 +679,7 @@ func coerceIntSetting(key string, val any) (int, error) {
 	case int64:
 		return int(v), nil
 	case float64:
-		if v != float64(int64(v)) {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < float64(math.MinInt64) || v >= 9223372036854775808.0 || v != math.Trunc(v) {
 			return 0, fmt.Errorf("%w: key %q requires an integer value, got %v", ErrInvalidValue, key, v)
 		}
 		return int(v), nil
