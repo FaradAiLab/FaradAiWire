@@ -14,6 +14,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
+	"github.com/FaradAiLab/FaradAiWire/internal/notify"
 	"github.com/FaradAiLab/FaradAiWire/pkg/filter"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
@@ -1603,6 +1604,153 @@ func TestGuardFilter_FilterRequest_FailClosedOnMalformedParams(t *testing.T) {
 			}
 			if mcpErr == nil || mcpErr.Code != mcp.ErrInvalidParams {
 				t.Fatalf("expected ErrInvalidParams (%d), got %+v", mcp.ErrInvalidParams, mcpErr)
+			}
+		})
+	}
+}
+
+type mockDesktopNotifier struct {
+	mu     sync.Mutex
+	events []notify.AlertEvent
+}
+
+func (m *mockDesktopNotifier) Notify(event notify.AlertEvent) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, event)
+	return true
+}
+
+func (m *mockDesktopNotifier) SetAdminBaseURL(_ string) {}
+
+func (m *mockDesktopNotifier) Events() []notify.AlertEvent {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]notify.AlertEvent, len(m.events))
+	copy(out, m.events)
+	return out
+}
+
+func TestGuardFilter_DesktopAlert_OfflineAndCancellation(t *testing.T) {
+	cases := []struct {
+		name      string
+		isRequest bool
+		running   bool
+		inspectFn func(ctx context.Context, req *InspectionRequest) (*InspectionResult, error)
+		wantCount int
+	}{
+		{
+			name:      "response_stopped_manager",
+			isRequest: false,
+			running:   false,
+			wantCount: 1,
+		},
+		{
+			name:      "response_connection_error",
+			isRequest: false,
+			running:   true,
+			inspectFn: func(context.Context, *InspectionRequest) (*InspectionResult, error) {
+				return nil, errors.New("dial unix /tmp/guard.sock: connection refused")
+			},
+			wantCount: 1,
+		},
+		{
+			name:      "response_context_canceled_suppressed",
+			isRequest: false,
+			running:   true,
+			inspectFn: func(context.Context, *InspectionRequest) (*InspectionResult, error) {
+				return nil, fmt.Errorf("aborted: %w", context.Canceled)
+			},
+			wantCount: 0,
+		},
+		{
+			name:      "response_queue_full_suppressed",
+			isRequest: false,
+			running:   true,
+			inspectFn: func(context.Context, *InspectionRequest) (*InspectionResult, error) {
+				return nil, ErrQueueFull
+			},
+			wantCount: 0,
+		},
+		{
+			name:      "request_stopped_manager",
+			isRequest: true,
+			running:   false,
+			wantCount: 1,
+		},
+		{
+			name:      "request_connection_error",
+			isRequest: true,
+			running:   true,
+			inspectFn: func(context.Context, *InspectionRequest) (*InspectionResult, error) {
+				return nil, errors.New("broken pipe")
+			},
+			wantCount: 1,
+		},
+		{
+			name:      "request_context_canceled_suppressed",
+			isRequest: true,
+			running:   true,
+			inspectFn: func(context.Context, *InspectionRequest) (*InspectionResult, error) {
+				return nil, context.Canceled
+			},
+			wantCount: 0,
+		},
+		{
+			name:      "request_queue_full_suppressed",
+			isRequest: true,
+			running:   true,
+			inspectFn: func(context.Context, *InspectionRequest) (*InspectionResult, error) {
+				return nil, ErrQueueFull
+			},
+			wantCount: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &mockGuardManager{callInspectFn: tc.inspectFn}
+			mgr.running.Store(tc.running)
+
+			gf := NewFilter(FilterConfig{
+				CriticalBlocks: []string{"exec_cmd"},
+			}, mgr)
+			desktop := &mockDesktopNotifier{}
+			gf.SetDesktopNotifier(desktop)
+
+			ctx := context.WithValue(context.Background(), types.ToolNameContextKey, "exec_cmd")
+			if tc.isRequest {
+				req := &mcp.Request{
+					JSONRPC: "2.0",
+					ID:      1,
+					Method:  "tools/call",
+					Params:  json.RawMessage(`{"name":"exec_cmd","arguments":{"cmd":"ls"}}`),
+				}
+				if _, err := gf.FilterRequest(ctx, req); err != nil {
+					t.Fatalf("FilterRequest unexpected error: %v", err)
+				}
+			} else {
+				resp := &mcp.Response{
+					JSONRPC: "2.0",
+					ID:      1,
+					Result:  json.RawMessage(`{"content":[{"type":"text","text":"safe tool output"}]}`),
+				}
+				if _, err := gf.FilterResponse(ctx, resp); err != nil {
+					t.Fatalf("FilterResponse unexpected error: %v", err)
+				}
+			}
+
+			events := desktop.Events()
+			if len(events) != tc.wantCount {
+				t.Fatalf("got %d desktop alerts, want %d (%+v)", len(events), tc.wantCount, events)
+			}
+			if tc.wantCount > 0 {
+				if events[0].Category != notify.CategoryGuardOffline {
+					t.Errorf("got category %q, want %q", events[0].Category, notify.CategoryGuardOffline)
+				}
+				if events[0].TargetFragment != "guards" {
+					t.Errorf("got fragment %q, want %q", events[0].TargetFragment, "guards")
+				}
 			}
 		})
 	}

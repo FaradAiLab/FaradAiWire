@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/FaradAiLab/FaradAiWire/internal/notify"
 )
 
 // FallbackNotice is the in-band alert injected into tool responses when Semantic Guard is offline.
@@ -25,6 +27,7 @@ func (f NotificationFunc) SendNotification(ctx context.Context, method string, p
 func (f *GuardFilter) notifyDisconnection(ctx context.Context, toolName string) {
 	f.mu.RLock()
 	sink := f.notificationSink
+	desktop := f.desktopNotifier
 	f.mu.RUnlock()
 
 	if sink != nil {
@@ -33,6 +36,16 @@ func (f *GuardFilter) notifyDisconnection(ctx context.Context, toolName string) 
 			"logger": "faradai-guard",
 			"data":   fmt.Sprintf("Semantic Security Guard is offline. L1 regex fallback active (tool: %s).", toolName),
 		})
+	}
+
+	if desktop != nil {
+		desktop.Notify(notify.AlertEvent{
+			Category:       notify.CategoryGuardOffline,
+			Title:          "FaradAiWire Security Alert",
+			Message:        "Semantic Guard is offline; L1 regex fallback active.",
+			TargetFragment: "guards",
+		})
+		return
 	}
 
 	NotifyDarwin("FaradAiWire Security Alert", "Semantic Guard is offline; L1 regex fallback active.")

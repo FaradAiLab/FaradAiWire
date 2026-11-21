@@ -160,17 +160,7 @@ func (f *GuardFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (*
 
 	result, err := mgr.CallInspect(ctx, inspReq)
 	if err != nil {
-		if errors.Is(err, ErrQueueFull) {
-			slog.WarnContext(ctx, "Semantic Security Guard queue depth exceeded in response: load shedding to L1",
-				slog.String("tool", toolName),
-			)
-			return resp, nil
-		}
-		slog.WarnContext(ctx, "Semantic Security Guard inspection failed in response; degrading safely to L1-Only fallback",
-			slog.String("tool", toolName),
-			slog.String("error", err.Error()),
-		)
-		f.notifyDisconnection(ctx, toolName)
+		f.handleInspectError(ctx, toolName, "response", err)
 		return resp, nil
 	}
 
@@ -397,16 +387,7 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 
 	result, err := mgr.CallInspect(ctx, inspReq)
 	if err != nil {
-		if errors.Is(err, ErrQueueFull) {
-			slog.WarnContext(ctx, "Semantic Security Guard queue depth exceeded: load shedding to L1",
-				slog.String("tool", callParams.Name),
-			)
-			return req, nil
-		}
-		slog.WarnContext(ctx, "Semantic Security Guard inspection failed; degrading safely to L1-Only fallback",
-			slog.String("tool", callParams.Name),
-			slog.String("error", err.Error()),
-		)
+		f.handleInspectError(ctx, callParams.Name, "request", err)
 		return req, nil
 	}
 
@@ -516,4 +497,23 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 	}
 
 	return req, nil
+}
+
+func (f *GuardFilter) handleInspectError(ctx context.Context, toolName, phase string, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	if errors.Is(err, ErrQueueFull) {
+		slog.WarnContext(ctx, "Semantic Security Guard queue depth exceeded; load shedding to L1",
+			slog.String("tool", toolName),
+			slog.String("phase", phase),
+		)
+		return
+	}
+	slog.WarnContext(ctx, "Semantic Security Guard inspection failed; degrading safely to L1-Only fallback",
+		slog.String("tool", toolName),
+		slog.String("phase", phase),
+		slog.String("error", err.Error()),
+	)
+	f.notifyDisconnection(ctx, toolName)
 }

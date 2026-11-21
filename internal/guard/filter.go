@@ -10,6 +10,7 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
+	"github.com/FaradAiLab/FaradAiWire/internal/notify"
 	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/pkg/filter"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
@@ -46,6 +47,7 @@ type GuardFilter struct {
 	manager          Manager
 	hitlDispatcher   *HITLDispatcher
 	notificationSink NotificationSink
+	desktopNotifier  notify.DesktopNotifier
 	catalog          CatalogStore
 	agentRepo        agent.Resolver
 	settingsCache    *settings.Cache
@@ -216,6 +218,20 @@ func (f *GuardFilter) NotificationSink() NotificationSink {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.notificationSink
+}
+
+// SetDesktopNotifier thread-safely sets the workstation desktop alert dispatcher.
+func (f *GuardFilter) SetDesktopNotifier(notifier notify.DesktopNotifier) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.desktopNotifier = notifier
+}
+
+// DesktopNotifier returns the currently configured workstation desktop alert dispatcher.
+func (f *GuardFilter) DesktopNotifier() notify.DesktopNotifier {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.desktopNotifier
 }
 
 // ExecuteRequest satisfies filter.SecurityFilter for unified pipeline execution.
