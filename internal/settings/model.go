@@ -25,7 +25,7 @@ type TimeoutsSettings struct {
 	ProbeTimeoutSec int `json:"probe_timeout_sec"`
 }
 
-// GuardSettings defines threat detection thresholds and SLA timings for the AI guard engine.
+// GuardSettings defines threat detection thresholds, desktop alert controls, and SLA timings for the AI guard engine.
 type GuardSettings struct {
 	// ThresholdScore is the minimum malicious probability (0.0 to 1.0) to trigger a security block.
 	ThresholdScore float64 `json:"threshold_score"`
@@ -35,6 +35,18 @@ type GuardSettings struct {
 	ColdTimeoutMS int `json:"cold_timeout_ms"`
 	// HITLTimeoutSec is the maximum window in seconds to wait for human-in-the-loop confirmation.
 	HITLTimeoutSec int `json:"hitl_timeout_sec"`
+	// DesktopAlertsEnabled enables native workstation desktop notifications for security events.
+	DesktopAlertsEnabled bool `json:"desktop_alerts_enabled"`
+	// AlertOnGuardOffline emits a desktop alert when Semantic Guard degrades to L1 regex fallback.
+	AlertOnGuardOffline bool `json:"alert_on_guard_offline"`
+	// AlertOnHITLPending emits a desktop alert when a tool call awaits human-in-the-loop confirmation.
+	AlertOnHITLPending bool `json:"alert_on_hitl_pending"`
+	// AlertOnBlock emits a desktop alert when the pipeline blocks an MCP tool invocation or response.
+	AlertOnBlock bool `json:"alert_on_block"`
+	// AlertOnAudit emits an opt-in desktop alert when an audit-only rule records a match.
+	AlertOnAudit bool `json:"alert_on_audit"`
+	// AlertCooldownSec defines the per-category cooldown window in seconds for non-HITL desktop alerts.
+	AlertCooldownSec int `json:"alert_cooldown_sec"`
 }
 
 // MaintenanceSettings defines session retention and background cleanup intervals.
@@ -74,10 +86,16 @@ func DefaultOperationalSettings() *OperationalSettings {
 			ProbeTimeoutSec:         5,
 		},
 		Guard: GuardSettings{
-			ThresholdScore: 0.50,
-			TimeoutMS:      1000,
-			ColdTimeoutMS:  3000,
-			HITLTimeoutSec: 60,
+			ThresholdScore:       0.50,
+			TimeoutMS:            1000,
+			ColdTimeoutMS:        3000,
+			HITLTimeoutSec:       60,
+			DesktopAlertsEnabled: true,
+			AlertOnGuardOffline:  true,
+			AlertOnHITLPending:   true,
+			AlertOnBlock:         true,
+			AlertOnAudit:         false,
+			AlertCooldownSec:     60,
 		},
 		Maintenance: MaintenanceSettings{
 			SessionIdleTimeoutMin: 30,
@@ -107,10 +125,16 @@ func (s *OperationalSettings) Clone() *OperationalSettings {
 			ProbeTimeoutSec:         s.Timeouts.ProbeTimeoutSec,
 		},
 		Guard: GuardSettings{
-			ThresholdScore: s.Guard.ThresholdScore,
-			TimeoutMS:      s.Guard.TimeoutMS,
-			ColdTimeoutMS:  s.Guard.ColdTimeoutMS,
-			HITLTimeoutSec: s.Guard.HITLTimeoutSec,
+			ThresholdScore:       s.Guard.ThresholdScore,
+			TimeoutMS:            s.Guard.TimeoutMS,
+			ColdTimeoutMS:        s.Guard.ColdTimeoutMS,
+			HITLTimeoutSec:       s.Guard.HITLTimeoutSec,
+			DesktopAlertsEnabled: s.Guard.DesktopAlertsEnabled,
+			AlertOnGuardOffline:  s.Guard.AlertOnGuardOffline,
+			AlertOnHITLPending:   s.Guard.AlertOnHITLPending,
+			AlertOnBlock:         s.Guard.AlertOnBlock,
+			AlertOnAudit:         s.Guard.AlertOnAudit,
+			AlertCooldownSec:     s.Guard.AlertCooldownSec,
 		},
 		Maintenance: MaintenanceSettings{
 			SessionIdleTimeoutMin: s.Maintenance.SessionIdleTimeoutMin,

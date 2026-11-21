@@ -171,6 +171,57 @@ var Registry = map[string]SettingMeta{
 		Max:         600,
 		Unit:        "seconds",
 	},
+	"guard.desktop_alerts_enabled": {
+		Key:         "guard.desktop_alerts_enabled",
+		Label:       "Desktop Security Alerts",
+		Description: "Enable native workstation desktop notifications for FaradAiWire security events",
+		Category:    "guard",
+		Type:        TypeBool,
+		DefaultVal:  true,
+	},
+	"guard.alert_on_guard_offline": {
+		Key:         "guard.alert_on_guard_offline",
+		Label:       "Alert on Semantic Guard Offline",
+		Description: "Notify when Semantic Security Guard disconnects or falls back to L1 regex protection",
+		Category:    "guard",
+		Type:        TypeBool,
+		DefaultVal:  true,
+	},
+	"guard.alert_on_hitl_pending": {
+		Key:         "guard.alert_on_hitl_pending",
+		Label:       "Alert on HITL Approval Pending",
+		Description: "Notify when a tool invocation pauses awaiting human-in-the-loop approval",
+		Category:    "guard",
+		Type:        TypeBool,
+		DefaultVal:  true,
+	},
+	"guard.alert_on_block": {
+		Key:         "guard.alert_on_block",
+		Label:       "Alert on Security Block",
+		Description: "Notify when DLP, AI Guard, Rate Limit, Loop, or Schema policies block a tool call",
+		Category:    "guard",
+		Type:        TypeBool,
+		DefaultVal:  true,
+	},
+	"guard.alert_on_audit": {
+		Key:         "guard.alert_on_audit",
+		Label:       "Alert on Audit Match",
+		Description: "Notify when a non-blocking ActionAudit rule records a match (opt-in to prevent alert fatigue)",
+		Category:    "guard",
+		Type:        TypeBool,
+		DefaultVal:  false,
+	},
+	"guard.alert_cooldown_sec": {
+		Key:         "guard.alert_cooldown_sec",
+		Label:       "Desktop Alert Cooldown",
+		Description: "Per-category cooldown window in seconds for non-HITL desktop alerts (0 disables throttling)",
+		Category:    "guard",
+		Type:        TypeInt,
+		DefaultVal:  60,
+		Min:         0,
+		Max:         3600,
+		Unit:        "seconds",
+	},
 
 	// Maintenance Category
 	"maintenance.session_idle_timeout_min": {
@@ -251,7 +302,7 @@ func validateMeta(key string, meta SettingMeta, val any) error {
 		default:
 			return fmt.Errorf("%w: key %q expects an integer, got %T", ErrInvalidValue, key, val)
 		}
-		if meta.Min > 0 && float64(intVal) < meta.Min {
+		if (meta.Min > 0 || meta.Max > 0) && float64(intVal) < meta.Min {
 			return fmt.Errorf("%w: key %q value %d is below minimum allowed %v", ErrInvalidValue, key, intVal, meta.Min)
 		}
 		if meta.Max > 0 && float64(intVal) > meta.Max {
@@ -458,16 +509,47 @@ func ApplySetting(s *OperationalSettings, key string, val any) error {
 			return fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
 		}
 	case "guard.hitl_timeout_sec":
-		switch v := val.(type) {
-		case int:
-			s.Guard.HITLTimeoutSec = v
-		case int64:
-			s.Guard.HITLTimeoutSec = int(v)
-		case float64:
-			s.Guard.HITLTimeoutSec = int(v)
-		default:
-			return fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
+		v, err := coerceIntSetting(key, val)
+		if err != nil {
+			return err
 		}
+		s.Guard.HITLTimeoutSec = v
+	case "guard.desktop_alerts_enabled":
+		b, err := coerceBoolSetting(key, val)
+		if err != nil {
+			return err
+		}
+		s.Guard.DesktopAlertsEnabled = b
+	case "guard.alert_on_guard_offline":
+		b, err := coerceBoolSetting(key, val)
+		if err != nil {
+			return err
+		}
+		s.Guard.AlertOnGuardOffline = b
+	case "guard.alert_on_hitl_pending":
+		b, err := coerceBoolSetting(key, val)
+		if err != nil {
+			return err
+		}
+		s.Guard.AlertOnHITLPending = b
+	case "guard.alert_on_block":
+		b, err := coerceBoolSetting(key, val)
+		if err != nil {
+			return err
+		}
+		s.Guard.AlertOnBlock = b
+	case "guard.alert_on_audit":
+		b, err := coerceBoolSetting(key, val)
+		if err != nil {
+			return err
+		}
+		s.Guard.AlertOnAudit = b
+	case "guard.alert_cooldown_sec":
+		v, err := coerceIntSetting(key, val)
+		if err != nil {
+			return err
+		}
+		s.Guard.AlertCooldownSec = v
 
 	case "maintenance.session_idle_timeout_min":
 		switch v := val.(type) {
@@ -547,6 +629,18 @@ func ExtractSetting(s *OperationalSettings, key string) (any, error) {
 		return s.Guard.ColdTimeoutMS, nil
 	case "guard.hitl_timeout_sec":
 		return s.Guard.HITLTimeoutSec, nil
+	case "guard.desktop_alerts_enabled":
+		return s.Guard.DesktopAlertsEnabled, nil
+	case "guard.alert_on_guard_offline":
+		return s.Guard.AlertOnGuardOffline, nil
+	case "guard.alert_on_hitl_pending":
+		return s.Guard.AlertOnHITLPending, nil
+	case "guard.alert_on_block":
+		return s.Guard.AlertOnBlock, nil
+	case "guard.alert_on_audit":
+		return s.Guard.AlertOnAudit, nil
+	case "guard.alert_cooldown_sec":
+		return s.Guard.AlertCooldownSec, nil
 
 	case "maintenance.session_idle_timeout_min":
 		return s.Maintenance.SessionIdleTimeoutMin, nil
@@ -576,4 +670,28 @@ func GetAllMetadata() []SettingMeta {
 		return items[i].Category < items[j].Category
 	})
 	return items
+}
+
+func coerceIntSetting(key string, val any) (int, error) {
+	switch v := val.(type) {
+	case int:
+		return v, nil
+	case int64:
+		return int(v), nil
+	case float64:
+		if v != float64(int64(v)) {
+			return 0, fmt.Errorf("%w: key %q requires an integer value, got %v", ErrInvalidValue, key, v)
+		}
+		return int(v), nil
+	default:
+		return 0, fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
+	}
+}
+
+func coerceBoolSetting(key string, val any) (bool, error) {
+	b, ok := val.(bool)
+	if !ok {
+		return false, fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
+	}
+	return b, nil
 }

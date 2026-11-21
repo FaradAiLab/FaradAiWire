@@ -343,3 +343,118 @@ func TestTelemetryRetentionAndPreviewSettings(t *testing.T) {
 		})
 	}
 }
+
+func TestGuardDesktopAlertSettings(t *testing.T) {
+	t.Parallel()
+
+	s := DefaultOperationalSettings()
+	if !s.Guard.DesktopAlertsEnabled {
+		t.Error("expected default DesktopAlertsEnabled=true")
+	}
+	if !s.Guard.AlertOnGuardOffline {
+		t.Error("expected default AlertOnGuardOffline=true")
+	}
+	if !s.Guard.AlertOnHITLPending {
+		t.Error("expected default AlertOnHITLPending=true")
+	}
+	if !s.Guard.AlertOnBlock {
+		t.Error("expected default AlertOnBlock=true")
+	}
+	if s.Guard.AlertOnAudit {
+		t.Error("expected default AlertOnAudit=false")
+	}
+	if s.Guard.AlertCooldownSec != 60 {
+		t.Errorf("expected default AlertCooldownSec=60, got %d", s.Guard.AlertCooldownSec)
+	}
+
+	clone := s.Clone()
+	clone.Guard.DesktopAlertsEnabled = false
+	clone.Guard.AlertOnGuardOffline = false
+	clone.Guard.AlertOnHITLPending = false
+	clone.Guard.AlertOnBlock = false
+	clone.Guard.AlertOnAudit = true
+	clone.Guard.AlertCooldownSec = 120
+
+	if !s.Guard.DesktopAlertsEnabled || !s.Guard.AlertOnGuardOffline || !s.Guard.AlertOnHITLPending || !s.Guard.AlertOnBlock || s.Guard.AlertOnAudit || s.Guard.AlertCooldownSec != 60 {
+		t.Fatal("mutating cloned desktop alert settings altered original settings")
+	}
+
+	validationCases := []struct {
+		name    string
+		key     string
+		val     any
+		wantErr bool
+		errIs   error
+	}{
+		{name: "desktop_alerts_enabled bool ok", key: "guard.desktop_alerts_enabled", val: false, wantErr: false},
+		{name: "desktop_alerts_enabled invalid type", key: "guard.desktop_alerts_enabled", val: "true", wantErr: true, errIs: ErrInvalidValue},
+		{name: "alert_on_guard_offline bool ok", key: "guard.alert_on_guard_offline", val: false, wantErr: false},
+		{name: "alert_on_hitl_pending bool ok", key: "guard.alert_on_hitl_pending", val: false, wantErr: false},
+		{name: "alert_on_block bool ok", key: "guard.alert_on_block", val: false, wantErr: false},
+		{name: "alert_on_audit bool ok", key: "guard.alert_on_audit", val: true, wantErr: false},
+		{name: "alert_cooldown_sec min zero ok", key: "guard.alert_cooldown_sec", val: 0, wantErr: false},
+		{name: "alert_cooldown_sec mid ok", key: "guard.alert_cooldown_sec", val: 60, wantErr: false},
+		{name: "alert_cooldown_sec max ok", key: "guard.alert_cooldown_sec", val: 3600, wantErr: false},
+		{name: "alert_cooldown_sec negative rejected", key: "guard.alert_cooldown_sec", val: -1, wantErr: true, errIs: ErrInvalidValue},
+		{name: "alert_cooldown_sec above max rejected", key: "guard.alert_cooldown_sec", val: 3601, wantErr: true, errIs: ErrInvalidValue},
+		{name: "alert_cooldown_sec float rejected", key: "guard.alert_cooldown_sec", val: 12.5, wantErr: true, errIs: ErrInvalidValue},
+	}
+
+	for _, tc := range validationCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			meta, ok := Registry[tc.key]
+			if !ok {
+				t.Fatalf("missing registry key %q", tc.key)
+			}
+			if meta.Category != "guard" {
+				t.Fatalf("expected category %q for %q, got %q", "guard", tc.key, meta.Category)
+			}
+			err := Validate(tc.key, tc.val)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate(%q, %v) err=%v, wantErr=%v", tc.key, tc.val, err, tc.wantErr)
+			}
+			if tc.errIs != nil && !errors.Is(err, tc.errIs) {
+				t.Fatalf("Validate(%q, %v) error = %v, want %v", tc.key, tc.val, err, tc.errIs)
+			}
+		})
+	}
+
+	roundTripCases := []struct {
+		key  string
+		set  any
+		want any
+	}{
+		{key: "guard.desktop_alerts_enabled", set: false, want: false},
+		{key: "guard.alert_on_guard_offline", set: false, want: false},
+		{key: "guard.alert_on_hitl_pending", set: false, want: false},
+		{key: "guard.alert_on_block", set: false, want: false},
+		{key: "guard.alert_on_audit", set: true, want: true},
+		{key: "guard.alert_cooldown_sec", set: 0, want: 0},
+		{key: "guard.alert_cooldown_sec", set: int64(90), want: 90},
+		{key: "guard.alert_cooldown_sec", set: float64(180), want: 180},
+	}
+
+	for _, tc := range roundTripCases {
+		target := DefaultOperationalSettings()
+		if err := ApplySetting(target, tc.key, tc.set); err != nil {
+			t.Fatalf("ApplySetting(%q, %v) unexpected err: %v", tc.key, tc.set, err)
+		}
+		got, err := ExtractSetting(target, tc.key)
+		if err != nil {
+			t.Fatalf("ExtractSetting(%q) unexpected err: %v", tc.key, err)
+		}
+		if got != tc.want {
+			t.Errorf("round-trip %q: got %v (%T), want %v (%T)", tc.key, got, got, tc.want, tc.want)
+		}
+	}
+
+	// Confirm canonical 4-category invariant remains unchanged.
+	cats := map[string]bool{}
+	for _, m := range GetAllMetadata() {
+		cats[m.Category] = true
+	}
+	if len(cats) != 4 {
+		t.Fatalf("expected exactly 4 categories, got %d (%v)", len(cats), cats)
+	}
+}
