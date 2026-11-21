@@ -272,3 +272,35 @@ func TestResolveCategoryCooldown(t *testing.T) {
 		t.Fatalf("expected cache override 0s, got %v", got)
 	}
 }
+
+func TestDefaultFragmentForCategory_AndCooldownReset(t *testing.T) {
+	cases := []struct {
+		cat  AlertCategory
+		want string
+	}{
+		{cat: CategoryGuardOffline, want: "guards"},
+		{cat: CategoryHITLPending, want: "audit"},
+		{cat: CategoryBlock, want: "audit"},
+		{cat: CategoryAudit, want: "audit"},
+		{cat: AlertCategory("unknown"), want: "audit"},
+	}
+
+	for _, tc := range cases {
+		if got := DefaultFragmentForCategory(tc.cat); got != tc.want {
+			t.Errorf("DefaultFragmentForCategory(%q) = %q, want %q", tc.cat, got, tc.want)
+		}
+	}
+
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	tracker := newCooldownTracker(func() time.Time { return now })
+	if !tracker.Allow(CategoryGuardOffline, 60*time.Second) {
+		t.Fatal("first Allow should succeed")
+	}
+	if tracker.Allow(CategoryGuardOffline, 60*time.Second) {
+		t.Fatal("second Allow within cooldown should be suppressed")
+	}
+	tracker.Reset()
+	if !tracker.Allow(CategoryGuardOffline, 60*time.Second) {
+		t.Fatal("Allow immediately after Reset() should succeed")
+	}
+}

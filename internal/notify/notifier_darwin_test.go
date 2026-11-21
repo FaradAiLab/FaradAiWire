@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -252,5 +253,385 @@ func TestDarwinNotifier_Tier3FallbackOnHelperFailureAndConcurrency(t *testing.T)
 		case <-time.After(2 * time.Second):
 			t.Fatalf("timed out waiting for Tier 3 fallback #%d", i)
 		}
+	}
+}
+
+func simulateOsacompileBundle(name string, args []string) error {
+	if name != "/usr/bin/osacompile" {
+		return nil
+	}
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-o" {
+			appDir := args[i+1]
+			if err := os.MkdirAll(filepath.Join(appDir, "Contents", "MacOS"), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(appDir, "Contents", "Info.plist"), []byte("<plist/>"), 0o644); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(appDir, "Contents", "MacOS", "applet"), []byte("bin"), 0o755); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func TestDarwinNotifier_SemaphoreBackpressureNonBlocking(t *testing.T) {
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("FARADAI_ALERT_DESKTOP_ENABLED", "true")
+
+	started := make(chan struct{}, 4)
+	release := make(chan struct{})
+	finished := make(chan struct{}, 5)
+
+	n := &darwinNotifier{
+		adminBaseURL:  "http://127.0.0.1:19415",
+		settingsCache: settings.NewCache(settings.DefaultOperationalSettings()),
+		cooldowns:     newCooldownTracker(nil),
+		sem:           make(chan struct{}, 4),
+		lookPath: func(bin string) (string, error) {
+			if bin == "terminal-notifier" {
+				return "/opt/homebrew/bin/terminal-notifier", nil
+			}
+			return "", errors.New("not found")
+		},
+		runner: func(_ context.Context, _ string, _ ...string) error {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			finished <- struct{}{}
+			return nil
+		},
+	}
+
+	// Fill all 4 semaphore slots cleanly with HITL alerts (0s cooldown).
+	for i := 0; i < 4; i++ {
+		if !n.Notify(AlertEvent{Category: CategoryHITLPending, Title: "HITL", Message: "m", TargetFragment: "audit"}) {
+			t.Fatalf("slot %d should have been accepted", i)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for runner slot %d to start", i)
+		}
+	}
+
+	// 5th concurrent Notify must drop non-blockingly and return false.
+	doneNonBlock := make(chan bool, 1)
+	go func() {
+		doneNonBlock <- n.Notify(AlertEvent{Category: CategoryHITLPending, Title: "HITL", Message: "dropped", TargetFragment: "audit"})
+	}()
+	select {
+	case accepted := <-doneNonBlock:
+		if accepted {
+			t.Fatal("expected 5th concurrent Notify to return false under full semaphore backpressure")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Notify blocked under semaphore pressure")
+	}
+
+	// Unblock the 4 workers and verify semaphore recovers for subsequent alerts.
+	close(release)
+	for i := 0; i < 4; i++ {
+		select {
+		case <-finished:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for blocked runner %d to exit", i)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(n.sem) != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !n.Notify(AlertEvent{Category: CategoryHITLPending, Title: "HITL", Message: "recovered", TargetFragment: "audit"}) {
+		t.Fatal("expected Notify to succeed once semaphore drained")
+	}
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for recovered Notify dispatch")
+	}
+}
+
+func TestDarwinNotifier_Tier1FailureFallsBackToTier2(t *testing.T) {
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("FARADAI_ALERT_DESKTOP_ENABLED", "true")
+
+	home := t.TempDir()
+	var mu sync.Mutex
+	var cmds []recordedCmd
+	openDone := make(chan struct{}, 1)
+
+	n := &darwinNotifier{
+		adminBaseURL:  "http://127.0.0.1:19415",
+		settingsCache: settings.NewCache(settings.DefaultOperationalSettings()),
+		cooldowns:     newCooldownTracker(nil),
+		sem:           make(chan struct{}, 4),
+		homeDir:       func() (string, error) { return home, nil },
+		lookPath: func(bin string) (string, error) {
+			if bin == "terminal-notifier" {
+				return "/opt/homebrew/bin/terminal-notifier", nil
+			}
+			return "", errors.New("not found")
+		},
+		runner: func(_ context.Context, name string, args ...string) error {
+			mu.Lock()
+			cmds = append(cmds, recordedCmd{name: name, args: slices.Clone(args)})
+			mu.Unlock()
+
+			if name == "/opt/homebrew/bin/terminal-notifier" {
+				return errors.New("terminal-notifier launch failed")
+			}
+			if err := simulateOsacompileBundle(name, args); err != nil {
+				return err
+			}
+			if name == "/usr/bin/open" {
+				select {
+				case openDone <- struct{}{}:
+				default:
+				}
+			}
+			return nil
+		},
+	}
+
+	if !n.Notify(AlertEvent{Category: CategoryBlock, Title: "Blocked", Message: "Tool denied", TargetFragment: "audit"}) {
+		t.Fatal("expected Notify to accept dispatch")
+	}
+	select {
+	case <-openDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Tier 2 open fallback")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(cmds) < 5 {
+		t.Fatalf("expected terminal-notifier + osacompile + plutil + codesign + open, got %d cmds: %+v", len(cmds), cmds)
+	}
+	if cmds[0].name != "/opt/homebrew/bin/terminal-notifier" {
+		t.Fatalf("expected Tier 1 attempted first, got %q", cmds[0].name)
+	}
+	for _, c := range cmds {
+		if c.name == "/usr/bin/osascript" {
+			t.Fatal("did not expect Tier 3 osascript when Tier 2 fallback succeeded")
+		}
+	}
+}
+
+func TestDarwinNotifier_Tier2ReusesCurrentHelperAndUpgradesStaleVersion(t *testing.T) {
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("FARADAI_ALERT_DESKTOP_ENABLED", "true")
+
+	// 1. Pre-seeded matching version skips osacompile/plutil/codesign and calls open directly.
+	homeCurrent := t.TempDir()
+	baseCurrent := filepath.Join(homeCurrent, ".faradaiwire", "notifier")
+	appCurrent := filepath.Join(baseCurrent, "FaradAiWireNotifier.app")
+	if err := os.MkdirAll(filepath.Join(appCurrent, "Contents", "MacOS"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appCurrent, "Contents", "Info.plist"), []byte("<plist/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appCurrent, "Contents", "MacOS", "applet"), []byte("bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(baseCurrent, ".applet-version"), []byte(notifierAppletVersion+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu1 sync.Mutex
+	var cmds1 []recordedCmd
+	done1 := make(chan struct{}, 1)
+	n1 := &darwinNotifier{
+		adminBaseURL:  "http://127.0.0.1:19415",
+		settingsCache: settings.NewCache(settings.DefaultOperationalSettings()),
+		cooldowns:     newCooldownTracker(nil),
+		sem:           make(chan struct{}, 4),
+		homeDir:       func() (string, error) { return homeCurrent, nil },
+		lookPath:      func(string) (string, error) { return "", errors.New("not found") },
+		runner: func(_ context.Context, name string, args ...string) error {
+			mu1.Lock()
+			cmds1 = append(cmds1, recordedCmd{name: name, args: slices.Clone(args)})
+			mu1.Unlock()
+			if name == "/usr/bin/open" {
+				done1 <- struct{}{}
+			}
+			return nil
+		},
+	}
+
+	n1.Notify(AlertEvent{Category: CategoryBlock, Title: "Reuse", Message: "Reused helper", TargetFragment: "audit"})
+	select {
+	case <-done1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for open on cached helper")
+	}
+
+	mu1.Lock()
+	if len(cmds1) != 1 || cmds1[0].name != "/usr/bin/open" {
+		mu1.Unlock()
+		t.Fatalf("expected only /usr/bin/open when helper matches version %s, got: %+v", notifierAppletVersion, cmds1)
+	}
+	mu1.Unlock()
+
+	// 2. Stale .applet-version ("0") forces rebuild + atomic swapAppBundle without leaving .bak.
+	homeStale := t.TempDir()
+	baseStale := filepath.Join(homeStale, ".faradaiwire", "notifier")
+	appStale := filepath.Join(baseStale, "FaradAiWireNotifier.app")
+	if err := os.MkdirAll(filepath.Join(appStale, "Contents", "MacOS"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appStale, "Contents", "Info.plist"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appStale, "Contents", "MacOS", "applet"), []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(baseStale, ".applet-version"), []byte("0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	done2 := make(chan struct{}, 1)
+	var sawOsacompile atomic.Bool
+	n2 := &darwinNotifier{
+		adminBaseURL:  "http://127.0.0.1:19415",
+		settingsCache: settings.NewCache(settings.DefaultOperationalSettings()),
+		cooldowns:     newCooldownTracker(nil),
+		sem:           make(chan struct{}, 4),
+		homeDir:       func() (string, error) { return homeStale, nil },
+		lookPath:      func(string) (string, error) { return "", errors.New("not found") },
+		runner: func(_ context.Context, name string, args ...string) error {
+			if name == "/usr/bin/osacompile" {
+				sawOsacompile.Store(true)
+			}
+			if err := simulateOsacompileBundle(name, args); err != nil {
+				return err
+			}
+			if name == "/usr/bin/open" {
+				done2 <- struct{}{}
+			}
+			return nil
+		},
+	}
+
+	n2.Notify(AlertEvent{Category: CategoryBlock, Title: "Upgrade", Message: "Upgraded helper", TargetFragment: "audit"})
+	select {
+	case <-done2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for helper upgrade open")
+	}
+
+	if !sawOsacompile.Load() {
+		t.Fatal("expected stale applet version to trigger rebuild")
+	}
+	verData, err := os.ReadFile(filepath.Join(baseStale, ".applet-version"))
+	if err != nil || strings.TrimSpace(string(verData)) != notifierAppletVersion {
+		t.Fatalf("expected upgraded .applet-version %q, got %q (err=%v)", notifierAppletVersion, string(verData), err)
+	}
+	if _, err := os.Stat(appStale + ".bak"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected backup bundle to be cleaned up, stat err=%v", err)
+	}
+}
+
+func TestDarwinNotifier_DefaultFragmentAndEmptyBaseURLClearsStaleURL(t *testing.T) {
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("FARADAI_ALERT_DESKTOP_ENABLED", "true")
+
+	home := t.TempDir()
+	baseDir := filepath.Join(home, ".faradaiwire", "notifier")
+	if err := os.MkdirAll(baseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "last_alert_url.txt"), []byte("http://stale.example/old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	openDone := make(chan struct{}, 2)
+	n := &darwinNotifier{
+		adminBaseURL:  "http://127.0.0.1:19415",
+		settingsCache: settings.NewCache(settings.DefaultOperationalSettings()),
+		cooldowns:     newCooldownTracker(nil),
+		sem:           make(chan struct{}, 4),
+		homeDir:       func() (string, error) { return home, nil },
+		lookPath:      func(string) (string, error) { return "", errors.New("not found") },
+		runner: func(_ context.Context, name string, args ...string) error {
+			if err := simulateOsacompileBundle(name, args); err != nil {
+				return err
+			}
+			if name == "/usr/bin/open" {
+				openDone <- struct{}{}
+			}
+			return nil
+		},
+	}
+
+	// 1. Empty TargetFragment falls back to DefaultFragmentForCategory (#audit for CategoryBlock).
+	if !n.Notify(AlertEvent{Category: CategoryBlock, Title: "Block", Message: "Default fragment check"}) {
+		t.Fatal("expected Notify to succeed")
+	}
+	select {
+	case <-openDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first Tier 2 open")
+	}
+	gotURL, err := os.ReadFile(filepath.Join(baseDir, "last_alert_url.txt"))
+	if err != nil || strings.TrimSpace(string(gotURL)) != "http://127.0.0.1:19415/admin/dashboard#audit" {
+		t.Fatalf("got URL %q (err=%v), want default #audit URL", string(gotURL), err)
+	}
+
+	// 2. Empty AdminBaseURL overwrites/truncates stale last_alert_url.txt cleanly.
+	n.SetAdminBaseURL("")
+	if !n.Notify(AlertEvent{Category: CategoryGuardOffline, Title: "Offline", Message: "Cleared URL check"}) {
+		t.Fatal("expected Notify to succeed after clearing base URL")
+	}
+	select {
+	case <-openDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for second Tier 2 open")
+	}
+	gotCleared, err := os.ReadFile(filepath.Join(baseDir, "last_alert_url.txt"))
+	if err != nil {
+		t.Fatalf("read last_alert_url.txt: %v", err)
+	}
+	if len(gotCleared) != 0 {
+		t.Fatalf("expected last_alert_url.txt to be cleared when AdminBaseURL is empty, got %q", string(gotCleared))
+	}
+}
+
+func TestNotifyDefault_AndResetCooldowns(t *testing.T) {
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("FARADAI_ALERT_DESKTOP_ENABLED", "true")
+	t.Setenv("FARADAI_ALERT_COOLDOWN_SEC", "60")
+
+	ResetCooldowns()
+	t.Cleanup(ResetCooldowns)
+
+	ev := AlertEvent{
+		Category:       CategoryGuardOffline,
+		Title:          "FaradAiWire Security Alert",
+		Message:        "Package default check",
+		TargetFragment: "guards",
+	}
+	if !NotifyDefault(ev) {
+		t.Fatal("expected first NotifyDefault to succeed under testing.Testing() guard")
+	}
+	if NotifyDefault(ev) {
+		t.Fatal("expected immediate repeat NotifyDefault to be throttled")
+	}
+	ResetCooldowns()
+	if !NotifyDefault(ev) {
+		t.Fatal("expected NotifyDefault immediately after ResetCooldowns() to succeed")
 	}
 }
