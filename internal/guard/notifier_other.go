@@ -2,10 +2,19 @@
 
 package guard
 
-// ResetDarwinNotificationCooldown is a no-op on non-darwin platforms.
-func ResetDarwinNotificationCooldown() {}
+import "github.com/FaradAiLab/FaradAiWire/internal/notify"
 
-// NotifyDarwin is a no-op on non-darwin platforms.
+// ResetDarwinNotificationCooldown is a no-op on non-darwin platforms.
+func ResetDarwinNotificationCooldown() {
+	notify.ResetCooldowns()
+}
+
+// NotifyDarwin delegates to notify.NotifyDefault (no-op on non-darwin platforms).
 func NotifyDarwin(title, message string) bool {
-	return false
+	return notify.NotifyDefault(notify.AlertEvent{
+		Category:       notify.CategoryGuardOffline,
+		Title:          title,
+		Message:        message,
+		TargetFragment: "guards",
+	})
 }
