@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/FaradAiLab/FaradAiWire/internal/notify"
 )
 
 type mockWSHub struct {
@@ -467,4 +469,97 @@ func TestHITLDispatcher_TTYSemaphore_NoHeadOfLineTimeoutStall(t *testing.T) {
 	cancelA()
 	_, _ = pw.Write([]byte("n\n"))
 	<-doneA
+}
+
+type hookDesktopNotifier struct {
+	mu       sync.Mutex
+	events   []notify.AlertEvent
+	onNotify func(notify.AlertEvent)
+}
+
+func (h *hookDesktopNotifier) Notify(event notify.AlertEvent) bool {
+	if h.onNotify != nil {
+		h.onNotify(event)
+	}
+	h.mu.Lock()
+	h.events = append(h.events, event)
+	h.mu.Unlock()
+	return true
+}
+
+func (h *hookDesktopNotifier) SetAdminBaseURL(_ string) {}
+
+func TestHITLDispatcher_DesktopNotifier_StrictADR0054(t *testing.T) {
+	t.Run("headless_fail_closed_emits_zero_notifications", func(t *testing.T) {
+		notifier := &mockDesktopNotifier{}
+		d := NewHITLDispatcher(HITLDispatcherConfig{
+			Timeout:         time.Second,
+			DisableTTY:      true,
+			DesktopNotifier: notifier,
+		})
+
+		approved, err := d.RequestApproval(context.Background(), &HITLRequest{
+			CallID:       "headless-1",
+			ToolName:     "exec_cmd",
+			ThreatDomain: "RCE",
+		})
+		if approved {
+			t.Fatal("expected headless request to be denied")
+		}
+		if !errors.Is(err, ErrHeadlessFailClosed) {
+			t.Fatalf("expected ErrHeadlessFailClosed, got %v", err)
+		}
+		if events := notifier.Events(); len(events) != 0 {
+			t.Fatalf("expected 0 desktop alerts in headless fail-closed mode, got %d: %+v", len(events), events)
+		}
+	})
+
+	t.Run("interactive_notifies_only_after_pending_registered", func(t *testing.T) {
+		var d *HITLDispatcher
+		var pendingVisibleOnNotify bool
+
+		notifier := &hookDesktopNotifier{
+			onNotify: func(_ notify.AlertEvent) {
+				_, ok := d.GetPending("hitl-pending-1")
+				pendingVisibleOnNotify = ok
+				// Resolve immediately once pending state is verified so RequestApproval completes cleanly.
+				d.Resolve("hitl-pending-1", true)
+			},
+		}
+
+		d = NewHITLDispatcher(HITLDispatcherConfig{
+			Timeout:       2 * time.Second,
+			AllowRESTOnly: true,
+			DisableTTY:    true,
+		})
+		d.SetDesktopNotifier(notifier)
+
+		approved, err := d.RequestApproval(context.Background(), &HITLRequest{
+			CallID:       "hitl-pending-1",
+			ToolName:     "delete_file",
+			ThreatDomain: "DATA_DESTRUCTION",
+		})
+		if err != nil || !approved {
+			t.Fatalf("expected approved=true err=nil, got approved=%v err=%v", approved, err)
+		}
+		if !pendingVisibleOnNotify {
+			t.Fatal("expected d.GetPending(callID) to be populated before DesktopNotifier.Notify fired")
+		}
+
+		notifier.mu.Lock()
+		defer notifier.mu.Unlock()
+		if len(notifier.events) != 1 {
+			t.Fatalf("expected 1 HITL desktop alert, got %d", len(notifier.events))
+		}
+		ev := notifier.events[0]
+		if ev.Category != notify.CategoryHITLPending {
+			t.Errorf("got category %q, want %q", ev.Category, notify.CategoryHITLPending)
+		}
+		if ev.TargetFragment != "audit" {
+			t.Errorf("got target fragment %q, want %q", ev.TargetFragment, "audit")
+		}
+		if !strings.Contains(ev.Message, "delete_file") {
+			t.Errorf("expected tool name in message, got %q", ev.Message)
+		}
+	})
 }

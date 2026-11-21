@@ -15,6 +15,7 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/console"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard/hitltypes"
+	"github.com/FaradAiLab/FaradAiWire/internal/notify"
 )
 
 var (
@@ -53,12 +54,13 @@ type pendingApproval struct {
 
 // HITLDispatcherConfig provides tuning and channel bindings for the HITL safety engine.
 type HITLDispatcherConfig struct {
-	Timeout       time.Duration
-	TTYIn         io.Reader
-	TTYOut        io.Writer
-	DisableTTY    bool
-	AllowRESTOnly bool
-	WSHub         WebSocketHub
+	Timeout         time.Duration
+	TTYIn           io.Reader
+	TTYOut          io.Writer
+	DisableTTY      bool
+	AllowRESTOnly   bool
+	WSHub           WebSocketHub
+	DesktopNotifier notify.DesktopNotifier
 }
 
 // DefaultHITLDispatcherConfig provides the standard 60-second fail-closed configuration.
@@ -108,6 +110,13 @@ func (d *HITLDispatcher) SetWSHub(hub WebSocketHub) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.cfg.WSHub = hub
+}
+
+// SetDesktopNotifier dynamically updates or binds the workstation desktop alert dispatcher.
+func (d *HITLDispatcher) SetDesktopNotifier(notifier notify.DesktopNotifier) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cfg.DesktopNotifier = notifier
 }
 
 // HasAttachedChannel checks whether at least one interactive operator channel is attached.
@@ -169,6 +178,7 @@ func (d *HITLDispatcher) RequestApproval(ctx context.Context, req *HITLRequest) 
 	ttyIn := d.cfg.TTYIn
 	ttyOut := d.cfg.TTYOut
 	disableTTY := d.cfg.DisableTTY
+	desktopNotifier := d.cfg.DesktopNotifier
 	d.mu.RUnlock()
 
 	isTTYAvail := isTTYAvailable(disableTTY, ttyIn != nil && ttyOut != nil)
@@ -196,6 +206,21 @@ func (d *HITLDispatcher) RequestApproval(ctx context.Context, req *HITLRequest) 
 	d.mu.Unlock()
 
 	defer d.removePending(req.CallID)
+
+	// Notify workstation operator only after headless fail-closed checks pass and
+	// the CallID is live in d.pending so clicking #audit displays an actionable modal.
+	if desktopNotifier != nil {
+		threatDomain := req.ThreatDomain
+		if threatDomain == "" {
+			threatDomain = "POLICY"
+		}
+		desktopNotifier.Notify(notify.AlertEvent{
+			Category:       notify.CategoryHITLPending,
+			Title:          "FaradAiWire HITL Approval Required",
+			Message:        fmt.Sprintf("Tool '%s' awaiting operator confirmation (%s).", req.ToolName, threatDomain),
+			TargetFragment: "audit",
+		})
+	}
 
 	// 1. Broadcast to Web Console WebSocket channel
 	if wsHub != nil {
