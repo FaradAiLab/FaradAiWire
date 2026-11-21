@@ -43,6 +43,7 @@ type AlertEvent struct {
 type DesktopNotifier interface {
 	Notify(event AlertEvent) bool
 	SetAdminBaseURL(baseURL string)
+	AdminBaseURL() string
 }
 
 // DefaultFragmentForCategory returns the canonical Admin Console hash route for a category.

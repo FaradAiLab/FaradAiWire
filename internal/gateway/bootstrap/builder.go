@@ -24,6 +24,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/logger"
 	"github.com/FaradAiLab/FaradAiWire/internal/mcpconfig"
+	"github.com/FaradAiLab/FaradAiWire/internal/notify"
 	"github.com/FaradAiLab/FaradAiWire/internal/policy"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
 	"github.com/FaradAiLab/FaradAiWire/internal/proxy"
@@ -47,6 +48,7 @@ type Dependencies struct {
 	SchemaStore     schema.Store
 	SettingsStore   settings.Store
 	SettingsCache   *settings.Cache
+	DesktopNotifier notify.DesktopNotifier
 	Pipeline        *filter.Pipeline
 	Router          *adaptive.Router
 	AgentRepo       agent.Repository
@@ -64,12 +66,13 @@ type Dependencies struct {
 
 // FilterWiringDependencies holds all shared stores and services needed to wire runtime filter instances.
 type FilterWiringDependencies struct {
-	SchemaStore   schema.Store
-	SettingsCache *settings.Cache
-	GuardCatalog  guard.CatalogStore
-	GuardManager  guard.Manager
-	GuardHITL     *guard.HITLDispatcher
-	AgentRepo     agent.Resolver
+	SchemaStore     schema.Store
+	SettingsCache   *settings.Cache
+	GuardCatalog    guard.CatalogStore
+	GuardManager    guard.Manager
+	GuardHITL       *guard.HITLDispatcher
+	DesktopNotifier notify.DesktopNotifier
+	AgentRepo       agent.Resolver
 }
 
 // WireFilterDependencies binds all shared runtime stores and managers to pipeline filters.
@@ -131,6 +134,9 @@ func WireFilterDependencies(pipe *filter.Pipeline, cfg *config.Config, deps Filt
 		}
 		if deps.GuardHITL != nil {
 			gf.SetHITLDispatcher(deps.GuardHITL)
+		}
+		if deps.DesktopNotifier != nil {
+			gf.SetDesktopNotifier(deps.DesktopNotifier)
 		}
 		if deps.SettingsCache != nil {
 			gf.SetSettingsCache(deps.SettingsCache)
@@ -231,6 +237,12 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	deps.SettingsStore = settingsStore
 	deps.SettingsCache = settingsCache
 
+	desktopNotifier := notify.NewDesktopNotifier(
+		notify.BuildAdminBaseURL(cfg.GetAdminHost(), cfg.GetAdminPort(), cfg.AdminTLS.Enabled),
+		deps.SettingsCache,
+	)
+	deps.DesktopNotifier = desktopNotifier
+
 	// 4. Initialize analytical DuckDB telemetry engine if enabled
 	if cfg.IsTelemetryEnabled() && dbMgr != nil {
 		telemetryCfg := duckdbTelemetry.Config{
@@ -315,6 +327,9 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	eventBroker := broker.NewEventBroker(150 * time.Millisecond)
 	deps.EventBroker = eventBroker
 	loggers = append(loggers, eventBroker)
+	if desktopNotifier != nil {
+		loggers = append(loggers, filter.NewAlertAuditLogger(desktopNotifier))
+	}
 
 	if len(loggers) == 1 {
 		deps.CombinedLogger = loggers[0]
@@ -399,6 +414,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 
 	// 11. Dual-Channel HITL Safety Dispatcher (GUARD-005)
 	hitlCfg := guard.DefaultHITLDispatcherConfig()
+	hitlCfg.DesktopNotifier = desktopNotifier
 	hitlDispatcher := guard.NewHITLDispatcher(hitlCfg)
 	deps.GuardHITL = hitlDispatcher
 
@@ -421,12 +437,13 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 
 	// 12. Wire all pipeline filters with shared runtime dependencies
 	WireFilterDependencies(pipe, cfg, FilterWiringDependencies{
-		SchemaStore:   deps.SchemaStore,
-		SettingsCache: deps.SettingsCache,
-		GuardCatalog:  deps.GuardCatalog,
-		GuardManager:  guardManager,
-		GuardHITL:     hitlDispatcher,
-		AgentRepo:     agentRepo,
+		SchemaStore:     deps.SchemaStore,
+		SettingsCache:   deps.SettingsCache,
+		GuardCatalog:    deps.GuardCatalog,
+		GuardManager:    guardManager,
+		GuardHITL:       hitlDispatcher,
+		DesktopNotifier: desktopNotifier,
+		AgentRepo:       agentRepo,
 	})
 
 	// 13. AI Guard Model Installer

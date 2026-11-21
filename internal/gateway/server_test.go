@@ -29,6 +29,8 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/schema"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/internal/gateway"
+	"github.com/FaradAiLab/FaradAiWire/internal/guard"
+	"github.com/FaradAiLab/FaradAiWire/internal/notify"
 	"github.com/FaradAiLab/FaradAiWire/internal/proxy"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
@@ -2118,5 +2120,155 @@ func TestServer_StartAndImmediateShutdown_RaceFree(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatalf("iteration %d: Start goroutine did not exit after Shutdown", i)
 		}
+	}
+}
+
+func TestServer_DesktopNotifierWiringAndHotReload(t *testing.T) {
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("FARADAI_ALERT_DESKTOP_ENABLED", "true")
+
+	tempDir := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tempDir)
+	t.Setenv("FARADAI_WIRE_ADMIN_TOKEN", "test-admin-secret-token")
+	dbPath := filepath.Join(tempDir, "wire.duckdb")
+	agentDir := setupTestAgentDir(t, "test-desktop-notifier")
+
+	listenPort := getFreePort(t)
+	adminPort1 := getFreePort(t)
+	adminPort2 := getFreePort(t)
+
+	cfg := &config.Config{
+		RuntimeMode: config.RuntimeModeStandalone,
+		Mode:        "sse",
+		ListenHost:  "127.0.0.1",
+		ListenPort:  listenPort,
+		AdminHost:   "0.0.0.0",
+		AdminPort:   adminPort1,
+		AgentsDir:   agentDir,
+		Telemetry: config.TelemetryConfig{
+			DBPath: dbPath,
+		},
+		SSE: config.SSEConfig{
+			TargetURL: "http://localhost:8080",
+		},
+		Filters: config.FiltersConfig{
+			DLP:   config.DLPConfig{Enabled: true},
+			Guard: config.GuardConfig{Enabled: true},
+		},
+	}
+
+	provider := &mockConfigProvider{cfg: cfg}
+	srv, err := gateway.NewServer(cfg, provider)
+	if err != nil {
+		t.Fatalf("failed to create gateway server: %v", err)
+	}
+	defer srv.Shutdown(context.Background())
+
+	// 1. Verify shared DesktopNotifier wiring and CSRF-safe 0.0.0.0 -> 127.0.0.1 normalization
+	dn := srv.DesktopNotifier()
+	if dn == nil {
+		t.Fatal("expected non-nil DesktopNotifier on booted server")
+	}
+	if runtime.GOOS == "darwin" {
+		wantBase := fmt.Sprintf("http://127.0.0.1:%d", adminPort1)
+		if got := dn.AdminBaseURL(); got != wantBase {
+			t.Fatalf("got AdminBaseURL %q, want %q", got, wantBase)
+		}
+	}
+
+	gf, ok := srv.Pipeline().GetFilter("guard").(*guard.GuardFilter)
+	if !ok || gf == nil {
+		t.Fatalf("expected *guard.GuardFilter in pipeline, got %T", srv.Pipeline().GetFilter("guard"))
+	}
+	if gf.DesktopNotifier() != dn {
+		t.Fatal("expected GuardFilter to share Server's DesktopNotifier instance")
+	}
+
+	// 2. Verify live SettingsCache reactivity via /admin/settings without restart
+	adminH := srv.AdminHandler()
+	postSetting := func(key string, value any) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"key": key, "value": value})
+		if err != nil {
+			t.Fatalf("marshal setting: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/admin/settings", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer test-admin-secret-token")
+		rec := httptest.NewRecorder()
+		adminH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST /admin/settings %s failed (%d): %s", key, rec.Code, rec.Body.String())
+		}
+	}
+
+	if runtime.GOOS == "darwin" {
+		// Mute guard.alert_on_block live
+		postSetting("guard.alert_on_block", false)
+		if dn.Notify(notify.AlertEvent{
+			Category:       notify.CategoryBlock,
+			Title:          "Blocked",
+			Message:        "Muted block alert",
+			TargetFragment: "audit",
+		}) {
+			t.Fatal("expected CategoryBlock alert to mute immediately when guard.alert_on_block=false")
+		}
+
+		// Re-enable guard.alert_on_block live (previous muted call did not consume cooldown)
+		postSetting("guard.alert_on_block", true)
+		if !dn.Notify(notify.AlertEvent{
+			Category:       notify.CategoryBlock,
+			Title:          "Blocked",
+			Message:        "Active block alert",
+			TargetFragment: "audit",
+		}) {
+			t.Fatal("expected CategoryBlock alert to fire when guard.alert_on_block=true")
+		}
+
+		// Opt-in guard.alert_on_audit starts disabled, enables live
+		if dn.Notify(notify.AlertEvent{
+			Category:       notify.CategoryAudit,
+			Title:          "Audit",
+			Message:        "Default disabled audit alert",
+			TargetFragment: "audit",
+		}) {
+			t.Fatal("expected CategoryAudit to be disabled by default")
+		}
+		postSetting("guard.alert_on_audit", true)
+		if !dn.Notify(notify.AlertEvent{
+			Category:       notify.CategoryAudit,
+			Title:          "Audit",
+			Message:        "Opted-in audit alert",
+			TargetFragment: "audit",
+		}) {
+			t.Fatal("expected CategoryAudit to fire immediately once enabled via /admin/settings")
+		}
+	}
+
+	// 3. Hot-reload swaps pipeline filters and updates AdminBaseURL on shared DesktopNotifier
+	reloadedCfg := cfg.Clone()
+	reloadedCfg.AdminHost = "::"
+	reloadedCfg.AdminPort = adminPort2
+	reloadedCfg.AdminTLS = config.AdminTLSConfig{Enabled: true}
+	provider.setConfig(reloadedCfg)
+
+	if err := srv.ReloadWithConfig(reloadedCfg); err != nil {
+		t.Fatalf("ReloadWithConfig failed: %v", err)
+	}
+
+	if runtime.GOOS == "darwin" {
+		wantReloadedBase := fmt.Sprintf("https://[::1]:%d", adminPort2)
+		if got := dn.AdminBaseURL(); got != wantReloadedBase {
+			t.Fatalf("after hot-reload got AdminBaseURL %q, want %q", got, wantReloadedBase)
+		}
+	}
+
+	reloadedGF, ok := srv.Pipeline().GetFilter("guard").(*guard.GuardFilter)
+	if !ok || reloadedGF == nil {
+		t.Fatalf("expected *guard.GuardFilter after reload, got %T", srv.Pipeline().GetFilter("guard"))
+	}
+	if reloadedGF.DesktopNotifier() != dn {
+		t.Fatal("expected hot-reloaded GuardFilter to retain shared DesktopNotifier")
 	}
 }

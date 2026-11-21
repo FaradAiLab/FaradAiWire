@@ -16,6 +16,10 @@ func (noopNotifier) Notify(_ AlertEvent) bool {
 
 func (noopNotifier) SetAdminBaseURL(_ string) {}
 
+func (noopNotifier) AdminBaseURL() string {
+	return ""
+}
+
 // NotifyDefault triggers a platform desktop notification using package defaults.
 // It is a no-op on non-Darwin platforms.
 func NotifyDefault(_ AlertEvent) bool {

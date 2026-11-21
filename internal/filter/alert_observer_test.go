@@ -23,6 +23,8 @@ func (r *recordingDesktopNotifier) Notify(event notify.AlertEvent) bool {
 
 func (r *recordingDesktopNotifier) SetAdminBaseURL(_ string) {}
 
+func (r *recordingDesktopNotifier) AdminBaseURL() string { return "" }
+
 func (r *recordingDesktopNotifier) Events() []notify.AlertEvent {
 	r.mu.Lock()
 	defer r.mu.Unlock()

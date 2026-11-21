@@ -22,6 +22,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/gateway/bootstrap"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/logger"
+	"github.com/FaradAiLab/FaradAiWire/internal/notify"
 	"github.com/FaradAiLab/FaradAiWire/internal/policy"
 	"github.com/FaradAiLab/FaradAiWire/internal/proxy"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
@@ -65,6 +66,7 @@ type Server struct {
 	policyStore     policy.Store
 	settingsCache   *settings.Cache
 	settingsStore   settings.Store
+	desktopNotifier notify.DesktopNotifier
 
 	mu                  sync.RWMutex
 	reloadMu            sync.Mutex
@@ -194,6 +196,7 @@ func (s *Server) applyDependencies(deps *bootstrap.Dependencies) {
 	s.policyStore = deps.PolicyStore
 	s.settingsCache = deps.SettingsCache
 	s.settingsStore = deps.SettingsStore
+	s.desktopNotifier = deps.DesktopNotifier
 }
 
 // ProxyHandler returns the HTTP handler for the Gateway Proxy Ingress on listen_port.
@@ -692,14 +695,18 @@ func (s *Server) reloadWithConfigLocked(newCfg *config.Config) error {
 	s.mu.Lock()
 	s.cfg = newCfg
 	s.router = newRouter
+	if s.desktopNotifier != nil {
+		s.desktopNotifier.SetAdminBaseURL(notify.BuildAdminBaseURL(newCfg.GetAdminHost(), newCfg.GetAdminPort(), newCfg.AdminTLS.Enabled))
+	}
 
 	bootstrap.WireFilterDependencies(newPipeline, newCfg, bootstrap.FilterWiringDependencies{
-		SchemaStore:   s.schemaStore,
-		SettingsCache: s.settingsCache,
-		GuardCatalog:  s.guardCatalog,
-		GuardManager:  s.guardManager,
-		GuardHITL:     s.guardHITL,
-		AgentRepo:     s.agentRepo,
+		SchemaStore:     s.schemaStore,
+		SettingsCache:   s.settingsCache,
+		GuardCatalog:    s.guardCatalog,
+		GuardManager:    s.guardManager,
+		GuardHITL:       s.guardHITL,
+		DesktopNotifier: s.desktopNotifier,
+		AgentRepo:       s.agentRepo,
 	})
 	s.mu.Unlock()
 
@@ -788,4 +795,11 @@ func (s *Server) GuardInstaller() guard.ModelInstaller {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.guardInstaller
+}
+
+// DesktopNotifier returns the active workstation desktop notifier instance.
+func (s *Server) DesktopNotifier() notify.DesktopNotifier {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.desktopNotifier
 }

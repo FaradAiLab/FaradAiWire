@@ -489,6 +489,8 @@ func (h *hookDesktopNotifier) Notify(event notify.AlertEvent) bool {
 
 func (h *hookDesktopNotifier) SetAdminBaseURL(_ string) {}
 
+func (h *hookDesktopNotifier) AdminBaseURL() string { return "" }
+
 func TestHITLDispatcher_DesktopNotifier_StrictADR0054(t *testing.T) {
 	t.Run("headless_fail_closed_emits_zero_notifications", func(t *testing.T) {
 		notifier := &mockDesktopNotifier{}

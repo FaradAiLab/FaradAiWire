@@ -128,7 +128,7 @@ func (n *darwinNotifier) SetAdminBaseURL(baseURL string) {
 	n.adminBaseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 }
 
-func (n *darwinNotifier) getAdminBaseURL() string {
+func (n *darwinNotifier) AdminBaseURL() string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.adminBaseURL
@@ -163,7 +163,7 @@ func (n *darwinNotifier) Notify(event AlertEvent) bool {
 	if frag == "" {
 		frag = DefaultFragmentForCategory(event.Category)
 	}
-	targetURL := BuildDashboardURLFromBase(n.getAdminBaseURL(), frag)
+	targetURL := BuildDashboardURLFromBase(n.AdminBaseURL(), frag)
 
 	select {
 	case n.sem <- struct{}{}:

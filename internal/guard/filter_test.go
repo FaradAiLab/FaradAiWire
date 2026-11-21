@@ -1623,6 +1623,8 @@ func (m *mockDesktopNotifier) Notify(event notify.AlertEvent) bool {
 
 func (m *mockDesktopNotifier) SetAdminBaseURL(_ string) {}
 
+func (m *mockDesktopNotifier) AdminBaseURL() string { return "" }
+
 func (m *mockDesktopNotifier) Events() []notify.AlertEvent {
 	m.mu.Lock()
 	defer m.mu.Unlock()
