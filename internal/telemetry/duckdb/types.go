@@ -38,11 +38,20 @@ type AuditRecord struct {
 	ReleaseVersion         string    `json:"release_version"`
 	ToolName               string    `json:"tool_name"`
 	CallerRole             string    `json:"caller_role"`
+	UserID                 string    `json:"user_id,omitempty"`
+	ClientIP               string    `json:"client_ip,omitempty"`
+	APIKeyID               string    `json:"api_key_id,omitempty"`
+	PathType               string    `json:"path_type,omitempty"`
 	Decision               string    `json:"decision"` // PENDING, ALLOWED, BLOCKED, MASKED, AUDIT, CRITICAL
 	RequestDecision        string    `json:"request_decision,omitempty"`
 	ResponseDecision       string    `json:"response_decision,omitempty"`
 	MatchedRule            string    `json:"matched_rule,omitempty"`
+	AuditedRules           []string  `json:"audited_rules,omitempty"`
+	ErrorCode              int       `json:"error_code,omitempty"`
 	ErrorMessage           string    `json:"error_message,omitempty"`
+	HumanApproved          bool      `json:"human_approved,omitempty"`
+	ApprovedBy             string    `json:"approved_by,omitempty"`
+	ApprovalChannel        string    `json:"approval_channel,omitempty"`
 	LatencyMs              float64   `json:"latency_ms"`
 	InputSizeBytes         int       `json:"input_size_bytes"`
 	OutputSizeBytes        int       `json:"output_size_bytes"`
@@ -52,6 +61,7 @@ type AuditRecord struct {
 	Request                string    `json:"request,omitempty"`
 	OriginalResponse       string    `json:"original_response,omitempty"`
 	Response               string    `json:"response,omitempty"`
+	HashVersion            string    `json:"hash_version,omitempty"`
 	IntegrityHash          string    `json:"integrity_hash"`
 
 	// UI Compatibility Aliases for embedded console
@@ -69,6 +79,8 @@ type QueryFilter struct {
 	AgentName   string
 	ToolName    string
 	TraceID     string
+	MatchedRule string
+	Search      string
 	SummaryOnly bool
 	Since       *time.Time
 	Until       *time.Time
@@ -80,4 +92,42 @@ type QueryResult struct {
 	Total  int64         `json:"total"`
 	Limit  int           `json:"limit"`
 	Offset int           `json:"offset"`
+}
+
+// SecurityAuditRecord represents a persisted control-plane security audit record in DuckDB.
+type SecurityAuditRecord struct {
+	ID            string         `json:"id"`
+	Timestamp     time.Time      `json:"timestamp"`
+	TraceID       string         `json:"trace_id,omitempty"`
+	EventType     string         `json:"event_type"`
+	ActorID       string         `json:"actor_id"`
+	ActorRole     string         `json:"actor_role"`
+	ClientIP      string         `json:"client_ip,omitempty"`
+	ResourceType  string         `json:"resource_type,omitempty"`
+	ResourceID    string         `json:"resource_id,omitempty"`
+	Action        string         `json:"action"`
+	Outcome       string         `json:"outcome"`
+	Reason        string         `json:"reason,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+	HashVersion   string         `json:"hash_version,omitempty"`
+	IntegrityHash string         `json:"integrity_hash"`
+}
+
+// SecurityQueryFilter defines criteria for querying control-plane security audit logs.
+type SecurityQueryFilter struct {
+	Limit     int
+	Offset    int
+	EventType string
+	ActorID   string
+	Outcome   string
+	Since     *time.Time
+	Until     *time.Time
+}
+
+// SecurityQueryResult represents the paginated result of a control-plane security audit query.
+type SecurityQueryResult struct {
+	Events []SecurityAuditRecord `json:"events"`
+	Total  int64                 `json:"total"`
+	Limit  int                   `json:"limit"`
+	Offset int                   `json:"offset"`
 }

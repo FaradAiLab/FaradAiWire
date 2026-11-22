@@ -265,6 +265,39 @@ var Registry = map[string]SettingMeta{
 		Type:        TypeBool,
 		DefaultVal:  true,
 	},
+	"maintenance.audit_jsonl_max_size_mb": {
+		Key:         "maintenance.audit_jsonl_max_size_mb",
+		Label:       "JSONL Audit Segment Size Limit",
+		Description: "Maximum size in megabytes for each flat JSONL audit log segment before rotating",
+		Category:    "maintenance",
+		Type:        TypeInt,
+		DefaultVal:  10,
+		Min:         1,
+		Max:         100,
+		Unit:        "MB",
+	},
+	"maintenance.audit_jsonl_max_files": {
+		Key:         "maintenance.audit_jsonl_max_files",
+		Label:       "JSONL Audit Segments Retained",
+		Description: "Maximum number of rotated JSONL audit log segments retained on disk",
+		Category:    "maintenance",
+		Type:        TypeInt,
+		DefaultVal:  10,
+		Min:         1,
+		Max:         100,
+		Unit:        "files",
+	},
+	"maintenance.audit_export_max_rows": {
+		Key:         "maintenance.audit_export_max_rows",
+		Label:       "Audit Export Row Ceiling",
+		Description: "Maximum number of redacted records streamed per CSV or JSONL export request",
+		Category:    "maintenance",
+		Type:        TypeInt,
+		DefaultVal:  50000,
+		Min:         1000,
+		Max:         200000,
+		Unit:        "rows",
+	},
 }
 
 // ErrUnknownSetting indicates an attempted mutation of an unregistered parameter key.
@@ -590,6 +623,24 @@ func ApplySetting(s *OperationalSettings, key string, val any) error {
 			return fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
 		}
 		s.Maintenance.RetainLocalPayloads = b
+	case "maintenance.audit_jsonl_max_size_mb":
+		v, err := coerceIntSetting(key, val)
+		if err != nil {
+			return err
+		}
+		s.Maintenance.AuditJSONLMaxSizeMB = v
+	case "maintenance.audit_jsonl_max_files":
+		v, err := coerceIntSetting(key, val)
+		if err != nil {
+			return err
+		}
+		s.Maintenance.AuditJSONLMaxFiles = v
+	case "maintenance.audit_export_max_rows":
+		v, err := coerceIntSetting(key, val)
+		if err != nil {
+			return err
+		}
+		s.Maintenance.AuditExportMaxRows = v
 
 	default:
 		return fmt.Errorf("%w: key %q has no mapping", ErrUnknownSetting, key)
@@ -650,6 +701,12 @@ func ExtractSetting(s *OperationalSettings, key string) (any, error) {
 		return s.Maintenance.AuditRetentionDays, nil
 	case "maintenance.retain_local_payloads":
 		return s.Maintenance.RetainLocalPayloads, nil
+	case "maintenance.audit_jsonl_max_size_mb":
+		return s.Maintenance.AuditJSONLMaxSizeMB, nil
+	case "maintenance.audit_jsonl_max_files":
+		return s.Maintenance.AuditJSONLMaxFiles, nil
+	case "maintenance.audit_export_max_rows":
+		return s.Maintenance.AuditExportMaxRows, nil
 
 	default:
 		return nil, fmt.Errorf("%w: key %q has no mapping", ErrUnknownSetting, key)

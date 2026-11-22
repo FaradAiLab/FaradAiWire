@@ -119,3 +119,52 @@ func TestAuditEvent_RedactedAndLightweightCopy_PreventSubstringBypass(t *testing
 		t.Fatalf("LightweightSummaryCopy leaked blocked payload: %q", sseCopy.RawPayload)
 	}
 }
+
+type mockSecurityAuditLogger struct {
+	events []*SecurityAuditEvent
+}
+
+func (m *mockSecurityAuditLogger) LogSecurityEvent(ev *SecurityAuditEvent) {
+	if ev != nil {
+		m.events = append(m.events, ev)
+	}
+}
+
+func TestMultiSecurityAuditLogger_FanOutAndMetadata(t *testing.T) {
+	t.Parallel()
+
+	l1 := &mockSecurityAuditLogger{}
+	l2 := &mockSecurityAuditLogger{}
+	multi := NewMultiSecurityAuditLogger(nil, l1, l2)
+
+	ev := &SecurityAuditEvent{
+		ID:           "sec-1",
+		Timestamp:    time.Now(),
+		EventType:    "API_KEY_CREATE",
+		ActorID:      "key-admin-1",
+		ActorRole:    "Admin",
+		ClientIP:     "127.0.0.1",
+		ResourceType: "api_key",
+		ResourceID:   "key-dev-9",
+		Action:       "CREATE",
+		Outcome:      "ALLOWED",
+		Metadata:     map[string]any{"scope": "agent-a"},
+	}
+	multi.LogSecurityEvent(ev)
+
+	if len(l1.events) != 1 || len(l2.events) != 1 {
+		t.Fatalf("expected 1 event on both loggers, got l1=%d l2=%d", len(l1.events), len(l2.events))
+	}
+
+	auditEv := &AuditEvent{
+		APIKeyID:        "key-1",
+		ClientIP:        "10.0.0.5",
+		HumanApproved:   true,
+		ApprovedBy:      "key-admin-1",
+		ApprovalChannel: "web_ws",
+		HashVersion:     "v2",
+	}
+	if !auditEv.HumanApproved || auditEv.ApprovalChannel != "web_ws" {
+		t.Fatalf("unexpected audit event HITL fields: %+v", auditEv)
+	}
+}

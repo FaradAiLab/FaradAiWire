@@ -59,6 +59,12 @@ type MaintenanceSettings struct {
 	AuditRetentionDays int `json:"audit_retention_days"`
 	// RetainLocalPayloads enables unredacted 4-field payload capture inside the local DuckDB vault.
 	RetainLocalPayloads bool `json:"retain_local_payloads"`
+	// AuditJSONLMaxSizeMB defines the rotation ceiling in megabytes for flat JSONL audit segments.
+	AuditJSONLMaxSizeMB int `json:"audit_jsonl_max_size_mb"`
+	// AuditJSONLMaxFiles defines the maximum number of rotated JSONL audit files retained on disk.
+	AuditJSONLMaxFiles int `json:"audit_jsonl_max_files"`
+	// AuditExportMaxRows defines the maximum row count streamed per CSV/JSONL export download.
+	AuditExportMaxRows int `json:"audit_export_max_rows"`
 }
 
 // OperationalSettings aggregates all runtime-tunable operational configuration parameters.
@@ -102,6 +108,9 @@ func DefaultOperationalSettings() *OperationalSettings {
 			CorrelationTTLMin:     60,
 			AuditRetentionDays:    30,
 			RetainLocalPayloads:   true,
+			AuditJSONLMaxSizeMB:   10,
+			AuditJSONLMaxFiles:    10,
+			AuditExportMaxRows:    50000,
 		},
 	}
 }
@@ -141,6 +150,9 @@ func (s *OperationalSettings) Clone() *OperationalSettings {
 			CorrelationTTLMin:     s.Maintenance.CorrelationTTLMin,
 			AuditRetentionDays:    s.Maintenance.AuditRetentionDays,
 			RetainLocalPayloads:   s.Maintenance.RetainLocalPayloads,
+			AuditJSONLMaxSizeMB:   s.Maintenance.AuditJSONLMaxSizeMB,
+			AuditJSONLMaxFiles:    s.Maintenance.AuditJSONLMaxFiles,
+			AuditExportMaxRows:    s.Maintenance.AuditExportMaxRows,
 		},
 	}
 }

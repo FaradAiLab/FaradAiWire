@@ -26,6 +26,8 @@ type UserContext struct {
 	UserID    string `json:"user_id"`
 	Role      string `json:"role"`
 	AgentName string `json:"agent_name,omitempty"`
+	APIKeyID  string `json:"api_key_id,omitempty"`
+	ClientIP  string `json:"client_ip,omitempty"`
 }
 
 // IsHumanApproved checks if human approval is present in context.

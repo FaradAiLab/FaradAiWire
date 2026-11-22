@@ -1,13 +1,16 @@
 package duckdb
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,10 +27,11 @@ type flushBarrier struct {
 	done chan struct{}
 }
 
-// eventOrBarrier encapsulates an audit event or a flush barrier token.
+// eventOrBarrier encapsulates an audit event, a control-plane security event, or a flush barrier token.
 type eventOrBarrier struct {
-	event   *filter.AuditEvent
-	barrier *flushBarrier
+	event    *filter.AuditEvent
+	secEvent *filter.SecurityAuditEvent
+	barrier  *flushBarrier
 }
 
 // Engine represents an embedded DuckDB telemetry engine with an asynchronous write-behind buffer.
@@ -179,10 +183,19 @@ func (e *Engine) initSchema() error {
 		release_version VARCHAR NOT NULL,
 		tool_name VARCHAR NOT NULL,
 		caller_role VARCHAR DEFAULT 'default',
+		user_id VARCHAR,
+		client_ip VARCHAR,
+		api_key_id VARCHAR,
+		path_type VARCHAR,
 		decision VARCHAR NOT NULL,
 		request_decision VARCHAR,
 		response_decision VARCHAR,
 		matched_rule VARCHAR,
+		error_code INTEGER,
+		audited_rules TEXT,
+		human_approved BOOLEAN DEFAULT FALSE,
+		approved_by VARCHAR,
+		approval_channel VARCHAR,
 		error_message TEXT,
 		latency_ms DOUBLE NOT NULL,
 		input_size_bytes INTEGER,
@@ -193,6 +206,7 @@ func (e *Engine) initSchema() error {
 		request TEXT,
 		original_response TEXT,
 		response TEXT,
+		hash_version VARCHAR DEFAULT 'v1',
 		integrity_hash VARCHAR NOT NULL
 	);
 
@@ -217,6 +231,16 @@ func (e *Engine) initSchema() error {
 		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS request TEXT;",
 		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS original_response TEXT;",
 		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS response TEXT;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS user_id VARCHAR;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS client_ip VARCHAR;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS api_key_id VARCHAR;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS path_type VARCHAR;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS error_code INTEGER;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS audited_rules TEXT;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS human_approved BOOLEAN DEFAULT FALSE;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS approved_by VARCHAR;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS approval_channel VARCHAR;",
+		"ALTER TABLE tool_audit_logs ADD COLUMN IF NOT EXISTS hash_version VARCHAR DEFAULT 'v1';",
 	}
 	for _, stmt := range alterColumns {
 		if _, aErr := e.db.Exec(stmt); aErr != nil {
@@ -233,13 +257,17 @@ func (e *Engine) initSchema() error {
 		timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 		response_decision VARCHAR,
 		matched_rule VARCHAR,
+		error_code INTEGER,
+		audited_rules TEXT,
 		error_message TEXT,
 		latency_ms DOUBLE NOT NULL DEFAULT 0,
 		output_size_bytes INTEGER,
 		raw_payload_preview TEXT,
 		original_payload_preview TEXT,
 		original_response TEXT,
-		response TEXT
+		response TEXT,
+		integrity_hash VARCHAR,
+		hash_version VARCHAR DEFAULT 'v1'
 	);
 	CREATE INDEX IF NOT EXISTS idx_tool_audit_responses_inv ON tool_audit_responses(invocation_id);
 	CREATE INDEX IF NOT EXISTS idx_tool_audit_responses_ts ON tool_audit_responses(timestamp);
@@ -247,7 +275,18 @@ func (e *Engine) initSchema() error {
 	if _, err := e.db.Exec(respSchema); err != nil {
 		return fmt.Errorf("failed to initialize tool_audit_responses table: %w", err)
 	}
-	return nil
+	for _, stmt := range []string{
+		"ALTER TABLE tool_audit_responses ADD COLUMN IF NOT EXISTS error_code INTEGER;",
+		"ALTER TABLE tool_audit_responses ADD COLUMN IF NOT EXISTS audited_rules TEXT;",
+		"ALTER TABLE tool_audit_responses ADD COLUMN IF NOT EXISTS integrity_hash VARCHAR;",
+		"ALTER TABLE tool_audit_responses ADD COLUMN IF NOT EXISTS hash_version VARCHAR DEFAULT 'v1';",
+	} {
+		if _, aErr := e.db.Exec(stmt); aErr != nil {
+			slog.Debug("Optional response audit schema migration note", slog.String("stmt", stmt), slog.String("info", aErr.Error()))
+		}
+	}
+
+	return e.initSecurityAuditSchema()
 }
 
 // DB returns the underlying database/sql connection pool.
@@ -316,17 +355,23 @@ func (e *Engine) writeLoop() {
 	defer ticker.Stop()
 
 	batch := make([]*filter.AuditEvent, 0, 100)
+	secBatch := make([]*filter.SecurityAuditEvent, 0, 100)
 
 	flush := func() {
-		if len(batch) == 0 {
-			return
+		if len(batch) > 0 {
+			if err := e.flushBatch(batch); err != nil {
+				slog.Error("Failed to flush DuckDB telemetry batch", slog.String("error", err.Error()), slog.Int("count", len(batch)))
+			}
+			clear(batch)
+			batch = batch[:0]
 		}
-		if err := e.flushBatch(batch); err != nil {
-			slog.Error("Failed to flush DuckDB telemetry batch", slog.String("error", err.Error()), slog.Int("count", len(batch)))
+		if len(secBatch) > 0 {
+			if err := e.flushSecurityBatch(secBatch); err != nil {
+				slog.Error("Failed to flush DuckDB security audit batch", slog.String("error", err.Error()), slog.Int("count", len(secBatch)))
+			}
+			clear(secBatch)
+			secBatch = secBatch[:0]
 		}
-		// Reset batch keeping underlying allocated capacity to avoid GC churn
-		clear(batch)
-		batch = batch[:0]
 	}
 
 	for {
@@ -339,6 +384,12 @@ func (e *Engine) writeLoop() {
 					if item.event != nil {
 						batch = append(batch, item.event)
 						if len(batch) >= 100 {
+							flush()
+						}
+					}
+					if item.secEvent != nil {
+						secBatch = append(secBatch, item.secEvent)
+						if len(secBatch) >= 100 {
 							flush()
 						}
 					}
@@ -360,6 +411,12 @@ func (e *Engine) writeLoop() {
 			if item.event != nil {
 				batch = append(batch, item.event)
 				if len(batch) >= 100 {
+					flush()
+				}
+			}
+			if item.secEvent != nil {
+				secBatch = append(secBatch, item.secEvent)
+				if len(secBatch) >= 100 {
 					flush()
 				}
 			}
@@ -406,24 +463,75 @@ func mergeMatchedRules(existingRule, newRule string) string {
 }
 
 type normalizedEventFields struct {
-	id           string
-	ts           time.Time
-	traceID      string
-	agentName    string
-	releaseVer   string
-	toolName     string
-	callerRole   string
-	decision     string
-	reqDecision  string
-	respDecision string
-	matchedRule  string
-	errorMsg     string
-	preview      string
-	origPreview  string
-	origReq      string
-	req          string
-	origResp     string
-	resp         string
+	id              string
+	ts              time.Time
+	traceID         string
+	agentName       string
+	releaseVer      string
+	toolName        string
+	callerRole      string
+	userID          string
+	clientIP        string
+	apiKeyID        string
+	pathType        string
+	decision        string
+	reqDecision     string
+	respDecision    string
+	matchedRule     string
+	errorCode       int
+	auditedRules    string
+	humanApproved   bool
+	approvedBy      string
+	approvalChannel string
+	errorMsg        string
+	preview         string
+	origPreview     string
+	origReq         string
+	req             string
+	origResp        string
+	resp            string
+	hashVersion     string
+}
+
+func encodeAuditedRules(rules []string) string {
+	if len(rules) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(rules)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func decodeAuditedRules(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, "\n") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		var arr []string
+		if err := json.Unmarshal([]byte(part), &arr); err == nil {
+			for _, r := range arr {
+				if r != "" && !slices.Contains(out, r) {
+					out = append(out, r)
+				}
+			}
+			continue
+		}
+		for _, r := range strings.Split(part, ",") {
+			r = strings.TrimSpace(r)
+			if r != "" && !slices.Contains(out, r) {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
 }
 
 func (e *Engine) normalizeEvent(ev *filter.AuditEvent, maxBytes int) normalizedEventFields {
@@ -454,6 +562,18 @@ func (e *Engine) normalizeEvent(ev *filter.AuditEvent, maxBytes int) normalizedE
 	if callerRole == "" {
 		callerRole = "default"
 	}
+	userID := ""
+	if ev.User != nil {
+		userID = strings.TrimSpace(ev.User.UserID)
+	}
+	apiKeyID := strings.TrimSpace(ev.APIKeyID)
+	if apiKeyID == "" && ev.User != nil {
+		apiKeyID = strings.TrimSpace(ev.User.APIKeyID)
+	}
+	clientIP := strings.TrimSpace(ev.ClientIP)
+	if clientIP == "" && ev.User != nil {
+		clientIP = strings.TrimSpace(ev.User.ClientIP)
+	}
 	decision := ev.Decision
 	if decision == "" {
 		decision = filter.DecisionAllowed
@@ -466,26 +586,40 @@ func (e *Engine) normalizeEvent(ev *filter.AuditEvent, maxBytes int) normalizedE
 	if errorMsg == "" && (strings.EqualFold(decision, filter.DecisionBlocked) || strings.EqualFold(decision, filter.DecisionCritical)) {
 		errorMsg = ev.Message
 	}
+	hashVersion := ev.HashVersion
+	if hashVersion == "" {
+		hashVersion = "v1"
+	}
 
 	return normalizedEventFields{
-		id:           id,
-		ts:           ts,
-		traceID:      ev.TraceID,
-		agentName:    agentName,
-		releaseVer:   releaseVer,
-		toolName:     toolName,
-		callerRole:   callerRole,
-		decision:     decision,
-		reqDecision:  ev.RequestDecision,
-		respDecision: ev.ResponseDecision,
-		matchedRule:  matchedRule,
-		errorMsg:     errorMsg,
-		preview:      boundAuditField(ev.RawPayload, maxBytes),
-		origPreview:  boundAuditField(ev.OriginalPayload, maxBytes),
-		origReq:      boundAuditField(ev.OriginalRequest, maxBytes),
-		req:          boundAuditField(ev.Request, maxBytes),
-		origResp:     boundAuditField(ev.OriginalResponse, maxBytes),
-		resp:         boundAuditField(ev.Response, maxBytes),
+		id:              id,
+		ts:              ts,
+		traceID:         ev.TraceID,
+		agentName:       agentName,
+		releaseVer:      releaseVer,
+		toolName:        toolName,
+		callerRole:      callerRole,
+		userID:          userID,
+		clientIP:        clientIP,
+		apiKeyID:        apiKeyID,
+		pathType:        ev.PathType,
+		decision:        decision,
+		reqDecision:     ev.RequestDecision,
+		respDecision:    ev.ResponseDecision,
+		matchedRule:     matchedRule,
+		errorCode:       ev.ErrorCode,
+		auditedRules:    encodeAuditedRules(ev.AuditedRules),
+		humanApproved:   ev.HumanApproved,
+		approvedBy:      ev.ApprovedBy,
+		approvalChannel: ev.ApprovalChannel,
+		errorMsg:        errorMsg,
+		preview:         boundAuditField(ev.RawPayload, maxBytes),
+		origPreview:     boundAuditField(ev.OriginalPayload, maxBytes),
+		origReq:         boundAuditField(ev.OriginalRequest, maxBytes),
+		req:             boundAuditField(ev.Request, maxBytes),
+		origResp:        boundAuditField(ev.OriginalResponse, maxBytes),
+		resp:            boundAuditField(ev.Response, maxBytes),
+		hashVersion:     hashVersion,
 	}
 }
 
@@ -514,12 +648,14 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 	insertStmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO tool_audit_logs (
 			id, timestamp, trace_id, agent_name, release_version, tool_name, caller_role,
-			decision, request_decision, response_decision, matched_rule, error_message,
+			user_id, client_ip, api_key_id, path_type,
+			decision, request_decision, response_decision, matched_rule, error_code, audited_rules,
+			human_approved, approved_by, approval_channel, error_message,
 			latency_ms, input_size_bytes, output_size_bytes,
 			raw_payload_preview, original_payload_preview,
 			original_request, request, original_response, response,
-			integrity_hash
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			hash_version, integrity_hash
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert statement: %w", err)
@@ -529,9 +665,10 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 	insertRespStmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO tool_audit_responses (
 			invocation_id, trace_id, timestamp, response_decision, matched_rule,
-			error_message, latency_ms, output_size_bytes,
-			raw_payload_preview, original_payload_preview, original_response, response
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			error_code, audited_rules, error_message, latency_ms, output_size_bytes,
+			raw_payload_preview, original_payload_preview, original_response, response,
+			integrity_hash, hash_version
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare response insert statement: %w", err)
@@ -568,12 +705,22 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 				if respDec == "" {
 					respDec = nf.decision
 				}
+				respHash := ev.IntegrityHash
+				if respHash == "" {
+					respHash = ComputeInvocationIntegrityHash(
+						invID, nf.ts, nf.agentName, nf.toolName, nf.callerRole,
+						respDec, ev.LatencyMs,
+						nf.preview, "", "", nf.origResp, nf.resp,
+					)
+				}
 				if _, rErr := insertRespStmt.ExecContext(ctx,
 					invID,
 					nullableText(nf.traceID),
 					nf.ts,
 					nullableText(respDec),
 					nullableText(nf.matchedRule),
+					ev.ErrorCode,
+					nullableText(nf.auditedRules),
 					nullableText(nf.errorMsg),
 					ev.LatencyMs,
 					ev.OutputBytes,
@@ -581,6 +728,8 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 					nullableText(nf.origPreview),
 					nullableText(nf.origResp),
 					nullableText(nf.resp),
+					nullableText(respHash),
+					nf.hashVersion,
 				); rErr != nil {
 					slog.WarnContext(ctx, "Failed to insert response completion record", slog.String("error", rErr.Error()))
 				} else {
@@ -606,10 +755,19 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 			nf.releaseVer,
 			nf.toolName,
 			nf.callerRole,
+			nullableText(nf.userID),
+			nullableText(nf.clientIP),
+			nullableText(nf.apiKeyID),
+			nullableText(nf.pathType),
 			nf.decision,
 			nullableText(nf.reqDecision),
 			nullableText(nf.respDecision),
 			nullableText(nf.matchedRule),
+			ev.ErrorCode,
+			nullableText(nf.auditedRules),
+			nf.humanApproved,
+			nullableText(nf.approvedBy),
+			nullableText(nf.approvalChannel),
 			nullableText(nf.errorMsg),
 			ev.LatencyMs,
 			ev.InputBytes,
@@ -620,6 +778,7 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 			nullableText(nf.req),
 			nullableText(nf.origResp),
 			nullableText(nf.resp),
+			nf.hashVersion,
 			hash,
 		)
 		if err != nil {
@@ -656,7 +815,7 @@ func (e *Engine) findExistingInvocationIDInTx(ctx context.Context, tx *sql.Tx, i
 const consolidatedAuditCTE = `
 WITH latest_resp AS (
 	SELECT DISTINCT ON (invocation_id)
-		invocation_id, response_decision, matched_rule, error_message,
+		invocation_id, response_decision, matched_rule, error_code, audited_rules, error_message,
 		latency_ms, output_size_bytes, raw_payload_preview, original_payload_preview,
 		original_response, response
 	FROM tool_audit_responses
@@ -671,6 +830,10 @@ consolidated AS (
 		l.release_version,
 		l.tool_name,
 		l.caller_role,
+		l.user_id,
+		l.client_ip,
+		l.api_key_id,
+		l.path_type,
 		CASE
 			WHEN r.invocation_id IS NULL THEN l.decision
 			WHEN 'CRITICAL' IN (UPPER(COALESCE(NULLIF(l.request_decision, ''), l.decision)), UPPER(COALESCE(r.response_decision, ''))) THEN 'CRITICAL'
@@ -688,6 +851,15 @@ consolidated AS (
 			WHEN COALESCE(r.matched_rule, '') = '' OR r.matched_rule = l.matched_rule THEN l.matched_rule
 			ELSE l.matched_rule || ',' || r.matched_rule
 		END AS matched_rule,
+		COALESCE(NULLIF(r.error_code, 0), l.error_code) AS error_code,
+		CASE
+			WHEN COALESCE(l.audited_rules, '') = '' THEN COALESCE(r.audited_rules, '')
+			WHEN COALESCE(r.audited_rules, '') = '' OR r.audited_rules = l.audited_rules THEN l.audited_rules
+			ELSE l.audited_rules || CHR(10) || r.audited_rules
+		END AS audited_rules,
+		COALESCE(l.human_approved, FALSE) AS human_approved,
+		l.approved_by,
+		l.approval_channel,
 		COALESCE(NULLIF(r.error_message, ''), l.error_message) AS error_message,
 		l.latency_ms + COALESCE(r.latency_ms, 0) AS latency_ms,
 		l.input_size_bytes,
@@ -698,6 +870,7 @@ consolidated AS (
 		l.request,
 		COALESCE(NULLIF(r.original_response, ''), l.original_response) AS original_response,
 		COALESCE(NULLIF(r.response, ''), l.response) AS response,
+		COALESCE(NULLIF(l.hash_version, ''), 'v1') AS hash_version,
 		l.integrity_hash
 	FROM tool_audit_logs l
 	LEFT JOIN latest_resp r ON r.invocation_id = l.id
@@ -765,19 +938,23 @@ func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResul
 
 	selectCols := `
 		id, timestamp, trace_id, agent_name, release_version, tool_name, caller_role,
-		decision, request_decision, response_decision, matched_rule, error_message,
+		user_id, client_ip, api_key_id, path_type,
+		decision, request_decision, response_decision, matched_rule, error_code, audited_rules,
+		human_approved, approved_by, approval_channel, error_message,
 		latency_ms, input_size_bytes, output_size_bytes,
 		raw_payload_preview, original_payload_preview,
 		original_request, request, original_response, response,
-		integrity_hash`
+		hash_version, integrity_hash`
 	if f.SummaryOnly {
 		selectCols = `
 			id, timestamp, trace_id, agent_name, release_version, tool_name, caller_role,
-			decision, request_decision, response_decision, matched_rule, error_message,
+			user_id, client_ip, api_key_id, path_type,
+			decision, request_decision, response_decision, matched_rule, error_code, audited_rules,
+			human_approved, approved_by, approval_channel, error_message,
 			latency_ms, input_size_bytes, output_size_bytes,
 			LEFT(COALESCE(raw_payload_preview, ''), 4096), '',
 			'', '', '', '',
-			integrity_hash`
+			hash_version, integrity_hash`
 	}
 
 	querySQL := fmt.Sprintf(`
@@ -836,11 +1013,13 @@ func (e *Engine) GetAuditLogByID(ctx context.Context, id string) (*AuditRecord, 
 
 	querySQL := consolidatedAuditCTE + `
 		SELECT id, timestamp, trace_id, agent_name, release_version, tool_name, caller_role,
-		       decision, request_decision, response_decision, matched_rule, error_message,
+		       user_id, client_ip, api_key_id, path_type,
+		       decision, request_decision, response_decision, matched_rule, error_code, audited_rules,
+		       human_approved, approved_by, approval_channel, error_message,
 		       latency_ms, input_size_bytes, output_size_bytes,
 		       raw_payload_preview, original_payload_preview,
 		       original_request, request, original_response, response,
-		       integrity_hash
+		       hash_version, integrity_hash
 		FROM consolidated
 		WHERE id = ? OR trace_id = ?
 		ORDER BY timestamp DESC
@@ -868,7 +1047,12 @@ type auditRowScanner interface {
 func scanAuditRecord(row auditRowScanner) (AuditRecord, error) {
 	var r AuditRecord
 	var (
-		traceID, reqDec, respDec, matchedRule, errMsg sql.NullString
+		traceID, userID, clientIP, apiKeyID, pathType sql.NullString
+		reqDec, respDec, matchedRule, errMsg          sql.NullString
+		auditedRules, approvedBy, approvalChannel     sql.NullString
+		hashVersion                                   sql.NullString
+		errCode                                       sql.NullInt32
+		humanApproved                                 sql.NullBool
 		inputBytes, outputBytes                       sql.NullInt32
 		rawPreview, origPreview                       sql.NullString
 		origReq, sentReq, origResp, finalResp         sql.NullString
@@ -882,10 +1066,19 @@ func scanAuditRecord(row auditRowScanner) (AuditRecord, error) {
 		&r.ReleaseVersion,
 		&r.ToolName,
 		&r.CallerRole,
+		&userID,
+		&clientIP,
+		&apiKeyID,
+		&pathType,
 		&r.Decision,
 		&reqDec,
 		&respDec,
 		&matchedRule,
+		&errCode,
+		&auditedRules,
+		&humanApproved,
+		&approvedBy,
+		&approvalChannel,
 		&errMsg,
 		&r.LatencyMs,
 		&inputBytes,
@@ -896,6 +1089,7 @@ func scanAuditRecord(row auditRowScanner) (AuditRecord, error) {
 		&sentReq,
 		&origResp,
 		&finalResp,
+		&hashVersion,
 		&r.IntegrityHash,
 	); err != nil {
 		return AuditRecord{}, err
@@ -903,6 +1097,18 @@ func scanAuditRecord(row auditRowScanner) (AuditRecord, error) {
 
 	if traceID.Valid {
 		r.TraceID = traceID.String
+	}
+	if userID.Valid {
+		r.UserID = userID.String
+	}
+	if clientIP.Valid {
+		r.ClientIP = clientIP.String
+	}
+	if apiKeyID.Valid {
+		r.APIKeyID = apiKeyID.String
+	}
+	if pathType.Valid {
+		r.PathType = pathType.String
 	}
 	if reqDec.Valid {
 		r.RequestDecision = reqDec.String
@@ -912,6 +1118,21 @@ func scanAuditRecord(row auditRowScanner) (AuditRecord, error) {
 	}
 	if matchedRule.Valid {
 		r.MatchedRule = matchedRule.String
+	}
+	if errCode.Valid {
+		r.ErrorCode = int(errCode.Int32)
+	}
+	if auditedRules.Valid {
+		r.AuditedRules = decodeAuditedRules(auditedRules.String)
+	}
+	if humanApproved.Valid {
+		r.HumanApproved = humanApproved.Bool
+	}
+	if approvedBy.Valid {
+		r.ApprovedBy = approvedBy.String
+	}
+	if approvalChannel.Valid {
+		r.ApprovalChannel = approvalChannel.String
 	}
 	if errMsg.Valid {
 		r.ErrorMessage = errMsg.String
@@ -940,6 +1161,9 @@ func scanAuditRecord(row auditRowScanner) (AuditRecord, error) {
 	if finalResp.Valid {
 		r.Response = finalResp.String
 	}
+	if hashVersion.Valid {
+		r.HashVersion = hashVersion.String
+	}
 
 	r.Method = r.ToolName
 	r.Filter = r.MatchedRule
@@ -952,7 +1176,13 @@ func scanAuditRecord(row auditRowScanner) (AuditRecord, error) {
 	}
 	r.UserContext = map[string]interface{}{
 		"user_role": r.CallerRole,
-		"user_id":   r.AgentName,
+		"user_id":   cmp.Or(r.UserID, r.AgentName),
+	}
+	if r.APIKeyID != "" {
+		r.UserContext["api_key_id"] = r.APIKeyID
+	}
+	if r.ClientIP != "" {
+		r.UserContext["client_ip"] = r.ClientIP
 	}
 	return r, nil
 }

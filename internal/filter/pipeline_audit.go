@@ -46,6 +46,11 @@ type AuditEvent struct {
 	Message          string       `json:"message,omitempty"`
 	ErrorMessage     string       `json:"error_message,omitempty"`
 	User             *UserContext `json:"user_context,omitempty"`
+	APIKeyID         string       `json:"api_key_id,omitempty"`
+	ClientIP         string       `json:"client_ip,omitempty"`
+	HumanApproved    bool         `json:"human_approved,omitempty"`
+	ApprovedBy       string       `json:"approved_by,omitempty"`
+	ApprovalChannel  string       `json:"approval_channel,omitempty"`
 	LatencyMs        float64      `json:"latency_ms"`
 	TraceID          string       `json:"trace_id,omitempty"`
 	InputBytes       int          `json:"input_size_bytes,omitempty"`
@@ -57,7 +62,28 @@ type AuditEvent struct {
 	OriginalResponse string       `json:"original_response,omitempty"`
 	Response         string       `json:"response,omitempty"`
 	AuditedRules     []string     `json:"audited_rules,omitempty"`
+	HashVersion      string       `json:"hash_version,omitempty"`
 	IntegrityHash    string       `json:"integrity_hash,omitempty"`
+}
+
+// SecurityAuditEvent captures a control-plane mutation, auth outcome, or HITL decision
+// segregated from MCP Tool Invocation Records.
+type SecurityAuditEvent struct {
+	ID            string         `json:"id,omitempty"`
+	Timestamp     time.Time      `json:"timestamp"`
+	TraceID       string         `json:"trace_id,omitempty"`
+	EventType     string         `json:"event_type"`
+	ActorID       string         `json:"actor_id"`
+	ActorRole     string         `json:"actor_role"`
+	ClientIP      string         `json:"client_ip,omitempty"`
+	ResourceType  string         `json:"resource_type,omitempty"`
+	ResourceID    string         `json:"resource_id,omitempty"`
+	Action        string         `json:"action"`
+	Outcome       string         `json:"outcome"`
+	Reason        string         `json:"reason,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+	HashVersion   string         `json:"hash_version,omitempty"`
+	IntegrityHash string         `json:"integrity_hash,omitempty"`
 }
 
 var decisionSeverityRank = map[string]int{
@@ -224,6 +250,37 @@ func makePayloadPreview(data []byte) string {
 // AuditLogger defines the interface for persisting audit events.
 type AuditLogger interface {
 	LogEvent(event *AuditEvent)
+}
+
+// SecurityAuditLogger defines the segregated interface for persisting control-plane security audit events.
+type SecurityAuditLogger interface {
+	LogSecurityEvent(event *SecurityAuditEvent)
+}
+
+// MultiSecurityAuditLogger fans out control-plane security audit events across multiple loggers.
+type MultiSecurityAuditLogger struct {
+	loggers []SecurityAuditLogger
+}
+
+// NewMultiSecurityAuditLogger creates a composite control-plane audit logger.
+func NewMultiSecurityAuditLogger(loggers ...SecurityAuditLogger) *MultiSecurityAuditLogger {
+	var valid []SecurityAuditLogger
+	for _, l := range loggers {
+		if l != nil {
+			valid = append(valid, l)
+		}
+	}
+	return &MultiSecurityAuditLogger{loggers: valid}
+}
+
+// LogSecurityEvent dispatches the control-plane event to all registered loggers.
+func (m *MultiSecurityAuditLogger) LogSecurityEvent(event *SecurityAuditEvent) {
+	if m == nil || event == nil {
+		return
+	}
+	for _, l := range m.loggers {
+		l.LogSecurityEvent(event)
+	}
 }
 
 // MultiAuditLogger fans out audit events across multiple AuditLogger implementations.

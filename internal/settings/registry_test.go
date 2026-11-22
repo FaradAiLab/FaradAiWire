@@ -470,3 +470,74 @@ func TestGuardDesktopAlertSettings(t *testing.T) {
 		t.Fatalf("expected ErrInvalidValue for negative float with Min: 0, got %v", err)
 	}
 }
+
+func TestAuditJSONLAndExportSettings(t *testing.T) {
+	t.Parallel()
+
+	s := DefaultOperationalSettings()
+	if s.Maintenance.AuditJSONLMaxSizeMB != 10 {
+		t.Fatalf("expected default AuditJSONLMaxSizeMB=10, got %d", s.Maintenance.AuditJSONLMaxSizeMB)
+	}
+	if s.Maintenance.AuditJSONLMaxFiles != 10 {
+		t.Fatalf("expected default AuditJSONLMaxFiles=10, got %d", s.Maintenance.AuditJSONLMaxFiles)
+	}
+	if s.Maintenance.AuditExportMaxRows != 50000 {
+		t.Fatalf("expected default AuditExportMaxRows=50000, got %d", s.Maintenance.AuditExportMaxRows)
+	}
+
+	clone := s.Clone()
+	clone.Maintenance.AuditJSONLMaxSizeMB = 25
+	clone.Maintenance.AuditJSONLMaxFiles = 20
+	clone.Maintenance.AuditExportMaxRows = 100000
+	if s.Maintenance.AuditJSONLMaxSizeMB != 10 || s.Maintenance.AuditJSONLMaxFiles != 10 || s.Maintenance.AuditExportMaxRows != 50000 {
+		t.Fatal("mutating cloned audit settings altered original settings")
+	}
+
+	cases := []struct {
+		name    string
+		key     string
+		val     any
+		wantErr bool
+	}{
+		{name: "jsonl max size min ok", key: "maintenance.audit_jsonl_max_size_mb", val: 1, wantErr: false},
+		{name: "jsonl max size max ok", key: "maintenance.audit_jsonl_max_size_mb", val: 100, wantErr: false},
+		{name: "jsonl max size below min", key: "maintenance.audit_jsonl_max_size_mb", val: 0, wantErr: true},
+		{name: "jsonl max size above max", key: "maintenance.audit_jsonl_max_size_mb", val: 101, wantErr: true},
+		{name: "jsonl max files min ok", key: "maintenance.audit_jsonl_max_files", val: 1, wantErr: false},
+		{name: "jsonl max files max ok", key: "maintenance.audit_jsonl_max_files", val: 100, wantErr: false},
+		{name: "jsonl max files below min", key: "maintenance.audit_jsonl_max_files", val: 0, wantErr: true},
+		{name: "jsonl max files above max", key: "maintenance.audit_jsonl_max_files", val: 101, wantErr: true},
+		{name: "export max rows min ok", key: "maintenance.audit_export_max_rows", val: 1000, wantErr: false},
+		{name: "export max rows max ok", key: "maintenance.audit_export_max_rows", val: 200000, wantErr: false},
+		{name: "export max rows below min", key: "maintenance.audit_export_max_rows", val: 999, wantErr: true},
+		{name: "export max rows above max", key: "maintenance.audit_export_max_rows", val: 200001, wantErr: true},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			meta, ok := Registry[tc.key]
+			if !ok {
+				t.Fatalf("missing registry key %q", tc.key)
+			}
+			if meta.Category != "maintenance" {
+				t.Fatalf("expected maintenance category for %q, got %q", tc.key, meta.Category)
+			}
+			err := Validate(tc.key, tc.val)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate(%q, %v) err=%v, wantErr=%v", tc.key, tc.val, err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				target := DefaultOperationalSettings()
+				if err := ApplySetting(target, tc.key, tc.val); err != nil {
+					t.Fatalf("ApplySetting(%q, %v) failed: %v", tc.key, tc.val, err)
+				}
+				got, err := ExtractSetting(target, tc.key)
+				if err != nil || got != tc.val {
+					t.Fatalf("ExtractSetting(%q) = %v (%v), want %v", tc.key, got, err, tc.val)
+				}
+			}
+		})
+	}
+}

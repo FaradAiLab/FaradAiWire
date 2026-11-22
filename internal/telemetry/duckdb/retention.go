@@ -130,6 +130,7 @@ func (r *RetentionCleaner) EnforceRetention(ctx context.Context) error {
 		return fmt.Errorf("failed to prune expired audit logs: %w", err)
 	}
 	_, _ = r.db.ExecContext(ctx, "DELETE FROM tool_audit_responses WHERE timestamp < ?", cutoff)
+	_, _ = r.db.ExecContext(ctx, "DELETE FROM security_audit_logs WHERE timestamp < ?", cutoff)
 	if rowsAffected, _ := res.RowsAffected(); rowsAffected > 0 {
 		slog.InfoContext(ctx, "DuckDB telemetry pruned expired records",
 			slog.Int64("rows_deleted", rowsAffected),
@@ -168,6 +169,15 @@ func (r *RetentionCleaner) EnforceRetention(ctx context.Context) error {
 				_, _ = r.db.ExecContext(ctx, `
 					DELETE FROM tool_audit_responses
 					WHERE invocation_id NOT IN (SELECT id FROM tool_audit_logs)
+				`)
+				// Also trim oldest security audit records when reclaiming space
+				_, _ = r.db.ExecContext(ctx, `
+					DELETE FROM security_audit_logs
+					WHERE id IN (
+						SELECT id FROM security_audit_logs
+						ORDER BY timestamp ASC
+						LIMIT 5000
+					)
 				`)
 
 				// Checkpoint after batch
