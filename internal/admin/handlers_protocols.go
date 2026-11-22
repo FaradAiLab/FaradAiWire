@@ -11,18 +11,35 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/mcpprobe"
 	"github.com/FaradAiLab/FaradAiWire/internal/pathguard"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
 	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 )
 
+const stdioDisabledMsg = "Local stdio subprocess execution is disabled when allow_stdio is false. Use Remote SSE or Streamable HTTP."
+
+func (a *AdminServer) isStdioAllowed() bool {
+	if cfg := a.Config(); cfg != nil {
+		return cfg.IsStdioAllowed()
+	}
+	return (&config.Config{}).IsStdioAllowed()
+}
+
 func (a *AdminServer) getProtocolStore() protocol.Store {
 	return a.protocolStore
 }
 
 // handleProtocolPresets returns the curated Top 20 industry-standard MCP presets (GET /admin/protocols/presets).
+// Returns an empty slice when allow_stdio is false (Containerized Security Gateway mode).
 func (a *AdminServer) handleProtocolPresets(w http.ResponseWriter, r *http.Request) {
+	if !a.isStdioAllowed() {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"presets": []protocol.PresetMetadata{},
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"presets": protocol.GetPresetsCatalog(),
 	})
@@ -122,6 +139,10 @@ func (a *AdminServer) handleProtocolProbe(w http.ResponseWriter, r *http.Request
 
 	switch reqType {
 	case "stdio":
+		if !a.isStdioAllowed() {
+			writeError(w, http.StatusBadRequest, "STDIO_DISABLED", stdioDisabledMsg)
+			return
+		}
 		if strings.TrimSpace(req.Command) == "" {
 			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Command is required for stdio protocol probe")
 			return
@@ -400,6 +421,10 @@ func (a *AdminServer) handleCreateProtocol(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		return
 	}
+	if strings.EqualFold(p.Type, "stdio") && !a.isStdioAllowed() {
+		writeError(w, http.StatusBadRequest, "STDIO_DISABLED", stdioDisabledMsg)
+		return
+	}
 	if existing, _ := store.Get(p.ID); existing != nil {
 		writeError(w, http.StatusConflict, "CONFLICT", "Protocol with ID '"+p.ID+"' already exists. Use PUT to update.")
 		return
@@ -436,6 +461,10 @@ func (a *AdminServer) handleUpdateProtocol(w http.ResponseWriter, r *http.Reques
 	p.ID = protocolID
 	if err := p.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	if strings.EqualFold(p.Type, "stdio") && !a.isStdioAllowed() {
+		writeError(w, http.StatusBadRequest, "STDIO_DISABLED", stdioDisabledMsg)
 		return
 	}
 

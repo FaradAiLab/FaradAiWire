@@ -55,6 +55,34 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// isTrustedHTTPTarget reports whether host is safe for plaintext HTTP bearer transport
+// without TLS (loopback, RFC1918/ULA private container networks, single-label internal DNS,
+// .local/.internal/.localhost hostnames, or explicit FARADAI_WIRE_ALLOW_INSECURE_HTTP=true).
+func isTrustedHTTPTarget(host string) bool {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("FARADAI_WIRE_ALLOW_INSECURE_HTTP")), "true") {
+		return true
+	}
+	if isLoopbackHost(host) {
+		return true
+	}
+	h := strings.Trim(strings.TrimSpace(normalizeGatewayHost(host)), "[]")
+	h = strings.TrimSuffix(h, ".")
+	if h == "" {
+		return false
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		// Explicitly exclude link-local / cloud metadata (169.254.0.0/16, fe80::/10)
+		return ip.IsPrivate() || ip.IsLoopback()
+	}
+	lower := strings.ToLower(h)
+	if !strings.Contains(lower, ".") {
+		return true
+	}
+	return strings.HasSuffix(lower, ".internal") ||
+		strings.HasSuffix(lower, ".local") ||
+		strings.HasSuffix(lower, ".localhost")
+}
+
 func resolveDefaultConnectPort() int {
 	cfgPath := filepath.Join(config.DefaultFaradAiWireDir(), "config.yaml")
 	if _, err := os.Stat(cfgPath); err == nil {
@@ -96,8 +124,8 @@ func executeConnect(profile string, host string, port int, token string, noSpawn
 	if token == "" {
 		token = resolveActiveToken(profile)
 	}
-	if token != "" && !isLoopbackHost(host) {
-		fmt.Fprintf(os.Stderr, "Error: refusing to send bearer token over unencrypted http:// to non-loopback host %q\n", host)
+	if token != "" && !isTrustedHTTPTarget(host) {
+		fmt.Fprintf(os.Stderr, "Error: refusing to send bearer token over unencrypted http:// to untrusted non-loopback host %q (set FARADAI_WIRE_ALLOW_INSECURE_HTTP=true to override)\n", host)
 		return 1
 	}
 
@@ -269,8 +297,8 @@ func runBridge(ctx context.Context, profile, host string, port int, token string
 		out = os.Stdout
 	}
 	host = normalizeGatewayHost(host)
-	if token != "" && !isLoopbackHost(host) {
-		return fmt.Errorf("refusing to send bearer token over unencrypted http:// to non-loopback host %q", host)
+	if token != "" && !isTrustedHTTPTarget(host) {
+		return fmt.Errorf("refusing to send bearer token over unencrypted http:// to untrusted non-loopback host %q (set FARADAI_WIRE_ALLOW_INSECURE_HTTP=true to override)", host)
 	}
 
 	bridgeCtx, bridgeCancel := context.WithCancel(ctx)

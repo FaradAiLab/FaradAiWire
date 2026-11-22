@@ -827,3 +827,44 @@ func TestExecuteAdopt_DryRunPreservesLegacyIDs_AndConfirmedAdoptMigrates(t *test
 		t.Errorf("expected legacy antigravity_codegraph_696cf8.json to be removed after migration")
 	}
 }
+
+func TestExecuteAdopt_RefusesWhenStdioDisabled(t *testing.T) {
+	t.Setenv("FARADAI_WIRE_ALLOW_STDIO", "false")
+	var out bytes.Buffer
+	code := executeAdoptWithAdapters(adoptOptions{
+		yes:          true,
+		backupDir:    t.TempDir(),
+		protocolsDir: t.TempDir(),
+		agentsDir:    t.TempDir(),
+	}, strings.NewReader(""), &out, nil)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit code when FARADAI_WIRE_ALLOW_STDIO=false, output:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "allow_stdio") && !strings.Contains(out.String(), "Host Native Daemon") {
+		t.Fatalf("expected clear container-mode remediation message, got:\n%s", out.String())
+	}
+}
+
+func TestExecuteAdopt_RefusesWhenConfigYAMLDisablesStdio(t *testing.T) {
+	t.Setenv("FARADAI_WIRE_ALLOW_STDIO", "")
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("runtime_mode: STANDALONE\nallow_stdio: false\n"), 0600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	var out bytes.Buffer
+	code := executeAdoptWithAdapters(adoptOptions{
+		yes:          true,
+		configPath:   cfgPath,
+		backupDir:    filepath.Join(tmpDir, "backups"),
+		protocolsDir: filepath.Join(tmpDir, "protocols"),
+		agentsDir:    filepath.Join(tmpDir, "agents"),
+	}, strings.NewReader(""), &out, nil)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit code when config.yaml has allow_stdio: false, output:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "allow_stdio=false") {
+		t.Fatalf("expected allow_stdio=false rejection message, got:\n%s", out.String())
+	}
+}

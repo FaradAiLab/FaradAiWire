@@ -23,6 +23,7 @@ export interface GeneralConfigTabProps {
   onToggleToolScoping: (toolName: string) => void
   onDiscoverTools: () => void
   isDiscoveringTools: boolean
+  allowStdio?: boolean
   onProtocolCreated?: (protocol: ProtocolItem) => void
 }
 
@@ -42,6 +43,7 @@ export const GeneralConfigTab: React.FC<GeneralConfigTabProps> = ({
   onToggleToolScoping,
   onDiscoverTools,
   isDiscoveringTools,
+  allowStdio = true,
   onProtocolCreated,
 }) => {
   const [isRegisterOpen, setIsRegisterOpen] = useState(false)
@@ -277,6 +279,7 @@ export const GeneralConfigTab: React.FC<GeneralConfigTabProps> = ({
         <QuickProtocolRegisterModal
           isOpen={true}
           onClose={() => setIsRegisterOpen(false)}
+          allowStdio={allowStdio}
           onSuccess={(newProto) => {
             if (onProtocolCreated) {
               onProtocolCreated(newProto)

@@ -1,0 +1,47 @@
+services:
+  faradaiwire:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: faradaiwire:local
+    container_name: faradaiwire
+    restart: unless-stopped
+    ports:
+      # Bind to 127.0.0.1 by default; change to "19410:19410" / "19415:19415" behind TLS for remote access.
+      - "127.0.0.1:19410:19410"
+      - "127.0.0.1:19415:19415"
+    environment:
+      FARADAI_WIRE_HOME: /data
+      FARADAI_WIRE_HOST: 0.0.0.0
+      FARADAI_WIRE_ADMIN_HOST: 0.0.0.0
+      FARADAI_WIRE_ALLOW_STDIO: "false"
+      FARADAI_WIRE_ALLOW_LOCAL_TARGETS: "true"
+      FARADAI_WIRE_GUARD_OLLAMA_URL: http://host.docker.internal:11434
+      FARADAI_WIRE_GUARD_DOCKER_URL: http://faradai-guard:8088
+      # GOMEMLIMIT: 512MiB  # Optional: tune Go GC soft memory limit (80-90% of container memory limit)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - faradaiwire_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "exec 3<>/dev/tcp/127.0.0.1/19410 && printf 'GET /health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Optional neural AI Guard sidecar (start with: docker compose --profile guard up -d)
+  faradai-guard:
+    image: ghcr.io/faradailab/farad-ai-guard:qwen3guard
+    container_name: faradai-guard
+    profiles: ["guard"]
+    restart: unless-stopped
+
+volumes:
+  faradaiwire_data:

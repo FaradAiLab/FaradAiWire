@@ -91,6 +91,30 @@ func WithOllamaURL(tagsURL, baseURL string) Option {
 	}
 }
 
+// WithDockerBaseURL overrides both health and predict endpoints for a Docker FaradAiGuard instance.
+func WithDockerBaseURL(baseURL string) Option {
+	return func(p *Prober) {
+		trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+		if trimmed == "" {
+			return
+		}
+		p.promptGuardHealthURL = trimmed + "/health"
+		p.promptGuardPredictURL = trimmed + "/predict"
+	}
+}
+
+// WithOllamaBaseURL overrides both tags and base URLs for an Ollama inference endpoint.
+func WithOllamaBaseURL(baseURL string) Option {
+	return func(p *Prober) {
+		trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+		if trimmed == "" {
+			return
+		}
+		p.ollamaTagsURL = trimmed + "/api/tags"
+		p.ollamaBaseURL = trimmed
+	}
+}
+
 // NewProber initializes a Prober with sensible defaults and an SSRF-safe HTTP client.
 func NewProber(opts ...Option) *Prober {
 	p := &Prober{
@@ -121,6 +145,22 @@ var DefaultProber = NewProber()
 // Probe invokes discovery on the default prober instance.
 func Probe(ctx context.Context, configuredURL string) *ProbeResult {
 	return DefaultProber.Probe(ctx, configuredURL)
+}
+
+// ProbeWithDiscovery probes the configured URL alongside custom Docker and Ollama discovery endpoints,
+// reusing DefaultProber's pooled SSRF-safe HTTP client when initialized.
+func ProbeWithDiscovery(ctx context.Context, configuredURL, dockerURL, ollamaURL string) *ProbeResult {
+	opts := make([]Option, 0, 3)
+	if DefaultProber != nil && DefaultProber.client != nil {
+		opts = append(opts, WithHTTPClient(DefaultProber.client))
+	}
+	if strings.TrimSpace(dockerURL) != "" {
+		opts = append(opts, WithDockerBaseURL(dockerURL))
+	}
+	if strings.TrimSpace(ollamaURL) != "" {
+		opts = append(opts, WithOllamaBaseURL(ollamaURL))
+	}
+	return NewProber(opts...).Probe(ctx, configuredURL)
 }
 
 // Probe asynchronously inspects candidate local AI Guard engines and the configured URL within a bounded deadline.
@@ -208,7 +248,7 @@ func (p *Prober) Probe(ctx context.Context, configuredURL string) *ProbeResult {
 		result.Detected = true
 		if pgModel == "FaradAiGuard (Docker)" {
 			result.DetectedProvider = ProviderDocker
-			result.DetectedURL = "http://127.0.0.1:8088"
+			result.DetectedURL = strings.TrimSuffix(p.promptGuardHealthURL, "/health")
 		} else {
 			result.DetectedProvider = ProviderPromptGuard
 			result.DetectedURL = p.promptGuardPredictURL

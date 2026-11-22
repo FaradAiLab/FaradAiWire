@@ -3,6 +3,7 @@ package admin
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -167,6 +168,12 @@ type protocolProbeOutcome struct {
 }
 
 func (a *AdminServer) probeSingleProtocol(ctx context.Context, proto agent.ProtocolConfig, ssrfOpts transport.SafeTransportOptions, baseTimeout time.Duration) protocolProbeOutcome {
+	if !a.isStdioAllowed() && isAgentProtocolStdio(proto) {
+		return protocolProbeOutcome{
+			proto: proto,
+			err:   errors.New("stdio subprocess execution is disabled (allow_stdio=false)"),
+		}
+	}
 	protoTimeout := baseTimeout
 	if proto.IsStdio() {
 		protoTimeout = a.stdioProbeTimeout(proto.GetCommand())

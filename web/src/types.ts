@@ -20,6 +20,8 @@ export interface GatewayStatus {
   guard_latency_ms?: number
   auto_sync_mcp?: boolean
   hot_reload?: boolean
+  allow_stdio?: boolean
+  admin_auth_required?: boolean
 }
 
 export function isGuardActive(status?: GatewayStatus | null): boolean {
@@ -410,9 +412,9 @@ export interface SmartRecommendation {
 }
 
 export interface RecommendationRequest {
-  agent_name?: string
-  protocols?: string[]
-  tools?: string[]
+  protocol_types?: string[]
+  protocol_names?: string[]
+  tool_names?: string[]
   attached_packs?: string[]
 }
 

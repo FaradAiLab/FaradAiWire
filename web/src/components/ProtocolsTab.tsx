@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { Network, Sparkles, Plus, Search } from 'lucide-react'
-import { ProtocolItem, PresetMetadata } from '../types'
+import { ProtocolItem, PresetMetadata, GatewayStatus } from '../types'
 import { api } from '../api'
 import { Button } from './ui/Button'
 import { ProtocolCard } from './protocols/ProtocolCard'
@@ -12,7 +12,12 @@ import { InUseWarningModal } from './protocols/InUseWarningModal'
 const CATEGORIES = ['All', 'DevOps', 'Data', 'Web', 'Productivity', 'Memory'] as const
 type Category = (typeof CATEGORIES)[number]
 
-export const ProtocolsTab: React.FC = () => {
+export interface ProtocolsTabProps {
+  status?: GatewayStatus | null
+}
+
+export const ProtocolsTab: React.FC<ProtocolsTabProps> = ({ status }) => {
+  const allowStdio = status?.allow_stdio !== false
   const [protocols, setProtocols] = useState<ProtocolItem[]>([])
   const [presets, setPresets] = useState<PresetMetadata[]>([])
   const [loading, setLoading] = useState(false)
@@ -157,8 +162,9 @@ export const ProtocolsTab: React.FC = () => {
           <div className="p-8 rounded-2xl bg-surface/50 border border-subtle text-center text-xs text-muted font-mono">Loading catalog...</div>
         ) : protocols.length === 0 ? (
           <div className="p-8 text-center text-xs text-muted border border-dashed border-subtle rounded-2xl bg-surface/30">
-            No active tool sources configured yet. Explore the Marketplace below or register a custom
-            source.
+            {allowStdio
+              ? 'No active tool sources configured yet. Explore the Marketplace below or register a custom source.'
+              : 'No active HTTP or SSE tool sources configured yet. Click "Custom Tool Source" to register a Remote SSE or Streamable HTTP MCP endpoint.'}
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -175,64 +181,66 @@ export const ProtocolsTab: React.FC = () => {
         )}
       </div>
 
-      {/* SECTION 2: Preset Marketplace Hub */}
-      <div className="space-y-5 pt-4">
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-subtle pb-3">
-          <div>
-            <h3 className="text-sm font-bold text-primary uppercase tracking-wider font-mono flex items-center gap-2">
-              <Sparkles className="w-4 h-4 text-accent-primary" />
-              MCP Preset Marketplace ({presets.length} Curated Integrations)
-            </h3>
-            <p className="text-xs text-muted mt-0.5">
-              Click &apos;Configure & Install&apos; on any standard preset to auto-populate connection
-              parameters.
-            </p>
+      {/* SECTION 2: Preset Marketplace Hub (Host Native Mode only) */}
+      {allowStdio && (
+        <div className="space-y-5 pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-subtle pb-3">
+            <div>
+              <h3 className="text-sm font-bold text-primary uppercase tracking-wider font-mono flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-accent-primary" />
+                MCP Preset Marketplace ({presets.length} Curated Integrations)
+              </h3>
+              <p className="text-xs text-muted mt-0.5">
+                Click &apos;Configure & Install&apos; on any standard preset to auto-populate connection
+                parameters.
+              </p>
+            </div>
+
+            {/* Search Input */}
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-muted absolute left-3 top-2.5" />
+              <input
+                type="text"
+                aria-label="Search presets"
+                placeholder="Search presets..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-8 pr-3 py-1.5 rounded-xl bg-surface border border-subtle text-xs text-primary focus:outline-none focus:ring-1 focus:ring-accent-primary font-mono w-48 placeholder:text-muted"
+              />
+            </div>
           </div>
 
-          {/* Search Input */}
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 text-muted absolute left-3 top-2.5" />
-            <input
-              type="text"
-              aria-label="Search presets"
-              placeholder="Search presets..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-8 pr-3 py-1.5 rounded-xl bg-surface border border-subtle text-xs text-primary focus:outline-none focus:ring-1 focus:ring-accent-primary font-mono w-48 placeholder:text-muted"
-            />
+          {/* Category Filter Pills */}
+          <div className="flex flex-wrap gap-2">
+            {CATEGORIES.map((cat) => (
+              <button
+                key={cat}
+                type="button"
+                onClick={() => setSelectedCategory(cat)}
+                className={`px-3 py-1 rounded-xl text-xs font-semibold font-mono transition-all ${
+                  selectedCategory === cat
+                    ? 'bg-accent-primary text-white shadow-sm'
+                    : 'bg-surface text-muted hover:bg-surface/80 hover:text-primary border border-subtle'
+                }`}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+
+          {/* Preset Cards Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {filteredPresets.map((preset) => (
+              <PresetCard
+                key={preset.id}
+                preset={preset}
+                isInstalled={protocols.some((p) => p.id === preset.id)}
+                onInstall={handleOpenPresetInstall}
+              />
+            ))}
           </div>
         </div>
-
-        {/* Category Filter Pills */}
-        <div className="flex flex-wrap gap-2">
-          {CATEGORIES.map((cat) => (
-            <button
-              key={cat}
-              type="button"
-              onClick={() => setSelectedCategory(cat)}
-              className={`px-3 py-1 rounded-xl text-xs font-semibold font-mono transition-all ${
-                selectedCategory === cat
-                  ? 'bg-accent-primary text-white shadow-sm'
-                  : 'bg-surface text-muted hover:bg-surface/80 hover:text-primary border border-subtle'
-              }`}
-            >
-              {cat}
-            </button>
-          ))}
-        </div>
-
-        {/* Preset Cards Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filteredPresets.map((preset) => (
-            <PresetCard
-              key={preset.id}
-              preset={preset}
-              isInstalled={protocols.some((p) => p.id === preset.id)}
-              onInstall={handleOpenPresetInstall}
-            />
-          ))}
-        </div>
-      </div>
+      )}
 
       {/* Modals & Drawers */}
       <InstallProtocolModal
@@ -244,6 +252,7 @@ export const ProtocolsTab: React.FC = () => {
         }}
         presetToInstall={presetToInstall}
         protocolToEdit={protocolToEdit}
+        allowStdio={allowStdio}
         onSaved={fetchData}
       />
 

@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/auth"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 )
 
@@ -76,5 +80,85 @@ func TestIsInteractiveTerminal_InTests(t *testing.T) {
 	t.Setenv("FARADAI_WIRE_NO_BANNER", "true")
 	if isInteractiveTerminal() {
 		t.Errorf("expected isInteractiveTerminal() to be false when FARADAI_WIRE_NO_BANNER=true")
+	}
+}
+
+func TestPrintStartupBanner_ZeroBleedTokenMasking(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tempHome)
+
+	ks, err := auth.NewFileKeyStore(filepath.Join(tempHome, "keys", "api_keys.json"))
+	if err != nil {
+		t.Fatalf("NewFileKeyStore: %v", err)
+	}
+	rawKey, _, err := ks.GenerateKey("bootstrap-admin", "Admin", "*")
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	allowStdio := false
+	cfg := &config.Config{
+		RuntimeMode: config.RuntimeModeStandalone,
+		AllowStdio:  &allowStdio,
+		ListenHost:  "0.0.0.0",
+		ListenPort:  19410,
+		AdminHost:   "0.0.0.0",
+		AdminPort:   19415,
+	}
+
+	var buf strings.Builder
+	printStartupBanner(cfg, &buf)
+	out := buf.String()
+
+	if strings.Contains(out, rawKey) {
+		t.Fatalf("CRITICAL: startup banner leaked raw secret key into stdout logs:\n%s", out)
+	}
+	if !strings.Contains(out, auth.MaskTokenPrefix(rawKey)) {
+		t.Errorf("expected masked token prefix %q in banner:\n%s", auth.MaskTokenPrefix(rawKey), out)
+	}
+	if !strings.Contains(out, "faradaiwire token") {
+		t.Errorf("expected recovery CLI hint in banner:\n%s", out)
+	}
+}
+
+func TestCLI_TokenCommand_RecoversBootstrapAdminKeyAndMagicLink(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tempHome)
+
+	ks, err := auth.NewFileKeyStore(filepath.Join(tempHome, "keys", "api_keys.json"))
+	if err != nil {
+		t.Fatalf("NewFileKeyStore: %v", err)
+	}
+	rawKey, _, err := ks.GenerateKey("bootstrap-admin", "Admin", "*")
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCLI([]string{"token"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("faradaiwire token exited %d (stderr=%s stdout=%s)", code, stderr.String(), stdout.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, rawKey) {
+		t.Fatalf("expected raw bootstrap key %q in token output:\n%s", rawKey, out)
+	}
+	if !strings.Contains(out, "/admin/dashboard?token="+rawKey) {
+		t.Fatalf("expected Magic Link in token output:\n%s", out)
+	}
+
+	// Verify --json output
+	stdout.Reset()
+	stderr.Reset()
+	code = runCLI([]string{"token", "--json"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("faradaiwire token --json exited %d: %s", code, stderr.String())
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal json token output: %v (%s)", err, stdout.String())
+	}
+	if payload["api_key"] != rawKey || !strings.Contains(payload["magic_link"], "?token="+rawKey) {
+		t.Fatalf("unexpected json token payload: %+v", payload)
 	}
 }

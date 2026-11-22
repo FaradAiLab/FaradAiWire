@@ -11,6 +11,7 @@ export interface InstallProtocolModalProps {
   onClose: () => void
   presetToInstall?: PresetMetadata | null
   protocolToEdit?: ProtocolItem | null
+  allowStdio?: boolean
   onSaved: () => void
 }
 
@@ -19,6 +20,7 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
   onClose,
   presetToInstall,
   protocolToEdit,
+  allowStdio = true,
   onSaved,
 }) => {
   const [protoId, setProtoId] = useState('')
@@ -122,7 +124,7 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
     }
   }, [probeLogs])
 
-  const switchTransportType = (nextType: 'sse' | 'stdio') => {
+  const switchTransportType = (nextType: 'sse' | 'http' | 'stdio') => {
     probeAbortRef.current?.abort()
     probeAbortRef.current = null
     setProbing(false)
@@ -344,12 +346,12 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
 
         <div>
           <label className="block text-xs font-semibold text-primary mb-1">Transport Type</label>
-          <div className="flex gap-4">
+          <div className="flex flex-wrap gap-4">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="radio"
                 name="protoType"
-                checked={protoType === 'sse' || protoType === 'http'}
+                checked={protoType === 'sse'}
                 onChange={() => switchTransportType('sse')}
                 className="text-accent-primary focus:ring-accent-primary"
               />
@@ -359,22 +361,39 @@ export const InstallProtocolModal: React.FC<InstallProtocolModalProps> = ({
               <input
                 type="radio"
                 name="protoType"
-                checked={protoType === 'stdio'}
-                onChange={() => switchTransportType('stdio')}
+                checked={protoType === 'http'}
+                onChange={() => switchTransportType('http')}
                 className="text-accent-primary focus:ring-accent-primary"
               />
-              <span className="text-primary text-xs">Local Stdio Subprocess</span>
+              <span className="text-primary text-xs">Streamable HTTP (MCP)</span>
             </label>
+            {allowStdio && (
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="protoType"
+                  checked={protoType === 'stdio'}
+                  onChange={() => switchTransportType('stdio')}
+                  className="text-accent-primary focus:ring-accent-primary"
+                />
+                <span className="text-primary text-xs">Local Stdio Subprocess</span>
+              </label>
+            )}
           </div>
+          {!allowStdio && protoType === 'stdio' && (
+            <p className="mt-1 text-[11px] font-mono text-amber-600 dark:text-amber-300">
+              Local stdio subprocesses are disabled in Containerized Security Gateway mode (`allow_stdio: false`). Switch to Remote SSE or Streamable HTTP.
+            </p>
+          )}
         </div>
 
         {(protoType === 'sse' || protoType === 'http') ? (
           <div className="space-y-3">
             <Input
-              label="Remote SSE URL"
+              label={protoType === 'http' ? 'Streamable HTTP URL' : 'Remote SSE URL'}
               type="url"
               required
-              placeholder="https://mcp.example.com/mcp"
+              placeholder={protoType === 'http' ? 'http://mcp-server:8080/mcp' : 'https://mcp.example.com/sse'}
               value={protoUrl}
               onChange={(e) => setProtoUrl(e.target.value)}
               isMono

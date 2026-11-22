@@ -9,18 +9,20 @@ import { api } from '../../api'
 export interface QuickProtocolRegisterModalProps {
   isOpen: boolean
   onClose: () => void
+  allowStdio?: boolean
   onSuccess: (protocol: ProtocolItem) => void
 }
 
 export const QuickProtocolRegisterModal: React.FC<QuickProtocolRegisterModalProps> = ({
   isOpen,
   onClose,
+  allowStdio = true,
   onSuccess,
 }) => {
   const [id, setId] = useState('')
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [type, setType] = useState<'stdio' | 'sse' | 'http'>('stdio')
+  const [type, setType] = useState<'stdio' | 'sse' | 'http'>('sse')
   const [command, setCommand] = useState('')
   const [url, setUrl] = useState('')
   const [saving, setSaving] = useState(false)
@@ -111,9 +113,9 @@ export const QuickProtocolRegisterModal: React.FC<QuickProtocolRegisterModalProp
         {/* Transport Type */}
         <div>
           <label className="block text-xs font-semibold text-primary mb-1.5 font-mono">Transport Type</label>
-          <div className="grid grid-cols-3 gap-2">
+          <div className={`grid ${allowStdio ? 'grid-cols-3' : 'grid-cols-2'} gap-2`}>
             {[
-              { id: 'stdio', label: 'Local Stdio', icon: <Terminal className="w-3.5 h-3.5" /> },
+              ...(allowStdio ? [{ id: 'stdio', label: 'Local Stdio', icon: <Terminal className="w-3.5 h-3.5" /> }] : []),
               { id: 'sse', label: 'Remote SSE', icon: <Server className="w-3.5 h-3.5" /> },
               { id: 'http', label: 'Stream HTTP', icon: <Globe className="w-3.5 h-3.5" /> },
             ].map((t) => (

@@ -12,12 +12,13 @@ import {
   Layers,
   Key,
   Info,
+  Globe,
 } from 'lucide-react'
 import { Modal } from './ui/Modal'
 import { Badge } from './ui/Badge'
-import { DEFAULT_GATEWAY_HOST, DEFAULT_INGRESS_PORT } from '../constants'
+import { DEFAULT_GATEWAY_HOST, DEFAULT_INGRESS_PORT, normalizeBrowserIngressHost } from '../constants'
 
-export type ClientId = 'claude-desktop' | 'cursor' | 'windsurf' | 'claude-cli' | 'antigravity'
+export type ClientId = 'http-agent' | 'claude-desktop' | 'cursor' | 'windsurf' | 'claude-cli' | 'antigravity'
 
 export interface ClientConfigModalProps {
   isOpen: boolean
@@ -28,6 +29,7 @@ export interface ClientConfigModalProps {
   availableAgents?: string[]
   ingressPort?: number
   ingressHost?: string
+  allowStdio?: boolean
 }
 
 interface ClientMeta {
@@ -43,6 +45,15 @@ interface ClientMeta {
 }
 
 const CLIENTS: ClientMeta[] = [
+  {
+    id: 'http-agent',
+    label: 'HTTP / SSE Agent',
+    sublabel: 'Docker / Python / TS SDK',
+    icon: <Globe className="w-4 h-4 text-sky-400" />,
+    filePath: {
+      mac: 'Pass via agent HTTP client config or container environment variables',
+    },
+  },
   {
     id: 'claude-desktop',
     label: 'Claude Desktop',
@@ -104,8 +115,15 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
     availableAgents = [],
     ingressPort = DEFAULT_INGRESS_PORT,
     ingressHost = DEFAULT_GATEWAY_HOST,
+    allowStdio = true,
   }) => {
-    const [selectedClient, setSelectedClient] = useState<ClientId>('claude-desktop')
+    const visibleClients = useMemo(
+      () => (allowStdio ? CLIENTS : CLIENTS.filter((c) => c.id !== 'claude-desktop')),
+      [allowStdio]
+    )
+    const [selectedClient, setSelectedClient] = useState<ClientId>(() =>
+      allowStdio ? 'cursor' : 'http-agent'
+    )
     const [isFullFile, setIsFullFile] = useState(true)
     const [selectedAgent, setSelectedAgent] = useState<string>(() => {
       if (agentName && agentName !== '*') return agentName
@@ -115,6 +133,13 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
     const [copiedConfig, setCopiedConfig] = useState(false)
     const [copiedPath, setCopiedPath] = useState(false)
     const [copiedToken, setCopiedToken] = useState(false)
+
+    // Ensure selected client stays valid when allowStdio toggles (e.g. Container Mode loads)
+    React.useEffect(() => {
+      if (!allowStdio && selectedClient === 'claude-desktop') {
+        setSelectedClient('http-agent')
+      }
+    }, [allowStdio, selectedClient])
 
     // Synchronize agent if prop changes
     React.useEffect(() => {
@@ -127,22 +152,56 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
 
     const isWildcardKey = !agentName || agentName === '*'
     const effectiveAgent = selectedAgent === '*' ? '' : selectedAgent
+    const effectiveHost = normalizeBrowserIngressHost(ingressHost)
     const serverKey = effectiveAgent ? `farad-ai-${effectiveAgent}` : 'farad-ai-wire'
     const endpointUrl = effectiveAgent
-      ? `http://${ingressHost}:${ingressPort}/sse/${effectiveAgent}`
-      : `http://${ingressHost}:${ingressPort}/sse`
+      ? `http://${effectiveHost}:${ingressPort}/sse/${effectiveAgent}`
+      : `http://${effectiveHost}:${ingressPort}/sse`
+    const mcpEndpointUrl = effectiveAgent
+      ? `http://${effectiveHost}:${ingressPort}/mcp?profile=${encodeURIComponent(effectiveAgent)}`
+      : `http://${effectiveHost}:${ingressPort}/mcp`
 
     const isTokenMasked = !token || token.includes('••••••')
     const displayToken = isTokenMasked ? 'faw_live_YOUR_TOKEN_HERE' : token
 
     const activeClientMeta = useMemo(
-      () => CLIENTS.find((c) => c.id === selectedClient) || CLIENTS[0],
-      [selectedClient]
+      () => visibleClients.find((c) => c.id === selectedClient) || visibleClients[0],
+      [visibleClients, selectedClient]
     )
 
     // Generate configuration snippet
     const configCode = useMemo(() => {
       switch (selectedClient) {
+        case 'http-agent': {
+          const sdkConfig = {
+            transport: 'sse',
+            url: endpointUrl,
+            mcp_post_url: mcpEndpointUrl,
+            headers: {
+              Authorization: `Bearer ${displayToken}`,
+              ...(effectiveAgent ? { 'X-FaradAiWire-Profile': effectiveAgent } : {}),
+            },
+          }
+          if (!isFullFile) {
+            return JSON.stringify(sdkConfig, null, 2)
+          }
+          return [
+            '# Environment Variables (LangChain / CrewAI / OpenAI / TypeScript MCP SDK)',
+            `MCP_GATEWAY_URL=${endpointUrl}`,
+            `MCP_HTTP_ENDPOINT=${mcpEndpointUrl}`,
+            `MCP_BEARER_TOKEN=${displayToken}`,
+            effectiveAgent ? `FARADAI_WIRE_PROFILE=${effectiveAgent}` : '',
+            '',
+            '# Verify JSON-RPC tools/list via cURL',
+            `curl -sS -X POST "${mcpEndpointUrl}" \\`,
+            `  -H "Authorization: Bearer ${displayToken}" \\`,
+            '  -H "Content-Type: application/json" \\',
+            `  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`,
+          ]
+            .filter(Boolean)
+            .join('\n')
+        }
+
         case 'claude-desktop': {
           const serverBlock = {
             command: 'npx',
@@ -203,7 +262,7 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
         default:
           return ''
       }
-    }, [selectedClient, isFullFile, serverKey, endpointUrl, displayToken])
+    }, [selectedClient, isFullFile, serverKey, endpointUrl, mcpEndpointUrl, effectiveAgent, displayToken])
 
     const handleCopyConfig = useCallback(() => {
       navigator.clipboard.writeText(configCode)
@@ -293,8 +352,8 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
             <div className="text-[10px] font-mono text-muted uppercase tracking-wider mb-2">
               Select Client Application
             </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
-              {CLIENTS.map((client) => {
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {visibleClients.map((client) => {
                 const isSelected = client.id === selectedClient
                 return (
                   <button

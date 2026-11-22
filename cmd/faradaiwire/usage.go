@@ -18,6 +18,7 @@ func printRootUsage(out io.Writer) {
 	fmt.Fprintln(w, "  run\tStart the FaradAiWire security gateway proxy and admin console")
 	fmt.Fprintln(w, "  connect\tSpawn or attach an interactive client session to the gateway")
 	fmt.Fprintln(w, "  adopt\tDiscover and securely import client IDE configurations")
+	fmt.Fprintln(w, "  token\tDisplay the active Bootstrap Master Key and one-click Admin Magic Link")
 	w.Flush()
 	fmt.Fprintln(out)
 
@@ -101,6 +102,23 @@ func printConnectUsage(out io.Writer) {
 	fmt.Fprintln(w, "  -token <token>\tOptional API bearer token (autodiscovered if omitted)")
 	fmt.Fprintln(w, "  -no-spawn\tDo not auto-spawn the background daemon if offline")
 	fmt.Fprintln(w, "  -h, --help\tShow help for connect command")
+	w.Flush()
+}
+
+// printTokenUsage prints flag and usage documentation for 'faradaiwire token'.
+func printTokenUsage(out io.Writer) {
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  faradaiwire token [flags]")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Displays the active Bootstrap Master Key (Admin) and one-click Magic Link without acquiring locks.")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Flags:")
+	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "  -config <path>\tPath to YAML configuration file")
+	fmt.Fprintln(w, "  -host <host>\tHostname to embed in the Magic Link URL")
+	fmt.Fprintln(w, "  -port <port>\tAdmin port to embed in the Magic Link URL")
+	fmt.Fprintln(w, "  -json\tOutput token metadata and Magic Link as JSON")
+	fmt.Fprintln(w, "  -h, --help\tShow help for token command")
 	w.Flush()
 }
 

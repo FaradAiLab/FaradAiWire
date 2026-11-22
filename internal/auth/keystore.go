@@ -600,3 +600,148 @@ func ComputeHash(salt, rawToken string) string {
 	sum := ComputeHashSum(salt, rawToken)
 	return hex.EncodeToString(sum[:])
 }
+
+// MaskTokenPrefix returns a non-secret display prefix suitable for startup logs (Zero-Bleed Token Recovery).
+func MaskTokenPrefix(rawToken string) string {
+	raw := strings.TrimSpace(rawToken)
+	if raw == "" {
+		return ""
+	}
+	if len(raw) >= 12 {
+		return raw[:12] + "••••••••"
+	}
+	if len(raw) >= 4 {
+		return raw[:4] + "••••••••"
+	}
+	return "••••••••"
+}
+
+// ImportKey stores a caller-provided raw token into the FileKeyStore with salted SHA-256 hashing and 0600 permissions.
+func (f *FileKeyStore) ImportKey(name, role, agentName, rawToken string) (*StoredAPIKey, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrInvalidName
+	}
+	role = strings.TrimSpace(role)
+	if role == "" {
+		return nil, ErrInvalidRole
+	}
+	rawToken = strings.TrimSpace(rawToken)
+	if rawToken == "" {
+		return nil, errors.New("raw token cannot be empty")
+	}
+	targetAgent := strings.TrimSpace(agentName)
+	if targetAgent == "" {
+		targetAgent = "*"
+	}
+
+	prefix := rawToken
+	if len(prefix) >= 12 {
+		prefix = prefix[:12]
+	}
+
+	saltBytes := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, saltBytes); err != nil {
+		return nil, fmt.Errorf("failed to generate random salt: %w", err)
+	}
+	saltHex := hex.EncodeToString(saltBytes)
+	computedHash := ComputeHash(saltHex, rawToken)
+
+	idBytes := make([]byte, 8)
+	if _, err := io.ReadFull(rand.Reader, idBytes); err != nil {
+		return nil, fmt.Errorf("failed to generate random key ID: %w", err)
+	}
+	id := fmt.Sprintf("key_%d%s", time.Now().Unix(), hex.EncodeToString(idBytes))
+
+	record := &StoredAPIKey{
+		ID:        id,
+		Name:      name,
+		AgentName: targetAgent,
+		Prefix:    prefix,
+		RawKey:    rawToken,
+		Hash:      computedHash,
+		Salt:      saltHex,
+		Role:      role,
+		CreatedAt: time.Now().UTC(),
+		Revoked:   false,
+	}
+	record.initMemory()
+
+	f.mu.Lock()
+	_ = f.reloadIfChangedLocked()
+	f.syncLastUsedLocked()
+	f.keys[id] = record
+	err := f.saveLocked()
+	if err == nil {
+		f.dirty.Store(false)
+	}
+	f.mu.Unlock()
+
+	if err != nil {
+		return nil, err
+	}
+	recCopy := *record
+	return &recCopy, nil
+}
+
+// ActiveAdminCredentials returns copies of active unrevoked Admin key records for HMAC session key derivation.
+func (f *FileKeyStore) ActiveAdminCredentials() []*StoredAPIKey {
+	if f == nil {
+		return nil
+	}
+	if f.filePath != "" {
+		f.reloadIfChanged(false)
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	var admins []*StoredAPIKey
+	for _, k := range f.keys {
+		if k != nil && !k.Revoked && strings.EqualFold(k.Role, "Admin") {
+			cp := *k
+			admins = append(admins, &cp)
+		}
+	}
+	return admins
+}
+
+// EnsureBootstrapAdminKey ensures at least one active Admin-scoped key exists in ks.
+// If envRawKey is provided and not yet registered, it is imported as an Admin key;
+// otherwise a fresh cryptographically random Bootstrap Master Key is generated once.
+func EnsureBootstrapAdminKey(ks KeyStore, envRawKey string) (*KeyMetadata, bool, error) {
+	if ks == nil {
+		return nil, false, errors.New("keystore cannot be nil")
+	}
+
+	envRawKey = strings.TrimSpace(envRawKey)
+	if envRawKey != "" {
+		if existing, ok := ks.ValidateKey(envRawKey); ok && existing != nil && !existing.Revoked && strings.EqualFold(existing.Role, "Admin") {
+			return existing.ToMetadata(), false, nil
+		}
+		if fks, ok := ks.(*FileKeyStore); ok {
+			rec, err := fks.ImportKey("bootstrap-admin", "Admin", "*", envRawKey)
+			if err != nil {
+				return nil, false, fmt.Errorf("import bootstrap admin key: %w", err)
+			}
+			return rec.ToMetadata(), true, nil
+		}
+	}
+
+	var activeAdmin *KeyMetadata
+	for _, k := range ks.ListKeys() {
+		if k != nil && !k.Revoked && strings.EqualFold(k.Role, "Admin") {
+			if activeAdmin == nil || k.CreatedAt.Before(activeAdmin.CreatedAt) || (k.CreatedAt.Equal(activeAdmin.CreatedAt) && k.ID < activeAdmin.ID) {
+				activeAdmin = k
+			}
+		}
+	}
+	if activeAdmin != nil {
+		return activeAdmin, false, nil
+	}
+
+	_, rec, err := ks.GenerateKey("bootstrap-admin", "Admin", "*")
+	if err != nil {
+		return nil, false, fmt.Errorf("generate bootstrap admin key: %w", err)
+	}
+	return rec.ToMetadata(), true, nil
+}

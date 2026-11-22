@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/admin"
@@ -32,6 +33,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/broker"
 	duckdbTelemetry "github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
+	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 )
 
 // Dependencies contains the fully wired, immutable runtime components of FaradAiWire.
@@ -61,6 +63,7 @@ type Dependencies struct {
 	SSEProxy        *proxy.SSEProxy
 	StdioProxy      *proxy.StdioProxy
 	AdminServer     *admin.AdminServer
+	ToolDispatcher  session.ToolDispatcher
 	Coordinator     *session.InboundCoordinator
 }
 
@@ -169,6 +172,9 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	adminPort := cfg.GetAdminPort()
 	if listenPort == adminPort {
 		return nil, fmt.Errorf("configuration error: listen_port (%d) and admin_port (%d) must be distinct; unified single-port mode has been removed", listenPort, adminPort)
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Mode), "stdio") && !cfg.IsStdioAllowed() {
+		return nil, fmt.Errorf("configuration error: top-level mode 'stdio' is disabled when allow_stdio=false (Containerized Security Gateway mode)")
 	}
 
 	// Synchronize security and user context configurations
@@ -380,18 +386,59 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		deps.ProtocolStore = protocolStore
 	}
 
-	sessionMgr := session.NewManager(agentRepo, &http.Client{Timeout: 0})
+	// 8b. Seed a default Security Profile in Containerized Security Gateway mode when empty
+	if !cfg.IsStdioAllowed() {
+		if existingAgents, listErr := agentRepo.ListAgentSnapshots(); listErr == nil && len(existingAgents) == 0 {
+			defaultProfile := &agent.RouteConfig{
+				AgentID:     "default",
+				AgentName:   "default",
+				Description: "Default containerized agent security profile",
+				RoutingMode: "aggregated",
+			}
+			if saveErr := agentRepo.SaveAgentConfig("default", defaultProfile); saveErr != nil {
+				slog.Warn("Failed to seed default Security Profile", slog.String("error", saveErr.Error()))
+			}
+		}
+	}
+
+	runtimeSSRFOpts := transport.OptionsFromConfig(cfg.Security.SSRFProtection)
+	runtimeSSRFOpts.BlockPrivateIPs = cfg.Security.SSRFProtection.ShouldBlockPrivateIPs(false)
+	runtimeHTTPClient := transport.NewSafeStreamingHTTPClient(runtimeSSRFOpts, 10*time.Second)
+
+	sessionMgr := session.NewManager(agentRepo, runtimeHTTPClient)
+	sessionMgr.SetStdioAllowed(cfg.IsStdioAllowed())
 	if deps.SettingsCache != nil {
 		sessionMgr.SetSettingsCache(deps.SettingsCache)
 	}
 	deps.SessionMgr = sessionMgr
 
-	// 9. KeyStore
-	keyStorePath := cfg.GetAPIKeysPath()
-	keyStore, kErr := auth.NewFileKeyStore(keyStorePath)
-	if kErr != nil {
-		slog.Warn("Failed to initialize file keystore, falling back to memory keystore", slog.String("error", kErr.Error()))
+	// 9. KeyStore & Zero-Config Bootstrap Master Key
+	var keyStore auth.KeyStore
+	if testing.Testing() && strings.TrimSpace(cfg.Security.APIKeysPath) == "" && strings.TrimSpace(os.Getenv("FARADAI_WIRE_HOME")) == "" {
 		keyStore = auth.NewMemoryKeyStore()
+	} else {
+		keyStorePath := cfg.GetAPIKeysPath()
+		fsKeyStore, kErr := auth.NewFileKeyStore(keyStorePath)
+		if kErr != nil {
+			slog.Warn("Failed to initialize file keystore, falling back to memory keystore", slog.String("error", kErr.Error()))
+			keyStore = auth.NewMemoryKeyStore()
+		} else {
+			keyStore = fsKeyStore
+		}
+	}
+	if adminMeta, created, bootErr := auth.EnsureBootstrapAdminKey(keyStore, os.Getenv("FARADAI_WIRE_API_KEY")); bootErr != nil {
+		slog.Warn("Failed to ensure Bootstrap Master Key", slog.String("error", bootErr.Error()))
+	} else if adminMeta != nil {
+		recoverCmd := "faradaiwire token"
+		if !cfg.IsStdioAllowed() {
+			recoverCmd = "docker exec -it faradaiwire faradaiwire token"
+		}
+		slog.Info("Bootstrap Master Key ready (Zero-Bleed Token Recovery)",
+			slog.String("key_id", adminMeta.ID),
+			slog.String("key_prefix", auth.MaskTokenPrefix(adminMeta.RawKey)),
+			slog.Bool("newly_provisioned", created),
+			slog.String("recover_cmd", recoverCmd),
+		)
 	}
 	deps.KeyStore = keyStore
 
@@ -403,10 +450,10 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		httpCfg := guard.DefaultHTTPProviderConfig()
 		if cfg.Filters.Guard.Discovery.CustomURL != "" {
 			httpCfg.BaseURL = cfg.Filters.Guard.Discovery.CustomURL
-		} else if cfg.Filters.Guard.Discovery.Mode == "docker" && cfg.Filters.Guard.Discovery.DockerURL != "" {
-			httpCfg.BaseURL = cfg.Filters.Guard.Discovery.DockerURL
-		} else if cfg.Filters.Guard.Discovery.OllamaURL != "" {
-			httpCfg.BaseURL = cfg.Filters.Guard.Discovery.OllamaURL
+		} else if cfg.Filters.Guard.Discovery.Mode == "docker" {
+			httpCfg.BaseURL = cfg.Filters.Guard.Discovery.GetEffectiveDockerURL()
+		} else {
+			httpCfg.BaseURL = cfg.Filters.Guard.Discovery.GetEffectiveOllamaURL()
 		}
 		guardManager = guard.NewHTTPProvider(httpCfg)
 	}
@@ -448,21 +495,24 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 
 	// 13. AI Guard Model Installer
 	guardInstaller := guard.NewInstaller(guard.InstallerConfig{
-		Catalog: deps.GuardCatalog,
+		Catalog:   deps.GuardCatalog,
+		OllamaURL: cfg.Filters.Guard.Discovery.GetEffectiveOllamaURL(),
 	})
 	deps.GuardInstaller = guardInstaller
 
 	// 14. Inbound Coordinator and Proxy Transports
 	cStore := proxy.NewMemoryCorrelationStore()
-	fwd := session.NewForwarder(&http.Client{Timeout: 0}, pipe, cStore)
+	fwd := session.NewForwarder(runtimeHTTPClient, pipe, cStore)
 	if deps.SettingsCache != nil {
 		fwd.SetSettingsCache(deps.SettingsCache)
 	}
 	aggregator := agent.NewManifestAggregator(agentRepo)
 	dispatcher := session.NewToolDispatcher(agentRepo, sessionMgr)
+	dispatcher.SetHTTPClient(runtimeHTTPClient)
 	if deps.SettingsCache != nil {
 		dispatcher.SetSettingsCache(deps.SettingsCache)
 	}
+	deps.ToolDispatcher = dispatcher
 	coordinator := session.NewInboundCoordinator(pipe, agentRepo, sessionMgr, aggregator, dispatcher, cStore, fwd, cfg.SSE.TargetURL)
 	deps.Coordinator = coordinator
 

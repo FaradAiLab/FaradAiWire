@@ -1,5 +1,5 @@
 import React from 'react'
-import { Shield, Radio, Cpu, RefreshCw, Settings } from 'lucide-react'
+import { Shield, Radio, Cpu, RefreshCw, Settings, Lock } from 'lucide-react'
 import { GatewayStatus, ThemeMode, isGuardActive } from '../types'
 import { ThemeToggle } from './ui/ThemeToggle'
 
@@ -10,6 +10,7 @@ interface HeaderProps {
   themeMode: ThemeMode
   onThemeChange: (mode: ThemeMode) => void
   onOpenSettings?: () => void
+  onLockSession?: () => void
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -19,6 +20,7 @@ export const Header: React.FC<HeaderProps> = ({
   themeMode,
   onThemeChange,
   onOpenSettings,
+  onLockSession,
 }) => {
   const isOnline = status?.status === 'active' || status?.status === 'healthy' || status?.status?.toLowerCase() === 'ready'
   const isManaged = status?.runtime_mode === 'MANAGED'
@@ -96,6 +98,19 @@ export const Header: React.FC<HeaderProps> = ({
             aria-label="Open Settings and Access Keys"
           >
             <Settings className="w-4 h-4" />
+          </button>
+        )}
+
+        {/* Lock Session Trigger (Authenticated Non-Loopback Console) */}
+        {onLockSession && (
+          <button
+            type="button"
+            onClick={onLockSession}
+            className="flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-medium text-gray-600 hover:text-rose-700 dark:text-gray-300 dark:hover:text-rose-300 bg-gray-100 hover:bg-rose-50 dark:bg-gray-800/80 dark:hover:bg-rose-950/50 border border-gray-300 dark:border-white/10 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500"
+            title="Lock Admin Session"
+            aria-label="Lock Admin Session"
+          >
+            <Lock className="w-3.5 h-3.5" />
           </button>
         )}
       </div>

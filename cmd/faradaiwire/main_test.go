@@ -420,3 +420,18 @@ func TestRunUsage_DocumentsAdminHost(t *testing.T) {
 		t.Fatalf("expected run usage to document -admin-host flag, got:\n%s", stdout.String())
 	}
 }
+
+func TestResolveLockFilePath_UsesUnifiedDataDir(t *testing.T) {
+	tempHome := t.TempDir()
+	roConfigDir := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tempHome)
+
+	cfg := &config.Config{
+		ConfigPath: filepath.Join(roConfigDir, "config.yaml"),
+	}
+	got := resolveLockFilePath(cfg)
+	want := filepath.Join(tempHome, ".faradaiwire.lock")
+	if got != want {
+		t.Fatalf("resolveLockFilePath() = %q, want %q", got, want)
+	}
+}

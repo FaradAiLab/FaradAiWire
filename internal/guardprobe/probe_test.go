@@ -301,3 +301,44 @@ func TestDefaultProber_BlocksIMDSAndUnsafeRedirects(t *testing.T) {
 		})
 	}
 }
+
+func TestProbe_CustomDockerAndOllamaDetectedURLs(t *testing.T) {
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "faradai-guard:8088" && req.URL.Path == "/health" {
+			return jsonResponse(http.StatusOK, map[string]string{"status": "ok"}), nil
+		}
+		if req.URL.Host == "host.docker.internal:11434" && req.URL.Path == "/api/tags" {
+			return jsonResponse(http.StatusOK, ollamaTagsResponse{
+				Models: []struct {
+					Name  string `json:"name"`
+					Model string `json:"model"`
+				}{{Name: "hf.co/faradailab/guard-qwen3guard", Model: "qwen3guard"}},
+			}), nil
+		}
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(bytes.NewBufferString(""))}, nil
+	})
+
+	dockerProber := NewProber(
+		WithTimeout(100*time.Millisecond),
+		WithHTTPClient(client),
+		WithDockerBaseURL("http://faradai-guard:8088"),
+		WithOllamaBaseURL("http://host.docker.internal:11434"),
+	)
+	res := dockerProber.Probe(context.Background(), "")
+	if !res.Detected || res.DetectedProvider != ProviderDocker {
+		t.Fatalf("expected ProviderDocker detected, got %+v", res)
+	}
+	if res.DetectedURL != "http://faradai-guard:8088" {
+		t.Fatalf("expected DetectedURL=http://faradai-guard:8088, got %q", res.DetectedURL)
+	}
+}
+
+func TestProbeWithDiscovery_ReusesDefaultClientAndBlocksMetadata(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	res := ProbeWithDiscovery(ctx, "http://169.254.169.254/latest/meta-data/", "http://127.0.0.1:0", "http://127.0.0.1:0")
+	if res.ConfiguredActive {
+		t.Fatalf("expected IMDS configured URL not to be reported active, got %+v", res)
+	}
+}

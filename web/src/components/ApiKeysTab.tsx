@@ -14,7 +14,7 @@ import {
   Info,
 } from 'lucide-react'
 import { ApiKeyItem, CreatedApiKey, GatewayStatus } from '../types'
-import { DEFAULT_GATEWAY_HOST, DEFAULT_INGRESS_PORT } from '../constants'
+import { DEFAULT_INGRESS_PORT, normalizeBrowserIngressHost } from '../constants'
 import { api } from '../api'
 import { Badge } from './ui/Badge'
 import { ClientConfigModal } from './ClientConfigModal'
@@ -146,7 +146,8 @@ export const ApiKeysTab: React.FC = () => {
   )
 
   const ingressPort = gatewayStatus?.ingress_port || DEFAULT_INGRESS_PORT
-  const ingressHost = gatewayStatus?.ingress_host || DEFAULT_GATEWAY_HOST
+  const ingressHost = normalizeBrowserIngressHost(gatewayStatus?.ingress_host)
+  const allowStdio = gatewayStatus?.allow_stdio !== false
 
   // The unmasked token of the newly created key (fallback gracefully)
   const resolvedCreatedToken = useMemo(() => {
@@ -576,6 +577,7 @@ export const ApiKeysTab: React.FC = () => {
         availableAgents={agentNames}
         ingressPort={ingressPort}
         ingressHost={ingressHost}
+        allowStdio={allowStdio}
       />
     </div>
   )

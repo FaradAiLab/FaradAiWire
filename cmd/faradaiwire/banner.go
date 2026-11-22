@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/auth"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/guardprobe"
@@ -41,9 +42,24 @@ func printStartupBanner(cfg *config.Config, out io.Writer) {
 	if cfg != nil && cfg.AdminTLS.Enabled {
 		adminScheme = "https"
 	}
+	transportDesc := "MCP SSE / Stdio"
+	if cfg != nil && !cfg.IsStdioAllowed() {
+		transportDesc = "MCP HTTP / SSE Only (Containerized)"
+	}
 	fmt.Fprintf(out, "\nFaradAiWire v%s (%s Mode)\n", strings.TrimPrefix(version, "v"), cfg.GetRuntimeMode())
-	fmt.Fprintf(out, "├── Ingress Proxy   : http://%s (MCP SSE / Stdio)\n", net.JoinHostPort(cfg.GetListenHost(), strconv.Itoa(cfg.GetListenPort())))
+	fmt.Fprintf(out, "├── Ingress Proxy   : http://%s (%s)\n", net.JoinHostPort(cfg.GetListenHost(), strconv.Itoa(cfg.GetListenPort())), transportDesc)
 	fmt.Fprintf(out, "├── Admin Console   : %s://%s\n", adminScheme, net.JoinHostPort(cfg.GetAdminHost(), strconv.Itoa(cfg.GetAdminPort())))
+	if adminKeyPrefix := lookupBannerAdminKeyPrefix(cfg); adminKeyPrefix != "" || (cfg != nil && !cfg.IsStdioAllowed()) {
+		recoverCmd := "faradaiwire token"
+		if cfg != nil && !cfg.IsStdioAllowed() {
+			recoverCmd = "docker exec -it faradaiwire faradaiwire token"
+		}
+		if adminKeyPrefix != "" {
+			fmt.Fprintf(out, "├── Bootstrap Key   : %s (recover full key & Magic Link: %s)\n", adminKeyPrefix, recoverCmd)
+		} else {
+			fmt.Fprintf(out, "├── Bootstrap Key   : recover full key & Magic Link via '%s'\n", recoverCmd)
+		}
+	}
 	fmt.Fprintln(out, "└── Security Engine :")
 
 	// DLP & Secrets
@@ -65,7 +81,12 @@ func printStartupBanner(cfg *config.Config, out io.Writer) {
 	probeCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	probeRes := guardprobe.Probe(probeCtx, classifierURL)
+	probeRes := guardprobe.ProbeWithDiscovery(
+		probeCtx,
+		classifierURL,
+		cfg.Filters.Guard.Discovery.GetEffectiveDockerURL(),
+		cfg.Filters.Guard.Discovery.GetEffectiveOllamaURL(),
+	)
 
 	// Check local DuckDB Model Catalog (GUARD-001 / DEC-01)
 	dbPath := cfg.GetTelemetryDBPath()
@@ -101,4 +122,25 @@ func printStartupBanner(cfg *config.Config, out io.Writer) {
 		}
 	}
 	fmt.Fprintln(out)
+}
+
+func lookupBannerAdminKeyPrefix(cfg *config.Config) string {
+	if envKey := strings.TrimSpace(os.Getenv("FARADAI_WIRE_API_KEY")); envKey != "" {
+		return auth.MaskTokenPrefix(envKey)
+	}
+	if cfg == nil {
+		return ""
+	}
+	keysPath := cfg.GetAPIKeysPath()
+	if _, err := os.Stat(keysPath); err != nil {
+		return ""
+	}
+	ks, err := auth.NewFileKeyStore(keysPath)
+	if err != nil {
+		return ""
+	}
+	if adminMeta := findActiveAdminKey(ks); adminMeta != nil && adminMeta.RawKey != "" {
+		return auth.MaskTokenPrefix(adminMeta.RawKey)
+	}
+	return ""
 }

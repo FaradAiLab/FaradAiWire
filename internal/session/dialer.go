@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
@@ -519,6 +520,23 @@ type CompositeDialer struct {
 	httpDialer           Dialer
 	stdioDialer          Dialer
 	streamableHTTPDialer Dialer
+	stdioDisabled        atomic.Bool
+}
+
+// SetStdioAllowed configures whether local stdio subprocess execution is permitted by CompositeDialer.
+func (d *CompositeDialer) SetStdioAllowed(allowed bool) {
+	if d == nil {
+		return
+	}
+	d.stdioDisabled.Store(!allowed)
+}
+
+// IsStdioAllowed reports whether CompositeDialer permits stdio subprocess dialing.
+func (d *CompositeDialer) IsStdioAllowed() bool {
+	if d == nil {
+		return true
+	}
+	return !d.stdioDisabled.Load()
 }
 
 // NewCompositeDialer creates a new CompositeDialer.
@@ -547,7 +565,22 @@ func NewCompositeDialerWithStreamable(httpDialer, stdioDialer, streamableHTTPDia
 
 // Dial routes connection establishment to the appropriate dialer.
 func (d *CompositeDialer) Dial(ctx context.Context, proto agent.ProtocolConfig, eventCh chan<- SSEEvent, clientSessionID string, headers http.Header) *UpstreamSession {
-	if proto.IsStdio() {
+	if proto.IsStdio() || (strings.TrimSpace(proto.Type) == "" && strings.TrimSpace(proto.Command) != "") {
+		if !d.IsStdioAllowed() {
+			slog.Warn("Blocked stdio MCP protocol dial because allow_stdio=false",
+				slog.String("protocol", proto.Name),
+				slog.String("protocol_id", proto.ID),
+			)
+			return &UpstreamSession{
+				ProtocolID:   proto.ID,
+				ProtocolName: proto.Name,
+				URLOrCommand: proto.URLOrCommand,
+				Type:         "stdio",
+				TargetScope:  proto.TargetScope,
+				Status:       "DEGRADED",
+				LastPing:     time.Now(),
+			}
+		}
 		return d.stdioDialer.Dial(ctx, proto, eventCh, clientSessionID, headers)
 	}
 	if proto.IsStreamableHTTP() {

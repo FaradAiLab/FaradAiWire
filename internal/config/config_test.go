@@ -32,8 +32,9 @@ func TestConfigDefaults(t *testing.T) {
 		t.Errorf("expected IsStandalone() to be true by default")
 	}
 
-	if dir := cfg.GetAgentsDir(); dir != "/etc/faradaiwire/agents" {
-		t.Errorf("expected default agents dir /etc/faradaiwire/agents, got %s", dir)
+	expectedAgentsDir := filepath.Join(config.DefaultFaradAiWireDir(), "agents")
+	if dir := cfg.GetAgentsDir(); dir != expectedAgentsDir {
+		t.Errorf("expected default agents dir %s, got %s", expectedAgentsDir, dir)
 	}
 
 	cfg.ListenHost = "0.0.0.0"
@@ -101,6 +102,8 @@ func TestConfig_ListenHostEnvOverrides(t *testing.T) {
 func TestEnsureDefaultRuntimeConfig(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("FARADAI_WIRE_HOME", tempHome)
+	t.Setenv("FARADAI_WIRE_HOST", "")
+	t.Setenv("LISTEN_HOST", "")
 
 	configPath, err := config.EnsureDefaultRuntimeConfig()
 	if err != nil {
@@ -171,6 +174,26 @@ func TestEnsureDefaultRuntimeConfig(t *testing.T) {
 	}
 	if !cfg.Filters.RateLimiting.Enabled || cfg.Filters.RateLimiting.MaxBurst != 50 || cfg.Filters.RateLimiting.RefillRate != 10.0 {
 		t.Errorf("expected rate_limiting 50/10.0 defaults, got %+v", cfg.Filters.RateLimiting)
+	}
+
+	// Verify FARADAI_WIRE_HOST=0.0.0.0 works dynamically with auto-generated config (container ingress)
+	t.Setenv("FARADAI_WIRE_HOST", "0.0.0.0")
+	if got := cfg.GetListenHost(); got != "0.0.0.0" {
+		t.Errorf("expected generated config with FARADAI_WIRE_HOST=0.0.0.0 to resolve 0.0.0.0, got %s", got)
+	}
+}
+
+func TestYAMLConfigProvider_AutoInitializesExplicitDefaultPath(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tempHome)
+
+	explicitDefault := filepath.Join(tempHome, "config.yaml")
+	cfg, err := config.NewYAMLConfigProvider(explicitDefault).Load()
+	if err != nil {
+		t.Fatalf("expected Load on missing default home config.yaml to auto-initialize cleanly, got %v", err)
+	}
+	if cfg.ConfigPath != explicitDefault {
+		t.Errorf("expected ConfigPath=%q, got %q", explicitDefault, cfg.ConfigPath)
 	}
 }
 
@@ -438,5 +461,70 @@ func TestConfig_PortEnvPrecedence(t *testing.T) {
 	}
 	if got := emptyCfg.GetAdminPort(); got != 29416 {
 		t.Errorf("expected fallback ADMIN_PORT 29416, got %d", got)
+	}
+}
+
+func TestConfig_UnifiedDataRoot(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tempHome)
+
+	cfg := &config.Config{}
+	if got := cfg.GetAgentsDir(); got != filepath.Join(tempHome, "agents") {
+		t.Errorf("GetAgentsDir() = %q, want %q", got, filepath.Join(tempHome, "agents"))
+	}
+	if got := cfg.GetProtocolsDir(); got != filepath.Join(tempHome, "protocols") {
+		t.Errorf("GetProtocolsDir() = %q, want %q", got, filepath.Join(tempHome, "protocols"))
+	}
+	if got := cfg.GetAPIKeysPath(); got != filepath.Join(tempHome, "keys", "api_keys.json") {
+		t.Errorf("GetAPIKeysPath() = %q, want %q", got, filepath.Join(tempHome, "keys", "api_keys.json"))
+	}
+	if got := cfg.GetTelemetryDBPath(); got != filepath.Join(tempHome, "wire.duckdb") {
+		t.Errorf("GetTelemetryDBPath() with FARADAI_WIRE_HOME = %q, want %q", got, filepath.Join(tempHome, "wire.duckdb"))
+	}
+
+	configPath, err := config.EnsureDefaultRuntimeConfig()
+	if err != nil {
+		t.Fatalf("EnsureDefaultRuntimeConfig() error = %v", err)
+	}
+	loaded, err := config.NewYAMLConfigProvider(configPath).Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	wantAudit := filepath.ToSlash(filepath.Join(tempHome, "logs", "faradai_audit.jsonl"))
+	if loaded.AuditLog.Path != wantAudit {
+		t.Errorf("AuditLog.Path = %q, want %q", loaded.AuditLog.Path, wantAudit)
+	}
+	if info, err := os.Stat(filepath.Join(tempHome, "logs")); err != nil || !info.IsDir() {
+		t.Errorf("expected logs directory in %s, err=%v", tempHome, err)
+	}
+}
+
+func TestConfig_IsStdioAllowed(t *testing.T) {
+	boolPtr := func(v bool) *bool { return &v }
+
+	tests := []struct {
+		name       string
+		envVal     string
+		allowStdio *bool
+		want       bool
+	}{
+		{name: "default nil allows stdio", allowStdio: nil, want: true},
+		{name: "yaml false disables stdio", allowStdio: boolPtr(false), want: false},
+		{name: "yaml true allows stdio", allowStdio: boolPtr(true), want: true},
+		{name: "env false overrides yaml true", envVal: "false", allowStdio: boolPtr(true), want: false},
+		{name: "env 0 overrides yaml true", envVal: "0", allowStdio: boolPtr(true), want: false},
+		{name: "env off overrides yaml true", envVal: "off", allowStdio: boolPtr(true), want: false},
+		{name: "env no overrides yaml true", envVal: "no", allowStdio: boolPtr(true), want: false},
+		{name: "env true overrides yaml false", envVal: "true", allowStdio: boolPtr(false), want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("FARADAI_WIRE_ALLOW_STDIO", tc.envVal)
+			cfg := &config.Config{AllowStdio: tc.allowStdio}
+			if got := cfg.IsStdioAllowed(); got != tc.want {
+				t.Errorf("IsStdioAllowed() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

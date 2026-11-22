@@ -1,0 +1,54 @@
+# Git & IDE metadata
+.git
+.gitignore
+.github
+.vscode
+.idea
+.DS_Store
+.scratch
+.codegraph
+
+# Docs & planning artifacts (not compiled into binary)
+docs/
+tasks/
+rules/
+SPEC.md
+CONTEXT.md
+GLOSSARY.md
+
+# Local binaries & test artifacts
+faradaiwire
+faradaiwire.exe
+main
+mock_server
+*.exe
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+test_temp/
+verify/
+
+# Frontend build caches (rebuilt cleanly in Stage 1 web-builder)
+web/node_modules
+web/dist
+
+# Runtime state & secrets (always provisioned in /data volume at runtime)
+config.yaml
+config.local.yaml
+api_keys.json
+keys/
+agents/
+protocols/
+policies/
+schemas/
+logs/
+*.duckdb*
+*.log
+*.jsonl
+*.pid
+.faradaiwire.lock
+.env
+.env.*
+!.env.example

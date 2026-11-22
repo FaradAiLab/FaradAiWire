@@ -1707,3 +1707,229 @@ func TestAdminServer_UninitializedStores_Return503(t *testing.T) {
 		})
 	}
 }
+
+func TestAdminServer_NonLoopbackAuth_MagicLink_CookieAndRBAC(t *testing.T) {
+	t.Setenv("ADMIN_API_KEY", "")
+	t.Setenv("FARADAI_WIRE_ADMIN_TOKEN", "")
+
+	ks, err := auth.NewFileKeyStore(filepath.Join(t.TempDir(), "keys", "api_keys.json"))
+	if err != nil {
+		t.Fatalf("NewFileKeyStore: %v", err)
+	}
+	adminRaw, adminRec, err := ks.GenerateKey("bootstrap-admin", "Admin", "*")
+	if err != nil {
+		t.Fatalf("GenerateKey admin: %v", err)
+	}
+	devRaw, _, err := ks.GenerateKey("agent-dev", "Developer", "default")
+	if err != nil {
+		t.Fatalf("GenerateKey dev: %v", err)
+	}
+
+	allowStdio := false
+	srv := NewAdminServer(AdminDependencies{
+		Config: &config.Config{
+			RuntimeMode: config.RuntimeModeStandalone,
+			AllowStdio:  &allowStdio,
+			AdminHost:   "0.0.0.0",
+			AdminPort:   19415,
+		},
+		KeyStore:   ks,
+		ReloadFunc: func() error { return nil },
+	})
+	h := srv.Handler()
+
+	// 1. Start auth check passes when KeyStore has an active Admin key
+	if err := srv.validateAdminStartCredentials("0.0.0.0"); err != nil {
+		t.Fatalf("expected non-loopback admin validation to succeed with active Admin key, got: %v", err)
+	}
+
+	// 2. Unauthenticated requests on non-loopback fail closed with 401
+	for _, p := range []string{"/admin/status", "/admin/api-keys", "/ws"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:19415"+p, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("GET %s without credentials = %d, want 401", p, rec.Code)
+		}
+	}
+
+	// 3. Developer-scoped agent key gets 403 Forbidden on Admin API and session login
+	devReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:19415/admin/status", nil)
+	devReq.Header.Set("Authorization", "Bearer "+devRaw)
+	devRec := httptest.NewRecorder()
+	h.ServeHTTP(devRec, devReq)
+	if devRec.Code != http.StatusForbidden {
+		t.Fatalf("GET /admin/status with Developer key = %d, want 403 (%s)", devRec.Code, devRec.Body.String())
+	}
+
+	devLoginReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:19415/admin/auth/session", strings.NewReader(`{"api_key":"`+devRaw+`"}`))
+	devLoginReq.Header.Set("Content-Type", "application/json")
+	devLoginRec := httptest.NewRecorder()
+	h.ServeHTTP(devLoginRec, devLoginReq)
+	if devLoginRec.Code != http.StatusForbidden {
+		t.Fatalf("POST /admin/auth/session with Developer key = %d, want 403 (%s)", devLoginRec.Code, devLoginRec.Body.String())
+	}
+
+	// 4. Magic Link ?token=<admin_key> sets HttpOnly cookie and 303-redirects cleanly with Referrer-Policy
+	magicReq := httptest.NewRequest(http.MethodGet, "http://localhost:19415/admin/dashboard?token="+adminRaw, nil)
+	magicRec := httptest.NewRecorder()
+	h.ServeHTTP(magicRec, magicReq)
+	if magicRec.Code != http.StatusSeeOther {
+		t.Fatalf("GET /admin/dashboard?token=... = %d, want 303 (%s)", magicRec.Code, magicRec.Body.String())
+	}
+	if loc := magicRec.Header().Get("Location"); loc != "/admin/dashboard" {
+		t.Fatalf("Magic Link Location = %q, want /admin/dashboard", loc)
+	}
+	if rp := magicRec.Header().Get("Referrer-Policy"); rp != "no-referrer" {
+		t.Fatalf("Magic Link Referrer-Policy = %q, want no-referrer", rp)
+	}
+	var sessionCookie *http.Cookie
+	for _, c := range magicRec.Result().Cookies() {
+		if c.Name == adminSessionCookieName {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil || !sessionCookie.HttpOnly || sessionCookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("expected HttpOnly SameSite=Lax %s cookie, got %+v", adminSessionCookieName, sessionCookie)
+	}
+
+	// 5. Cookie authenticates REST (/admin/status), SSE (/admin/audit-logs/events), and WebSocket (/ws origin/auth check)
+	statusReq := httptest.NewRequest(http.MethodGet, "http://localhost:19415/admin/status", nil)
+	statusReq.AddCookie(sessionCookie)
+	statusRec := httptest.NewRecorder()
+	h.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/status with session cookie = %d, want 200 (%s)", statusRec.Code, statusRec.Body.String())
+	}
+	var statusPayload map[string]interface{}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &statusPayload); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if statusPayload["allow_stdio"] != false || statusPayload["admin_auth_required"] != true {
+		t.Fatalf("expected allow_stdio=false and admin_auth_required=true, got %+v", statusPayload)
+	}
+
+	// Same-host non-loopback Origin is permitted when adminHost is 0.0.0.0
+	cloudOriginReq := httptest.NewRequest(http.MethodPost, "http://192.168.1.50:19415/admin/reload", strings.NewReader("{}"))
+	cloudOriginReq.Header.Set("Content-Type", "application/json")
+	cloudOriginReq.Header.Set("Origin", "http://192.168.1.50:19415")
+	cloudOriginReq.AddCookie(sessionCookie)
+	cloudOriginRec := httptest.NewRecorder()
+	h.ServeHTTP(cloudOriginRec, cloudOriginReq)
+	if cloudOriginRec.Code != http.StatusOK {
+		t.Fatalf("same-host cloud Origin with valid cookie = %d, want 200 (%s)", cloudOriginRec.Code, cloudOriginRec.Body.String())
+	}
+
+	// 6. Revoking the Admin key immediately invalidates existing session cookies
+	if err := ks.RevokeKey(adminRec.ID); err != nil {
+		t.Fatalf("RevokeKey: %v", err)
+	}
+	revokedReq := httptest.NewRequest(http.MethodGet, "http://localhost:19415/admin/status", nil)
+	revokedReq.AddCookie(sessionCookie)
+	revokedRec := httptest.NewRecorder()
+	h.ServeHTTP(revokedRec, revokedReq)
+	if revokedRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 after revoking Admin key, got %d", revokedRec.Code)
+	}
+}
+
+func TestAdminServer_SessionCreate_AcceptsBothAPIKeyAndTokenFields(t *testing.T) {
+	ks, err := auth.NewFileKeyStore(filepath.Join(t.TempDir(), "keys", "api_keys.json"))
+	if err != nil {
+		t.Fatalf("NewFileKeyStore: %v", err)
+	}
+	adminRaw, _, err := ks.GenerateKey("bootstrap-admin", "Admin", "*")
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	srv := NewAdminServer(AdminDependencies{
+		Config: &config.Config{
+			RuntimeMode: config.RuntimeModeStandalone,
+			AdminHost:   "0.0.0.0",
+			AdminPort:   19415,
+		},
+		KeyStore: ks,
+	})
+	h := srv.Handler()
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "ui_token_field", body: `{"token":"` + adminRaw + `"}`},
+		{name: "api_key_field", body: `{"api_key":"` + adminRaw + `"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:19415/admin/auth/session", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("POST /admin/auth/session (%s) = %d, want 200 (%s)", tc.name, rec.Code, rec.Body.String())
+			}
+			var foundCookie bool
+			for _, c := range rec.Result().Cookies() {
+				if c.Name == adminSessionCookieName && c.HttpOnly && c.Value != "" {
+					foundCookie = true
+					break
+				}
+			}
+			if !foundCookie {
+				t.Fatalf("expected %s HttpOnly cookie for %s", adminSessionCookieName, tc.name)
+			}
+		})
+	}
+}
+
+func TestAdminServer_MagicLink_BruteForceLockout(t *testing.T) {
+	ks, err := auth.NewFileKeyStore(filepath.Join(t.TempDir(), "keys", "api_keys.json"))
+	if err != nil {
+		t.Fatalf("NewFileKeyStore: %v", err)
+	}
+	adminRaw, _, err := ks.GenerateKey("bootstrap-admin", "Admin", "*")
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	srv := NewAdminServer(AdminDependencies{
+		Config: &config.Config{
+			RuntimeMode: config.RuntimeModeStandalone,
+			AdminHost:   "0.0.0.0",
+			AdminPort:   19415,
+		},
+		KeyStore: ks,
+	})
+	h := srv.Handler()
+
+	// Default LoginMaxAttempts is 5
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "http://localhost:19415/admin/dashboard?token=faw_live_wrong", nil)
+		req.RemoteAddr = "198.51.100.10:50000"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: got %d, want 401", i+1, rec.Code)
+		}
+	}
+
+	// 6th attempt from locked IP is blocked with 429 even with valid Admin key
+	lockedReq := httptest.NewRequest(http.MethodGet, "http://localhost:19415/admin/dashboard?token="+adminRaw, nil)
+	lockedReq.RemoteAddr = "198.51.100.10:50001"
+	lockedRec := httptest.NewRecorder()
+	h.ServeHTTP(lockedRec, lockedReq)
+	if lockedRec.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked IP Magic Link = %d, want 429 (%s)", lockedRec.Code, lockedRec.Body.String())
+	}
+
+	// Independent IP still succeeds
+	okReq := httptest.NewRequest(http.MethodGet, "http://localhost:19415/admin/dashboard?token="+adminRaw, nil)
+	okReq.RemoteAddr = "198.51.100.20:50002"
+	okRec := httptest.NewRecorder()
+	h.ServeHTTP(okRec, okReq)
+	if okRec.Code != http.StatusSeeOther {
+		t.Fatalf("unblocked IP Magic Link = %d, want 303", okRec.Code)
+	}
+}

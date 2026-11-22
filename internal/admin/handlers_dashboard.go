@@ -19,6 +19,15 @@ import (
 )
 
 func (a *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if rawToken := strings.TrimSpace(r.URL.Query().Get("token")); rawToken != "" {
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cache-Control", "no-store")
+		if !a.authenticateAndSetSessionCookie(w, r, rawToken, "magic_link", false) {
+			return
+		}
+		http.Redirect(w, r, "/admin/dashboard", http.StatusSeeOther)
+		return
+	}
 	web.Handler().ServeHTTP(w, r)
 }
 
@@ -121,6 +130,8 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"mode":                runtimeMode,
 		"runtime_mode":        runtimeMode,
 		"transport_mode":      transportMode,
+		"allow_stdio":         a.isStdioAllowed(),
+		"admin_auth_required": a.isAdminAuthRequired(),
 		"has_local_overrides": false,
 		"is_managed":          isManaged,
 		"organization":        "Corporate Organization",
@@ -259,7 +270,12 @@ func (a *AdminServer) handleGuardProbe(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 400*time.Millisecond)
 	defer cancel()
 
-	probeRes := guardprobe.Probe(ctx, classifierURL)
+	var dockerURL, ollamaURL string
+	if cfg := a.Config(); cfg != nil {
+		dockerURL = cfg.Filters.Guard.Discovery.GetEffectiveDockerURL()
+		ollamaURL = cfg.Filters.Guard.Discovery.GetEffectiveOllamaURL()
+	}
+	probeRes := guardprobe.ProbeWithDiscovery(ctx, classifierURL, dockerURL, ollamaURL)
 	probeRes.ConfiguredURL = redactURLCredentials(probeRes.ConfiguredURL)
 
 	writeJSON(w, http.StatusOK, probeRes)

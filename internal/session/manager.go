@@ -54,6 +54,16 @@ func (m *Manager) SetDialer(dialer Dialer) {
 	m.dialer = dialer
 }
 
+// SetStdioAllowed configures whether the underlying CompositeDialer allows stdio subprocess spawning.
+func (m *Manager) SetStdioAllowed(allowed bool) {
+	if m == nil {
+		return
+	}
+	if cd, ok := m.dialer.(*CompositeDialer); ok && cd != nil {
+		cd.SetStdioAllowed(allowed)
+	}
+}
+
 // SetSettingsCache binds the dynamic atomic operational settings cache.
 func (m *Manager) SetSettingsCache(c *settings.Cache) {
 	m.mu.Lock()

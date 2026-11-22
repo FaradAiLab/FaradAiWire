@@ -2,10 +2,7 @@ package admin
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -114,6 +111,7 @@ type AdminServer struct {
 	settingsStore        settings.Store
 	settingsCache        *settings.Cache
 	wsHub                *WSHub
+	loginLimiter         *adminLoginLimiter
 	activeSessionChecker func(agentName string) bool
 	shutdownOnce         sync.Once
 	closed               bool
@@ -124,6 +122,9 @@ func NewAdminServer(deps AdminDependencies) *AdminServer {
 	hub := NewWSHub()
 	if deps.Config != nil && len(deps.Config.Security.CORSAllowedOrigins) > 0 {
 		hub.SetAllowedOrigins(deps.Config.Security.CORSAllowedOrigins)
+	}
+	if deps.Config != nil && !isLoopbackHost(deps.Config.GetAdminHost()) {
+		hub.SetAllowSameHostNonLoopback(true)
 	}
 	s := &AdminServer{
 		cfgProvider:          deps.ConfigProvider,
@@ -147,6 +148,7 @@ func NewAdminServer(deps AdminDependencies) *AdminServer {
 		schemaClear:          deps.SchemaClearFunc,
 		activeSessionChecker: deps.ActiveSessionChecker,
 		wsHub:                hub,
+		loginLimiter:         newAdminLoginLimiter(),
 	}
 	s.cfgPtr.Store(deps.Config)
 	s.pipelinePtr.Store(deps.Pipeline)
@@ -226,6 +228,10 @@ func (a *AdminServer) getAuditLoggers() []AuditEventLogger {
 func (a *AdminServer) SetConfig(cfg *config.Config) {
 	a.cfgPtr.Store(cfg)
 	a.invalidateSafeHTTPClient()
+	if a.wsHub != nil && cfg != nil {
+		a.wsHub.SetAllowedOrigins(cfg.Security.CORSAllowedOrigins)
+		a.wsHub.SetAllowSameHostNonLoopback(!isLoopbackHost(cfg.GetAdminHost()))
+	}
 }
 
 // Config returns the active configuration snapshot safely.
@@ -353,6 +359,8 @@ func (a *AdminServer) Handler() http.Handler {
 	// Embedded static dashboard UI & assets under /admin/*
 	apiMux.Handle("GET /admin/assets/", http.StripPrefix("/admin", web.Handler()))
 	registerExactMethods(apiMux, "/admin/dashboard", a.handleDashboard, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/auth/session", a.handleAdminSessionCreate, http.MethodPost)
+	registerExactMethods(apiMux, "/admin/auth/logout", a.handleAdminSessionLogout, http.MethodPost)
 
 	// Runtime inspection and local telemetry endpoints (zero-auth localhost access)
 	registerExactMethods(apiMux, "/admin/status", a.handleStatus, http.MethodGet)
@@ -546,7 +554,9 @@ func isLoopbackSameHostOrigin(origin string, reqHost string) bool {
 }
 
 func requiresAdminAuthForPath(path string) bool {
-	if path == "/admin/dashboard" || path == "/admin/dashboard/" || strings.HasPrefix(path, "/admin/assets/") {
+	if path == "/admin/dashboard" || path == "/admin/dashboard/" ||
+		strings.HasPrefix(path, "/admin/assets/") ||
+		path == "/admin/auth/session" || path == "/admin/auth/logout" {
 		return false
 	}
 	return strings.HasPrefix(path, "/admin") || strings.HasPrefix(path, "/api") || path == "/ws"
@@ -588,12 +598,13 @@ func (a *AdminServer) withAdminSecurity(next http.Handler) http.Handler {
 		if isProtectedPath || mutating {
 			origin := strings.TrimSpace(r.Header.Get("Origin"))
 			explicitOriginAllowed := origin != "" && isExplicitlyAllowedOrigin(origin, allowedOrigins)
+			sameHostNonLoopbackAllowed := origin != "" && !isLoopbackHost(adminHost) && isExactSameHostOrigin(origin, r.Host)
 
 			if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") && !explicitOriginAllowed {
 				http.Error(w, "Forbidden: cross-site admin request blocked", http.StatusForbidden)
 				return
 			}
-			if origin != "" && !explicitOriginAllowed && !isLoopbackSameHostOrigin(origin, r.Host) {
+			if origin != "" && !explicitOriginAllowed && !isLoopbackSameHostOrigin(origin, r.Host) && !sameHostNonLoopbackAllowed {
 				http.Error(w, "Forbidden: unauthorized request origin", http.StatusForbidden)
 				return
 			}
@@ -609,30 +620,26 @@ func (a *AdminServer) withAdminSecurity(next http.Handler) http.Handler {
 			}
 		}
 
-		// 2. Enforce Bearer authentication on Admin APIs/WS when a token is configured or server binds non-loopback.
-		if isProtectedPath {
-			expectedToken := resolveConfiguredAdminToken()
-			if expectedToken != "" || !isLoopbackHost(adminHost) {
-				authHeader := r.Header.Get("Authorization")
-				const bearerPrefix = "Bearer "
-				if expectedToken == "" || len(authHeader) <= len(bearerPrefix) || !strings.EqualFold(authHeader[:len(bearerPrefix)], bearerPrefix) {
-					w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
-					http.Error(w, "Unauthorized: admin bearer token required", http.StatusUnauthorized)
-					return
-				}
+		// 2. Enforce Admin-role authentication (Bearer token or HttpOnly HMAC cookie) when configured or non-loopback.
+		if isProtectedPath && a.isAdminAuthRequired() {
+			authHeader := r.Header.Get("Authorization")
+			const bearerPrefix = "Bearer "
+			if len(authHeader) > len(bearerPrefix) && strings.EqualFold(authHeader[:len(bearerPrefix)], bearerPrefix) {
 				providedToken := strings.TrimSpace(authHeader[len(bearerPrefix):])
-				if providedToken == "" {
-					w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
-					http.Error(w, "Unauthorized: admin bearer token required", http.StatusUnauthorized)
-					return
-				}
-				providedHash := sha256.Sum256([]byte(providedToken))
-				expectedHash := sha256.Sum256([]byte(expectedToken))
-				if subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) != 1 {
+				valid, isAdmin := a.validateAdminCredential(providedToken)
+				if !valid {
 					w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
 					http.Error(w, "Unauthorized: invalid admin bearer token", http.StatusUnauthorized)
 					return
 				}
+				if !isAdmin {
+					writeError(w, http.StatusForbidden, "ADMIN_ROLE_REQUIRED", "Forbidden: admin role required; scoped agent keys are restricted to ingress")
+					return
+				}
+			} else if !a.isValidAdminSessionCookie(r) {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
+				http.Error(w, "Unauthorized: admin bearer token or session required", http.StatusUnauthorized)
+				return
 			}
 		}
 
@@ -666,9 +673,8 @@ func (a *AdminServer) Start(ctx context.Context) error {
 
 	cfg := a.Config()
 
-	adminToken := resolveConfiguredAdminToken()
-	if !isLoopbackHost(adminHost) && adminToken == "" {
-		return fmt.Errorf("refusing to bind Admin Server to non-loopback host %q without ADMIN_API_KEY or FARADAI_WIRE_ADMIN_TOKEN configured", adminHost)
+	if err := a.validateAdminStartCredentials(adminHost); err != nil {
+		return err
 	}
 	if !isLoopbackHost(adminHost) && (cfg == nil || !cfg.AdminTLS.Enabled) {
 		slog.Warn("Admin Server exposed on non-loopback interface without TLS; configure admin_tls or terminate TLS upstream",

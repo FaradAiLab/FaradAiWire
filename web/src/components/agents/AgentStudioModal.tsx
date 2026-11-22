@@ -32,6 +32,7 @@ export interface AgentStudioModalProps {
   protocols: ProtocolItem[]
   onSuccess: () => void
   activeFilters?: string[]
+  allowStdio?: boolean
 }
 
 type PrimaryTab = 'general' | 'dlp' | 'guardrails' | 'pipeline'
@@ -44,6 +45,7 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
   protocols,
   onSuccess,
   activeFilters = [],
+  allowStdio = true,
 }) => {
   const [activeTab, setActiveTab] = useState<PrimaryTab>('general')
   const [agentName, setAgentName] = useState('')
@@ -209,10 +211,16 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
     }
 
     const timer = setTimeout(() => {
+      const selectedMeta = selectedProtocols
+        .map((id) => localProtocols.find((p) => p.id === id))
+        .filter((p): p is ProtocolItem => Boolean(p))
       api.getSmartRecommendations({
-        agent_name: agentName,
-        protocols: selectedProtocols,
-        tools: availableTools.map((t) => t.raw_name || t.name),
+        protocol_types: Array.from(new Set(selectedMeta.map((p) => p.type).filter(Boolean))),
+        protocol_names: selectedProtocols.map((id) => {
+          const match = localProtocols.find((p) => p.id === id)
+          return match?.name || id
+        }),
+        tool_names: availableTools.map((t) => t.raw_name || t.name),
         attached_packs: [],
       })
         .then((res) => setRecommendations(res.recommendations || []))
@@ -220,7 +228,7 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
     }, 300)
 
     return () => clearTimeout(timer)
-  }, [isOpen, selectedProtocols, availableTools, agentName])
+  }, [isOpen, selectedProtocols, localProtocols, availableTools])
 
   // Tool discovery
   const handleDiscoverTools = async () => {
@@ -230,12 +238,15 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
       const toolsAccum: ToolMetadata[] = []
 
       for (const pId of selectedProtocols) {
-        const proto = protocols.find((p) => p.id === pId)
+        const proto = localProtocols.find((p) => p.id === pId)
         if (!proto) continue
         try {
           const res = await api.probeProtocol({
+            id: proto.id,
             type: proto.type,
             url: proto.url_or_command,
+            auth_token: proto.auth_token,
+            headers: proto.headers,
             command: proto.command || proto.url_or_command,
             args: proto.args,
             env: proto.env,
@@ -644,6 +655,7 @@ export const AgentStudioModal: React.FC<AgentStudioModalProps> = ({
               onToggleToolScoping={handleToggleToolScoping}
               onDiscoverTools={handleDiscoverTools}
               isDiscoveringTools={discoveringTools}
+              allowStdio={allowStdio}
               onProtocolCreated={(newProto) => {
                 setLocalProtocols((prev) => [...prev, newProto])
                 setSelectedProtocols((prev) => [...prev, newProto.id])

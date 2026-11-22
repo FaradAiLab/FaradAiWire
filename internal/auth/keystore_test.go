@@ -512,3 +512,61 @@ func TestFileKeyStore_ListKeysAndFlushDirty_PreservesExternalKeys(t *testing.T) 
 		t.Fatal("expected external key 3 to survive daemon FlushDirty")
 	}
 }
+
+func TestEnsureBootstrapAdminKey_GeneratesOnceAndImportsEnv(t *testing.T) {
+	t.Run("generates admin key once and is idempotent", func(t *testing.T) {
+		ks, err := NewFileKeyStore(filepath.Join(t.TempDir(), "keys", "api_keys.json"))
+		if err != nil {
+			t.Fatalf("NewFileKeyStore: %v", err)
+		}
+
+		meta1, created1, err := EnsureBootstrapAdminKey(ks, "")
+		if err != nil {
+			t.Fatalf("EnsureBootstrapAdminKey 1: %v", err)
+		}
+		if !created1 || meta1 == nil {
+			t.Fatalf("expected created=true and non-nil meta, got created=%v meta=%v", created1, meta1)
+		}
+		if meta1.Role != "Admin" || meta1.AgentName != "*" || !strings.HasPrefix(meta1.RawKey, "faw_live_") {
+			t.Fatalf("unexpected bootstrap admin metadata: %+v", meta1)
+		}
+
+		meta2, created2, err := EnsureBootstrapAdminKey(ks, "")
+		if err != nil {
+			t.Fatalf("EnsureBootstrapAdminKey 2: %v", err)
+		}
+		if created2 || meta2 == nil || meta2.ID != meta1.ID || meta2.RawKey != meta1.RawKey {
+			t.Fatalf("expected idempotent reuse of key %s, got created=%v meta=%+v", meta1.ID, created2, meta2)
+		}
+	})
+
+	t.Run("imports explicit env raw key when no admin key exists", func(t *testing.T) {
+		ks, err := NewFileKeyStore(filepath.Join(t.TempDir(), "keys", "api_keys.json"))
+		if err != nil {
+			t.Fatalf("NewFileKeyStore: %v", err)
+		}
+
+		envKey := "faw_live_0123456789abcdef0123456789abcdef"
+		meta, created, err := EnsureBootstrapAdminKey(ks, envKey)
+		if err != nil {
+			t.Fatalf("EnsureBootstrapAdminKey with envKey: %v", err)
+		}
+		if !created || meta.RawKey != envKey || meta.Role != "Admin" {
+			t.Fatalf("expected imported Admin key %q, got created=%v meta=%+v", envKey, created, meta)
+		}
+		if rec, ok := ks.ValidateKey(envKey); !ok || rec.Role != "Admin" {
+			t.Fatalf("expected imported key to validate as Admin, ok=%v rec=%+v", ok, rec)
+		}
+	})
+}
+
+func TestMaskTokenPrefix_NeverExposesFullSecret(t *testing.T) {
+	raw := "faw_live_0123456789abcdef0123456789abcdef"
+	masked := MaskTokenPrefix(raw)
+	if strings.Contains(masked, "0123456789abcdef") {
+		t.Fatalf("masked prefix leaked raw secret: %q", masked)
+	}
+	if !strings.HasPrefix(masked, "faw_live_") || !strings.Contains(masked, "••") {
+		t.Fatalf("unexpected masked prefix format: %q", masked)
+	}
+}

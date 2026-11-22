@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { Bot, Plus, CheckCircle2, AlertTriangle, X } from 'lucide-react'
 import { AgentItem, ProtocolItem, GatewayStatus } from '../types'
-import { DEFAULT_GATEWAY_HOST, DEFAULT_INGRESS_PORT } from '../constants'
+import { DEFAULT_INGRESS_PORT, normalizeBrowserIngressHost } from '../constants'
 import { api } from '../api'
 import { Button } from './ui/Button'
 import { AgentCard } from './agents/AgentCard'
@@ -155,11 +155,8 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({ status: propStatus }) => {
   }, [])
 
   const ingressPort = status?.ingress_port || DEFAULT_INGRESS_PORT
-  const ingressHost =
-    status?.ingress_host ||
-    (typeof window !== 'undefined' && window.location.hostname
-      ? window.location.hostname
-      : DEFAULT_GATEWAY_HOST)
+  const ingressHost = normalizeBrowserIngressHost(status?.ingress_host)
+  const allowStdio = status?.allow_stdio !== false
 
   return (
     <div className="space-y-8">
@@ -257,6 +254,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({ status: propStatus }) => {
         protocols={protocols}
         onSuccess={fetchData}
         activeFilters={status?.active_filters || []}
+        allowStdio={allowStdio}
       />
 
       {/* Snapshot Rollback Modal */}
@@ -292,6 +290,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({ status: propStatus }) => {
         availableAgents={agents.map((a) => a.name)}
         ingressPort={ingressPort}
         ingressHost={ingressHost}
+        allowStdio={allowStdio}
       />
     </div>
   )

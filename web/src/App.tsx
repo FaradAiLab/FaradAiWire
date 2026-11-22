@@ -3,9 +3,10 @@ import { Header } from './components/Header'
 import { Navigation, TabId } from './components/Navigation'
 import { HITLModal } from './components/HITLModal'
 import { GatewayStatus, ThemeMode } from './types'
-import { api } from './api'
+import { api, ADMIN_UNAUTHORIZED_EVENT } from './api'
 import { getAdminConsoleHost } from './constants'
 import type { GuardrailSubTab } from './components/SecurityGuardrailsTab'
+import { AuthGateModal } from './components/AuthGateModal'
 
 // Lazy-loaded domain tabs for code-splitting and faster initial page paint
 const OverviewTab = React.lazy(() =>
@@ -71,6 +72,8 @@ export const App: React.FC = () => {
   const [isReloading, setIsReloading] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [settingsInitialTab, setSettingsInitialTab] = useState<'keys' | 'filters' | 'operational'>('keys')
+  const [isAuthLocked, setIsAuthLocked] = useState(false)
+  const [authEpoch, setAuthEpoch] = useState(0)
 
   // Theme state with localStorage and OS preference sync
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
@@ -194,6 +197,30 @@ export const App: React.FC = () => {
   }, [])
 
   useEffect(() => {
+    const onUnauthorized = () => {
+      setIsAuthLocked(true)
+    }
+    window.addEventListener(ADMIN_UNAUTHORIZED_EVENT, onUnauthorized)
+    return () => window.removeEventListener(ADMIN_UNAUTHORIZED_EVENT, onUnauthorized)
+  }, [])
+
+  const handleAuthenticated = useCallback(() => {
+    setIsAuthLocked(false)
+    setAuthEpoch((prev) => prev + 1)
+    void fetchStatus()
+    void fetchCounts()
+  }, [fetchStatus, fetchCounts])
+
+  const handleLockSession = useCallback(async () => {
+    try {
+      await api.logoutAdminSession()
+    } catch {
+      // ignore
+    }
+    setIsAuthLocked(true)
+  }, [])
+
+  useEffect(() => {
     const controller = new AbortController()
     fetchStatus(controller.signal)
     fetchCounts(controller.signal)
@@ -226,7 +253,7 @@ export const App: React.FC = () => {
       case 'overview':
         return <OverviewTab status={status} onRefresh={fetchStatus} />
       case 'protocols':
-        return <ProtocolsTab />
+        return <ProtocolsTab status={status} />
       case 'agents':
         return <AgentsTab status={status} />
       case 'guardrails':
@@ -251,6 +278,7 @@ export const App: React.FC = () => {
         isReloading={isReloading}
         themeMode={themeMode}
         onThemeChange={handleThemeChange}
+        onLockSession={status?.admin_auth_required ? handleLockSession : undefined}
         onOpenSettings={() => {
           setSettingsInitialTab('keys')
           setIsSettingsOpen(true)
@@ -270,7 +298,7 @@ export const App: React.FC = () => {
         policyPackCount={policyPackCount}
       />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto p-6">
+      <main key={authEpoch} className="flex-1 max-w-7xl w-full mx-auto p-6">
         <Suspense
           fallback={
             <div className="glass-card p-12 text-center text-xs text-muted font-mono animate-pulse rounded-2xl flex flex-col items-center justify-center gap-3">
@@ -299,7 +327,9 @@ export const App: React.FC = () => {
         initialTab={settingsInitialTab}
       />
 
-      <HITLModal />
+      <HITLModal key={`hitl-${authEpoch}`} />
+
+      <AuthGateModal isOpen={isAuthLocked} onAuthenticated={handleAuthenticated} />
     </div>
   )
 }

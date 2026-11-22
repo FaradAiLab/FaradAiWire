@@ -276,3 +276,41 @@ func TestOptionsFromConfig_DefaultsSafeWhenOmitted(t *testing.T) {
 		t.Fatal("expected AllowedDomains not to disable BlockPrivateIPs for 127.0.0.1")
 	}
 }
+
+func TestSafeTransport_EnvOverridesConfigBlockPrivateIPsAndContainerMode(t *testing.T) {
+	// 1. FARADAI_WIRE_ALLOW_LOCAL_TARGETS=true overrides block_private_ips: true from config.yaml
+	t.Setenv("FARADAI_WIRE_ALLOW_LOCAL_TARGETS", "true")
+	opts := OptionsFromConfig(config.SSRFProtectionConfig{
+		Enabled:         boolPtr(true),
+		BlockPrivateIPs: boolPtr(true),
+	})
+	if opts.BlockPrivateIPs {
+		t.Fatal("expected FARADAI_WIRE_ALLOW_LOCAL_TARGETS=true to override config.yaml block_private_ips=true")
+	}
+	for _, priv := range []string{"172.17.0.2", "10.0.0.5", "192.168.1.20", "127.0.0.1"} {
+		if err := IsSafeIP(net.ParseIP(priv), opts); err != nil {
+			t.Fatalf("expected private/container IP %s allowed when relaxed, got %v", priv, err)
+		}
+	}
+	// Cloud metadata must still be unconditionally blocked
+	if err := IsSafeIP(net.ParseIP("169.254.169.254"), opts); !errors.Is(err, ErrMetadataIPBlocked) {
+		t.Fatalf("expected cloud metadata 169.254.169.254 blocked, got %v", err)
+	}
+
+	// 2. Containerized Security Gateway mode (FARADAI_WIRE_ALLOW_STDIO=false) defaults BlockPrivateIPs to false
+	t.Setenv("FARADAI_WIRE_ALLOW_LOCAL_TARGETS", "")
+	t.Setenv("FARADAI_WIRE_ALLOW_STDIO", "false")
+	containerOpts := DefaultSafeOptions()
+	if containerOpts.BlockPrivateIPs {
+		t.Fatal("expected DefaultSafeOptions().BlockPrivateIPs=false when FARADAI_WIRE_ALLOW_STDIO=false")
+	}
+
+	// 3. NewSafeStreamingHTTPClient preserves Timeout == 0 while still using SafeTransport
+	streamClient := NewSafeStreamingHTTPClient(containerOpts, 5*time.Second)
+	if streamClient.Timeout != 0 {
+		t.Fatalf("expected streaming client Timeout=0, got %v", streamClient.Timeout)
+	}
+	if _, err := streamClient.Get("http://169.254.169.254/latest/meta-data/"); err == nil {
+		t.Fatal("expected streaming SafeHTTPClient to block cloud metadata")
+	}
+}

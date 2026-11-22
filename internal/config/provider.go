@@ -43,6 +43,7 @@ type Provider interface {
 type Config struct {
 	mu                        sync.RWMutex      `yaml:"-" json:"-"`
 	RuntimeMode               string            `yaml:"runtime_mode" json:"runtime_mode"`   // "STANDALONE" or "MANAGED"
+	AllowStdio                *bool             `yaml:"allow_stdio,omitempty" json:"allow_stdio,omitempty"`
 	ListenHost                string            `yaml:"listen_host" json:"listen_host"`     // Interface host to bind HTTP listeners (default 127.0.0.1)
 	ListenPort                int               `yaml:"listen_port"`                        // Multi-agent gateway listen port
 	AgentsDir                 string            `yaml:"agents_dir"`                         // Root directory containing agent subdirectories
@@ -124,6 +125,7 @@ func (c *Config) Clone() *Config {
 
 	cp := &Config{
 		RuntimeMode:               c.RuntimeMode,
+		AllowStdio:                cloneBoolPtr(c.AllowStdio),
 		ListenHost:                c.ListenHost,
 		ListenPort:                c.ListenPort,
 		AgentsDir:                 c.AgentsDir,
@@ -183,6 +185,28 @@ func (c *Config) IsStandalone() bool {
 // IsManaged returns true if the gateway is operating in corporate managed mode.
 func (c *Config) IsManaged() bool {
 	return c.GetRuntimeMode() == RuntimeModeManaged
+}
+
+// IsStdioAllowed returns whether local stdio MCP subprocess execution and IDE preset onboarding are permitted.
+// FARADAI_WIRE_ALLOW_STDIO takes highest precedence over config.yaml, defaulting to true for native workstations.
+func (c *Config) IsStdioAllowed() bool {
+	if raw := strings.TrimSpace(os.Getenv("FARADAI_WIRE_ALLOW_STDIO")); raw != "" {
+		switch strings.ToLower(raw) {
+		case "false", "0", "no", "off":
+			return false
+		case "true", "1", "yes", "on":
+			return true
+		}
+	}
+	if c != nil {
+		c.mu.RLock()
+		allowPtr := c.AllowStdio
+		c.mu.RUnlock()
+		if allowPtr != nil {
+			return *allowPtr
+		}
+	}
+	return true
 }
 
 // GetListenHost resolves the host interface address to bind HTTP listeners to.
@@ -283,6 +307,7 @@ func (c *Config) GetAdminPort() int {
 }
 
 // GetAgentsDir resolves the active agents root directory.
+// Defaults to ~/.faradaiwire/agents (or FARADAI_WIRE_HOME/agents) unless explicitly configured.
 func (c *Config) GetAgentsDir() string {
 	if c != nil {
 		c.mu.RLock()
@@ -292,7 +317,7 @@ func (c *Config) GetAgentsDir() string {
 			return dir
 		}
 	}
-	return "/etc/faradaiwire/agents"
+	return filepath.Join(DefaultFaradAiWireDir(), "agents")
 }
 
 // GetProtocolsDir resolves the active protocols root directory.
@@ -338,6 +363,7 @@ func EnsureDefaultRuntimeConfig() (string, error) {
 		filepath.Join(wireDir, "keys"),
 		filepath.Join(wireDir, "protocols"),
 		filepath.Join(wireDir, "schemas"),
+		filepath.Join(wireDir, "logs"),
 	}
 	for _, dir := range subdirs {
 		if err := os.MkdirAll(dir, 0750); err != nil {
@@ -350,11 +376,12 @@ func EnsureDefaultRuntimeConfig() (string, error) {
 		agentsDir := strings.ReplaceAll(filepath.ToSlash(filepath.Join(wireDir, "agents")), `"`, `\"`)
 		protocolsDir := strings.ReplaceAll(filepath.ToSlash(filepath.Join(wireDir, "protocols")), `"`, `\"`)
 		schemasDir := strings.ReplaceAll(filepath.ToSlash(filepath.Join(wireDir, "schemas")), `"`, `\"`)
+		auditLogPath := strings.ReplaceAll(filepath.ToSlash(filepath.Join(wireDir, "logs", "faradai_audit.jsonl")), `"`, `\"`)
 		listenPortStr := strconv.Itoa(DefaultListenPort)
 		adminPortStr := strconv.Itoa(DefaultAdminPort)
 		defaultYAML := `# Farad Ai Core - Offline-First Standalone Configuration
 runtime_mode: STANDALONE
-listen_host: "127.0.0.1"
+# listen_host: "127.0.0.1" # Defaults to 127.0.0.1 (or FARADAI_WIRE_HOST / LISTEN_HOST)
 listen_port: ` + listenPortStr + `
 admin_port: ` + adminPortStr + `
 agents_dir: "` + agentsDir + `"
@@ -364,7 +391,7 @@ security:
   admin_auth_required: false
   ssrf_protection:
     enabled: true
-    block_private_ips: true
+    block_private_ips: false
   cors_allowed_origins:
     - "http://localhost:` + listenPortStr + `"
     - "http://127.0.0.1:` + listenPortStr + `"
@@ -425,6 +452,9 @@ filters:
       - name: "credit_card"
         regex: '\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'
         action: "mask"
+audit_log:
+  enabled: true
+  path: "` + auditLogPath + `"
 `
 		if err := os.WriteFile(configPath, []byte(defaultYAML), 0640); err != nil {
 			return "", fmt.Errorf("failed to write default runtime configuration: %w", err)
@@ -478,10 +508,32 @@ func (s SSRFProtectionConfig) IsEnabled() bool {
 	return true
 }
 
+func envBoolOverride(key string) (bool, bool) {
+	raw, ok := os.LookupEnv(key)
+	if !ok {
+		return false, false
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 // ShouldBlockPrivateIPs resolves private/loopback blocking with defaultVal when omitted.
+// FARADAI_WIRE_ALLOW_LOCAL_TARGETS explicitly overrides configured YAML values.
 func (s SSRFProtectionConfig) ShouldBlockPrivateIPs(defaultVal bool) bool {
+	if allowLocal, ok := envBoolOverride("FARADAI_WIRE_ALLOW_LOCAL_TARGETS"); ok {
+		return !allowLocal
+	}
 	if s.BlockPrivateIPs != nil {
 		return *s.BlockPrivateIPs
+	}
+	if allowStdio, ok := envBoolOverride("FARADAI_WIRE_ALLOW_STDIO"); ok && !allowStdio {
+		return false
 	}
 	return defaultVal
 }
@@ -576,6 +628,30 @@ type DiscoveryConfig struct {
 	CustomURL string `yaml:"custom_url" json:"custom_url"`
 }
 
+// GetEffectiveOllamaURL resolves the Ollama endpoint with environment precedence:
+// FARADAI_WIRE_GUARD_OLLAMA_URL > OllamaURL > http://127.0.0.1:11434.
+func (d DiscoveryConfig) GetEffectiveOllamaURL() string {
+	if v := strings.TrimSpace(os.Getenv("FARADAI_WIRE_GUARD_OLLAMA_URL")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	if v := strings.TrimSpace(d.OllamaURL); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "http://127.0.0.1:11434"
+}
+
+// GetEffectiveDockerURL resolves the Docker Prompt-Guard endpoint with environment precedence:
+// FARADAI_WIRE_GUARD_DOCKER_URL > DockerURL > http://127.0.0.1:8088.
+func (d DiscoveryConfig) GetEffectiveDockerURL() string {
+	if v := strings.TrimSpace(os.Getenv("FARADAI_WIRE_GUARD_DOCKER_URL")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	if v := strings.TrimSpace(d.DockerURL); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "http://127.0.0.1:8088"
+}
+
 // GuardConfig configures the extensible AI Guard security engine (GUARD-004).
 type GuardConfig struct {
 	Enabled          bool            `yaml:"enabled" json:"enabled"`
@@ -652,20 +728,19 @@ func (c *Config) IsTelemetryEnabled() bool {
 }
 
 // GetTelemetryDBPath resolves the DuckDB database file path.
-// Defaults to ~/.faradaiwire/wire.duckdb per Open Core spec and ADR 0043.
-// When running in automated test suites, it defaults to a test-isolated temporary path.
+// Defaults to ~/.faradaiwire/wire.duckdb (or FARADAI_WIRE_HOME/wire.duckdb) per Open Core spec, ADR-0043, and ADR-0057.
+// When running in automated test suites without an explicit FARADAI_WIRE_HOME override, it defaults to an isolated temporary path.
 func (c *Config) GetTelemetryDBPath() string {
-	if strings.TrimSpace(c.Telemetry.DBPath) != "" {
+	if c != nil && strings.TrimSpace(c.Telemetry.DBPath) != "" {
 		return c.Telemetry.DBPath
+	}
+	if strings.TrimSpace(os.Getenv("FARADAI_WIRE_HOME")) != "" {
+		return filepath.Join(DefaultFaradAiWireDir(), "wire.duckdb")
 	}
 	if flag.Lookup("test.v") != nil {
 		return filepath.Join(os.TempDir(), fmt.Sprintf("faradai_test_telemetry_%d_%d.duckdb", os.Getpid(), time.Now().UnixNano()))
 	}
-	home, err := os.UserHomeDir()
-	if err == nil && home != "" {
-		return filepath.Join(home, ".faradaiwire", "wire.duckdb")
-	}
-	return "./wire.duckdb"
+	return filepath.Join(DefaultFaradAiWireDir(), "wire.duckdb")
 }
 
 // GetDBPath returns the DuckDB database file path (alias for GetTelemetryDBPath).

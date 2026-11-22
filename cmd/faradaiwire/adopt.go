@@ -259,6 +259,11 @@ func ensureProfileAPIKey(ks *auth.FileKeyStore, profileName string) (created boo
 	return true, rec.Prefix, nil
 }
 
+func rejectAdoptStdioDisabled(out io.Writer) int {
+	fmt.Fprintln(out, "Error: 'faradaiwire adopt' is disabled when allow_stdio=false (Containerized Security Gateway mode). Run 'faradaiwire adopt' only on local Host Native Daemon workstations.")
+	return 1
+}
+
 func executeAdoptWithAdapters(opts adoptOptions, in io.Reader, out io.Writer, adapters []mcpconfig.ClientAdapter) int {
 	if in == nil {
 		in = os.Stdin
@@ -269,6 +274,9 @@ func executeAdoptWithAdapters(opts adoptOptions, in io.Reader, out io.Writer, ad
 	if opts.probeTimeout < 0 {
 		fmt.Fprintf(out, "Error: --probe-timeout cannot be negative (%v)\n", opts.probeTimeout)
 		return 1
+	}
+	if !opts.rollback && !(&config.Config{}).IsStdioAllowed() {
+		return rejectAdoptStdioDisabled(out)
 	}
 
 	defaultDataDir := config.DefaultFaradAiWireDir()
@@ -353,6 +361,9 @@ func executeAdoptWithAdapters(opts adoptOptions, in io.Reader, out io.Writer, ad
 	}
 	if cfg == nil {
 		cfg = &config.Config{}
+	}
+	if !opts.rollback && !cfg.IsStdioAllowed() {
+		return rejectAdoptStdioDisabled(out)
 	}
 
 	usingDefaultAgentsDir := filepath.Clean(opts.agentsDir) == filepath.Clean(defaultAgentsDir)

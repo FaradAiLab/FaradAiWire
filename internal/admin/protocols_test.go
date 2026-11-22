@@ -19,6 +19,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/mcpprobe"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
+	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 )
 
 func newTestServer(t *testing.T, handler http.Handler) *httptest.Server {
@@ -1337,5 +1338,101 @@ func TestAdminServer_ProtocolProbe_RejectsDestinationMismatchSecretExfiltration(
 
 	if receivedAuth == "Bearer super-secret-token-xyz" || receivedCustom == "header-secret-xyz" {
 		t.Fatalf("CRITICAL LEAK: stored protocol credentials sent to mismatched probe URL (auth=%q custom=%q)", receivedAuth, receivedCustom)
+	}
+}
+
+func TestAdminServer_AllowStdioFalse_FailClosedAcrossAllPaths(t *testing.T) {
+	boolPtr := func(v bool) *bool { return &v }
+	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, func(d *AdminDependencies) {
+		d.Config.AllowStdio = boolPtr(false)
+	})
+	handler := server.Handler()
+
+	// 1. GET /admin/protocols/presets returns empty array when allow_stdio is false
+	presetsReq := httptest.NewRequest(http.MethodGet, "/admin/protocols/presets", nil)
+	presetsRec := httptest.NewRecorder()
+	handler.ServeHTTP(presetsRec, presetsReq)
+	if presetsRec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/protocols/presets = %d, want 200", presetsRec.Code)
+	}
+	var presetsBody struct {
+		Presets []protocol.PresetMetadata `json:"presets"`
+	}
+	if err := json.Unmarshal(presetsRec.Body.Bytes(), &presetsBody); err != nil {
+		t.Fatalf("unmarshal presets: %v", err)
+	}
+	if len(presetsBody.Presets) != 0 {
+		t.Fatalf("expected 0 presets when allow_stdio=false, got %d", len(presetsBody.Presets))
+	}
+	if len(protocol.GetPresets()) == 0 {
+		t.Fatalf("expected internal protocol.GetPresets() to remain non-empty for mcpconfig callers")
+	}
+
+	// 2. Protocol create, update, and probe reject explicit and implicit stdio
+	protoPayloads := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create explicit stdio", method: http.MethodPost, path: "/admin/protocols", body: `{"id":"bad-stdio","name":"Bad","type":"stdio","command":"sh"}`},
+		{name: "create implicit empty type non-http", method: http.MethodPost, path: "/admin/protocols", body: `{"id":"bad-implicit","name":"Bad","url_or_command":"npx -y foo"}`},
+		{name: "probe explicit stdio", method: http.MethodPost, path: "/admin/protocols/probe", body: `{"type":"stdio","command":"sh"}`},
+		{name: "probe implicit command", method: http.MethodPost, path: "/admin/protocols/probe", body: `{"command":"sh"}`},
+	}
+	for _, tc := range protoPayloads {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "STDIO_DISABLED") {
+				t.Fatalf("%s: got %d %s, want 400 STDIO_DISABLED", tc.name, rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	// Pre-seed a remote protocol and try PUT updating it to stdio
+	seedReq := httptest.NewRequest(http.MethodPost, "/admin/protocols", strings.NewReader(`{"id":"remote-ok","name":"Remote","type":"http","url_or_command":"https://mcp.example.com/mcp"}`))
+	seedReq.Header.Set("Content-Type", "application/json")
+	seedRec := httptest.NewRecorder()
+	handler.ServeHTTP(seedRec, seedReq)
+	if seedRec.Code != http.StatusCreated {
+		t.Fatalf("seed remote protocol = %d %s", seedRec.Code, seedRec.Body.String())
+	}
+	updReq := httptest.NewRequest(http.MethodPut, "/admin/protocols/remote-ok", strings.NewReader(`{"name":"Remote","type":"stdio","command":"sh"}`))
+	updReq.Header.Set("Content-Type", "application/json")
+	updRec := httptest.NewRecorder()
+	handler.ServeHTTP(updRec, updReq)
+	if updRec.Code != http.StatusBadRequest || !strings.Contains(updRec.Body.String(), "STDIO_DISABLED") {
+		t.Fatalf("PUT stdio protocol = %d %s, want 400 STDIO_DISABLED", updRec.Code, updRec.Body.String())
+	}
+
+	// 3. Agent creation and update reject inline stdio protocols (explicit and empty type)
+	agentBodies := []string{
+		`{"agent_name":"agent-a","protocols":[{"protocol_id":"p1","protocol_name":"p1","type":"stdio","command":"sh"}]}`,
+		`{"agent_name":"agent-b","protocols":[{"protocol_id":"p2","protocol_name":"p2","command":"sh"}]}`,
+		`{"agent_name":"agent-c","protocols":[{"protocol_id":"p3","protocol_name":"p3","url_or_command":"npx foo"}]}`,
+	}
+	for _, body := range agentBodies {
+		req := httptest.NewRequest(http.MethodPost, "/admin/agents", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "STDIO_DISABLED") {
+			t.Fatalf("POST /admin/agents(%s) = %d %s, want 400 STDIO_DISABLED", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 4. Mounted legacy stdio protocol on disk must fail probeSingleProtocol without executing mcpprobe.ProbeStdio
+	out := server.probeSingleProtocol(t.Context(), agent.ProtocolConfig{
+		ID:           "legacy-stdio",
+		Name:         "legacy-stdio",
+		Type:         "stdio",
+		Command:      "sh",
+		URLOrCommand: "sh",
+	}, transport.DefaultSafeOptions(), time.Second)
+	if out.err == nil || !strings.Contains(strings.ToLower(out.err.Error()), "stdio") {
+		t.Fatalf("expected probeSingleProtocol to fail closed on stdio when allow_stdio=false, got %+v", out)
 	}
 }

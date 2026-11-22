@@ -503,3 +503,25 @@ func TestUpstreamSession_CloseDoesNotDeadlockOnBlockedStdin(t *testing.T) {
 		t.Fatal("SendNotification did not unblock after Close closed stdin")
 	}
 }
+
+func TestCompositeDialer_StdioDisabledReturnsNonNilDegradedSession(t *testing.T) {
+	cd := NewCompositeDialer(nil, nil)
+	cd.SetStdioAllowed(false)
+
+	sess := cd.Dial(context.Background(), agent.ProtocolConfig{
+		ID:           "legacy-stdio",
+		Name:         "legacy-stdio",
+		Type:         "stdio",
+		Command:      "sleep",
+		URLOrCommand: "sleep 60",
+	}, nil, "client-1", nil)
+	if sess == nil {
+		t.Fatal("expected non-nil UpstreamSession when stdio is disabled")
+	}
+	if sess.GetStatus() != "DEGRADED" {
+		t.Fatalf("expected DEGRADED status, got %q", sess.GetStatus())
+	}
+	if sess.cmd != nil {
+		t.Fatal("expected no subprocess spawned when stdio is disabled")
+	}
+}

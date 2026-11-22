@@ -3,7 +3,8 @@
 
 # Gateway Ingress Configuration
 listen_port: 19410
-agents_dir: "./agents"          # Directory containing per-agent configurations (or /etc/faradaiwire/agents in prod)
+allow_stdio: true               # Set false (or FARADAI_WIRE_ALLOW_STDIO=false) in Docker / Containerized Security Gateway mode
+# agents_dir: "~/.faradaiwire/agents"   # Defaults to $FARADAI_WIRE_HOME/agents (~/.faradaiwire/agents locally, /data/agents in Docker)
 
 # Security and Access Guardrails
 security:
@@ -16,7 +17,7 @@ security:
     - "10.0.0.0/8"
   ssrf_protection:
     enabled: true
-    block_private_ips: true
+    block_private_ips: false        # Allow local/Docker bridge MCPs; cloud metadata (169.254.169.254) stays blocked
     allowed_domains: []
 
 # User Identity and Context Provenance
@@ -39,7 +40,7 @@ filters:
   # Runtime JSON Schema validation for tool parameters & drift detection
   schema_validation:
     enabled: true
-    schemas_dir: "./schemas/"
+    # schemas_dir defaults to $FARADAI_WIRE_HOME/schemas
     dynamic_capture: true       # Intercept tools/list responses to cache schemas dynamically
     baseline_pinning: true      # Pin first-seen schemas and alert on drift/poisoning
 
@@ -99,7 +100,7 @@ filters:
 # Immutable log file for audit events
 audit_log:
   enabled: true
-  path: "./logs/faradai_audit.jsonl"
+  path: "~/.faradaiwire/logs/faradai_audit.jsonl"
 
 # Hot-reload YAML configuration dynamically using fsnotify
 hot_reload: true

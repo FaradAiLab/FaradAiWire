@@ -62,9 +62,17 @@ export interface ProbeProtocolResult {
   transport_mode?: string
 }
 
-function toProbeError(data: unknown, fallbackMsg: string): ProbeError {
+export const ADMIN_UNAUTHORIZED_EVENT = 'faradaiwire:unauthorized'
+
+function dispatchUnauthorizedIfNeeded(status: number): void {
+  if (status === 401 && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(ADMIN_UNAUTHORIZED_EVENT))
+  }
+}
+
+function toProbeError(data: unknown, fallbackMsg: string, httpStatus?: number): ProbeError {
   if (!data || typeof data !== 'object') {
-    return new ProbeError(fallbackMsg)
+    return new ProbeError(fallbackMsg, undefined, httpStatus)
   }
   const obj = data as Record<string, unknown>
   let errMsg = fallbackMsg
@@ -74,21 +82,29 @@ function toProbeError(data: unknown, fallbackMsg: string): ProbeError {
     errMsg = typeof obj.error === 'string' ? obj.error : JSON.stringify(obj.error)
   }
   const errorCode = typeof obj.error === 'string' ? obj.error : undefined
-  const statusCode = typeof obj.status_code === 'number' ? obj.status_code : undefined
+  const statusCode = typeof obj.status_code === 'number' ? obj.status_code : httpStatus
   const remediation = typeof obj.remediation === 'string' ? obj.remediation : undefined
   return new ProbeError(errMsg, errorCode, statusCode, remediation)
 }
 
-async function request<T>(url: string, options?: RequestInit): Promise<T> {
+interface RequestOptions extends RequestInit {
+  suppressUnauthorizedEvent?: boolean
+}
+
+async function request<T>(url: string, options?: RequestOptions): Promise<T> {
+  const { suppressUnauthorizedEvent, ...fetchOptions } = options || {}
   const res = await fetch(url, {
-    ...options,
+    ...fetchOptions,
     headers: {
       'Content-Type': 'application/json',
-      ...options?.headers,
+      ...fetchOptions?.headers,
     },
   })
 
   if (!res.ok) {
+    if (!suppressUnauthorizedEvent) {
+      dispatchUnauthorizedIfNeeded(res.status)
+    }
     const fallback = `Request failed: ${res.status} ${res.statusText}`
     let parsed: unknown = null
     try {
@@ -96,13 +112,26 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     } catch {
       // ignore
     }
-    throw toProbeError(parsed, fallback)
+    throw toProbeError(parsed, fallback, res.status)
   }
 
   return res.json()
 }
 
 export const api = {
+  // Admin Session Authentication (Non-Loopback / Containerized Gateway)
+  loginAdminSession: (token: string) =>
+    request<{ status: string; authenticated: boolean; role?: string }>('/admin/auth/session', {
+      method: 'POST',
+      body: JSON.stringify({ api_key: token, token }),
+      suppressUnauthorizedEvent: true,
+    }),
+  logoutAdminSession: () =>
+    request<{ status: string; authenticated: boolean }>('/admin/auth/logout', {
+      method: 'POST',
+      suppressUnauthorizedEvent: true,
+    }),
+
   // Status & Telemetry
   getStatus: (signal?: AbortSignal) => request<GatewayStatus>('/admin/status', { signal }),
   getHostResources: (signal?: AbortSignal) => request<HostResources>('/admin/host/resources', { signal }),
@@ -199,6 +228,7 @@ export const api = {
     })
 
     if (!res.ok) {
+      dispatchUnauthorizedIfNeeded(res.status)
       const fallback = `Request failed: ${res.status} ${res.statusText}`
       let parsed: unknown = null
       try {
@@ -206,7 +236,7 @@ export const api = {
       } catch {
         // ignore
       }
-      throw toProbeError(parsed, fallback)
+      throw toProbeError(parsed, fallback, res.status)
     }
 
     const contentType = res.headers.get('content-type') || ''

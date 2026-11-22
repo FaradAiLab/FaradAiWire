@@ -26,19 +26,21 @@ type YAMLConfigProvider struct {
 // If filePath is empty, it attempts to discover ./config.yaml, then ~/.faradaiwire/config.yaml,
 // or auto-initializes the default standalone configuration.
 func NewYAMLConfigProvider(filePath string) *YAMLConfigProvider {
+	defaultPath := filepath.Join(DefaultFaradAiWireDir(), "config.yaml")
 	if filePath == "" {
 		if _, err := os.Stat("config.yaml"); err == nil {
 			filePath = "config.yaml"
+		} else if _, err := os.Stat(defaultPath); err == nil {
+			filePath = defaultPath
+		} else if createdPath, err := EnsureDefaultRuntimeConfig(); err == nil {
+			filePath = createdPath
 		} else {
-			defaultPath := filepath.Join(DefaultFaradAiWireDir(), "config.yaml")
-			if _, err := os.Stat(defaultPath); err == nil {
-				filePath = defaultPath
-			} else {
-				if createdPath, err := EnsureDefaultRuntimeConfig(); err == nil {
-					filePath = createdPath
-				} else {
-					filePath = "config.yaml"
-				}
+			filePath = "config.yaml"
+		}
+	} else if filepath.Clean(filePath) == filepath.Clean(defaultPath) {
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			if createdPath, cErr := EnsureDefaultRuntimeConfig(); cErr == nil {
+				filePath = createdPath
 			}
 		}
 	}

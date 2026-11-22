@@ -127,12 +127,16 @@ func (a *AdminServer) handleCreateAgent(w http.ResponseWriter, r *http.Request) 
 	}
 
 	routingMode := cmp.Or(strings.ToLower(strings.TrimSpace(payload.RoutingMode)), "aggregated")
+	enrichedProtocols := a.enrichAgentProtocols(payload.Protocols, payload.ProtocolIDs)
+	if !a.isStdioAllowed() && rejectStdioAgentProtocols(w, enrichedProtocols) {
+		return
+	}
 	cfg := &agent.RouteConfig{
 		AgentID:            agentName,
 		AgentName:          agentName,
 		Description:        payload.Description,
 		RoutingMode:        routingMode,
-		Protocols:          a.enrichAgentProtocols(payload.Protocols, payload.ProtocolIDs),
+		Protocols:          enrichedProtocols,
 		EnabledTools:       payload.EnabledTools,
 		ToolOverrides:      payload.ToolOverrides,
 		ToolGovernance:     payload.ToolGovernance,
@@ -189,6 +193,9 @@ func (a *AdminServer) handleUpdateAgent(w http.ResponseWriter, r *http.Request) 
 	}
 
 	nextProtocols, protocolsUpdated := a.resolveNextAgentProtocols(payload, existingCfg.Protocols)
+	if protocolsUpdated && !a.isStdioAllowed() && rejectStdioAgentProtocols(w, nextProtocols) {
+		return
+	}
 
 	var manifest []agent.ToolMetadata
 	if protocolsUpdated {
@@ -279,4 +286,18 @@ func validateAgentPayload(w http.ResponseWriter, payload AgentPayload) bool {
 		return false
 	}
 	return true
+}
+
+func isAgentProtocolStdio(p agent.ProtocolConfig) bool {
+	return p.IsStdio() || (strings.TrimSpace(p.Type) == "" && strings.TrimSpace(p.Command) != "")
+}
+
+func rejectStdioAgentProtocols(w http.ResponseWriter, protocols []agent.ProtocolConfig) bool {
+	for _, p := range protocols {
+		if isAgentProtocolStdio(p) {
+			writeError(w, http.StatusBadRequest, "STDIO_DISABLED", stdioDisabledMsg)
+			return true
+		}
+	}
+	return false
 }

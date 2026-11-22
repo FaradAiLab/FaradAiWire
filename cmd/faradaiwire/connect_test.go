@@ -306,6 +306,27 @@ func TestConnect_HostNormalizationAndLoopbackChecks(t *testing.T) {
 	}
 }
 
+func TestConnect_TrustedInternalContainerHostsAllowed(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"127.0.0.1", true},
+		{"localhost", true},
+		{"faradaiwire", true},
+		{"host.docker.internal", true},
+		{"172.17.0.2", true},
+		{"10.0.0.5", true},
+		{"192.168.1.25", true},
+		{"gateway.example.com", false},
+	}
+	for _, tc := range tests {
+		if got := isTrustedHTTPTarget(tc.host); got != tc.want {
+			t.Errorf("isTrustedHTTPTarget(%q) = %v, want %v", tc.host, got, tc.want)
+		}
+	}
+}
+
 func TestResolveActiveToken_DeterministicPrecedence(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)

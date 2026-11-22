@@ -199,6 +199,13 @@ func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return executeDoctor(*cfgPath, stdout)
 
+	case "token":
+		if len(args) > 1 && isHelpArg(args[1]) {
+			printTokenUsage(stdout)
+			return 0
+		}
+		return executeToken(args[1:], stdout, stderr)
+
 	case "audit":
 		target, jsonOutput, showHelp, err := parseAuditArgs(args[1:])
 		if showHelp {
@@ -409,12 +416,12 @@ func runGatewayDaemon(opts runOptions) int {
 		slog.Bool("zero_egress", cfg.IsStandalone()),
 	)
 
-	// Acquire single-instance process lock to prevent concurrent daemon collisions
-	lockDir := filepath.Dir(cfg.ConfigPath)
-	if lockDir == "" {
-		lockDir = "."
+	// Acquire single-instance process lock inside the unified runtime data root
+	// so read-only config mounts (:ro) succeed and shared data volumes are guarded cleanly.
+	lockPath := resolveLockFilePath(cfg)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0750); err != nil {
+		slog.Warn("Failed to ensure lock directory", slog.String("dir", filepath.Dir(lockPath)), slog.String("error", err.Error()))
 	}
-	lockPath := filepath.Join(lockDir, ".faradaiwire.lock")
 	guard := processguard.New(lockPath)
 	if err := guard.Acquire(); err != nil {
 		slog.Error("Startup aborted: single-instance lock acquisition failed", slog.String("error", err.Error()))
@@ -552,4 +559,19 @@ func runGatewayDaemon(opts runOptions) int {
 
 	slog.Info("FaradAiWire stopped cleanly.")
 	return 0
+}
+
+// resolveLockFilePath resolves the single-instance lock file strictly inside the mutable data root
+// so read-only config mounts (:ro) never break startup and shared /data volumes remain guarded.
+func resolveLockFilePath(cfg *config.Config) string {
+	dataDir := strings.TrimSpace(config.DefaultFaradAiWireDir())
+	if dataDir == "" && cfg != nil {
+		if dbPath := strings.TrimSpace(cfg.GetTelemetryDBPath()); dbPath != "" && dbPath != ":memory:" {
+			dataDir = filepath.Dir(dbPath)
+		}
+	}
+	if dataDir == "" {
+		dataDir = "."
+	}
+	return filepath.Join(dataDir, ".faradaiwire.lock")
 }

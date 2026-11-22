@@ -100,11 +100,22 @@ type SafeTransportOptions struct {
 }
 
 // DefaultSafeOptions returns production-grade default options with all private/metadata ranges blocked.
-// If FARADAI_WIRE_ALLOW_LOCAL_TARGETS=true or FARADAI_WIRE_ENV=development is set, private/loopback blocking is relaxed for local development.
+// If FARADAI_WIRE_ALLOW_LOCAL_TARGETS=true, FARADAI_WIRE_ENV=development, or FARADAI_WIRE_ALLOW_STDIO=false
+// (Containerized Security Gateway mode), private/loopback blocking is relaxed for internal/container MCP targets
+// while cloud metadata and link-local ranges remain unconditionally blocked.
 func DefaultSafeOptions() SafeTransportOptions {
 	blockPrivate := true
-	if strings.ToLower(os.Getenv("FARADAI_WIRE_ALLOW_LOCAL_TARGETS")) == "true" || strings.ToLower(os.Getenv("FARADAI_WIRE_ENV")) == "development" {
+	allowLocal := strings.ToLower(strings.TrimSpace(os.Getenv("FARADAI_WIRE_ALLOW_LOCAL_TARGETS")))
+	switch allowLocal {
+	case "true", "1", "yes":
 		blockPrivate = false
+	case "false", "0", "no":
+		blockPrivate = true
+	default:
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("FARADAI_WIRE_ENV")), "development") ||
+			strings.EqualFold(strings.TrimSpace(os.Getenv("FARADAI_WIRE_ALLOW_STDIO")), "false") {
+			blockPrivate = false
+		}
 	}
 	return SafeTransportOptions{
 		Enabled:         true,
@@ -326,18 +337,17 @@ func NewSafeTransport(opts SafeTransportOptions) *http.Transport {
 	}
 }
 
-// NewSafeHTTPClient creates an http.Client equipped with SafeTransport and redirect security validation.
-func NewSafeHTTPClient(opts SafeTransportOptions, timeout time.Duration) *http.Client {
-	if timeout <= 0 {
-		timeout = 10 * time.Second
+func newSafeHTTPClientWithTimeout(opts SafeTransportOptions, dialTimeout, requestTimeout time.Duration) *http.Client {
+	if dialTimeout <= 0 {
+		dialTimeout = 10 * time.Second
 	}
-	opts.DialTimeout = timeout
+	opts.DialTimeout = dialTimeout
 
 	transport := NewSafeTransport(opts)
 
 	return &http.Client{
 		Transport: transport,
-		Timeout:   timeout,
+		Timeout:   requestTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return errors.New("stopped after 10 redirects")
@@ -359,6 +369,20 @@ func NewSafeHTTPClient(opts SafeTransportOptions, timeout time.Duration) *http.C
 			return nil
 		},
 	}
+}
+
+// NewSafeHTTPClient creates an http.Client equipped with SafeTransport and redirect security validation.
+func NewSafeHTTPClient(opts SafeTransportOptions, timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	return newSafeHTTPClientWithTimeout(opts, timeout, timeout)
+}
+
+// NewSafeStreamingHTTPClient creates an SSRF-safe http.Client suited for long-lived SSE/HTTP streams
+// (Client.Timeout == 0 while still enforcing bounded dial timeouts and redirect validation).
+func NewSafeStreamingHTTPClient(opts SafeTransportOptions, dialTimeout time.Duration) *http.Client {
+	return newSafeHTTPClientWithTimeout(opts, dialTimeout, 0)
 }
 
 // NewSafeHTTPClientFromConfig creates an http.Client from application configuration.
