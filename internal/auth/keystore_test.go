@@ -570,3 +570,18 @@ func TestMaskTokenPrefix_NeverExposesFullSecret(t *testing.T) {
 		t.Fatalf("unexpected masked prefix format: %q", masked)
 	}
 }
+
+func TestTokenRecoveryCommand(t *testing.T) {
+	if got := TokenRecoveryCommand(false); got != "faradaiwire token" {
+		t.Fatalf("TokenRecoveryCommand(false) = %q, want %q", got, "faradaiwire token")
+	}
+	if got := TokenRecoveryCommand(true); got != "docker exec -it <container_name> faradaiwire token" {
+		t.Fatalf("TokenRecoveryCommand(true) = %q, want %q", got, "docker exec -it <container_name> faradaiwire token")
+	}
+	if got := TokenRecoveryPortHint(0); !strings.Contains(got, ":19415") || !strings.Contains(got, "--port <host_port>") {
+		t.Fatalf("TokenRecoveryPortHint(0) = %q", got)
+	}
+	if got := TokenRecoveryPortHint(19425); !strings.Contains(got, ":19425") {
+		t.Fatalf("TokenRecoveryPortHint(19425) = %q", got)
+	}
+}

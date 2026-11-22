@@ -8,6 +8,9 @@ export interface AuthGateModalProps {
   onAuthenticated: () => void
 }
 
+const DOCKER_TOKEN_RECOVERY_CMD = 'docker exec -it <container_name> faradaiwire token'
+const LOCAL_TOKEN_RECOVERY_CMD = 'faradaiwire token'
+
 export const AuthGateModal: React.FC<AuthGateModalProps> = ({ isOpen, onAuthenticated }) => {
   const [token, setToken] = useState('')
   const [showToken, setShowToken] = useState(false)
@@ -42,6 +45,8 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({ isOpen, onAuthenti
     setCopiedCmd(kind)
     setTimeout(() => setCopiedCmd(null), 1800)
   }, [])
+
+  const browserPort = typeof window !== 'undefined' ? window.location.port : ''
 
   if (!isOpen) return null
 
@@ -120,31 +125,37 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({ isOpen, onAuthenti
         <div className="p-3.5 rounded-xl bg-canvas border border-subtle space-y-2.5 text-[11px]">
           <div className="flex items-center gap-1.5 font-semibold text-primary font-mono">
             <Terminal className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Lost your token? Recover without restarting:</span>
+            <span>Lost your token? Recover API Key &amp; Magic Link:</span>
           </div>
 
           <div className="space-y-1.5">
             <div className="text-[10px] text-muted font-mono uppercase tracking-wider">Docker / Container</div>
             <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[#0F172A] border border-[#1E293B] font-mono text-cyan-300">
-              <code className="truncate">docker exec -it faradaiwire faradaiwire token</code>
+              <code className="truncate">{DOCKER_TOKEN_RECOVERY_CMD}</code>
               <button
                 type="button"
-                onClick={() => handleCopyCmd('docker exec -it faradaiwire faradaiwire token', 'docker')}
+                onClick={() => handleCopyCmd(DOCKER_TOKEN_RECOVERY_CMD, 'docker')}
                 className="p-1 text-slate-400 hover:text-white shrink-0"
                 title="Copy Docker token recovery command"
               >
                 {copiedCmd === 'docker' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
               </button>
             </div>
+            {browserPort && browserPort !== '19415' && (
+              <p className="text-[10px] text-muted leading-relaxed">
+                Mapped to host port <code className="text-primary font-mono">{browserPort}</code>? Add{' '}
+                <code className="text-primary font-mono">--port {browserPort}</code> for a matching Magic Link.
+              </p>
+            )}
           </div>
 
           <div className="space-y-1.5">
             <div className="text-[10px] text-muted font-mono uppercase tracking-wider">Local Host / CLI</div>
             <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[#0F172A] border border-[#1E293B] font-mono text-cyan-300">
-              <code className="truncate">faradaiwire token</code>
+              <code className="truncate">{LOCAL_TOKEN_RECOVERY_CMD}</code>
               <button
                 type="button"
-                onClick={() => handleCopyCmd('faradaiwire token', 'local')}
+                onClick={() => handleCopyCmd(LOCAL_TOKEN_RECOVERY_CMD, 'local')}
                 className="p-1 text-slate-400 hover:text-white shrink-0"
                 title="Copy CLI token recovery command"
               >

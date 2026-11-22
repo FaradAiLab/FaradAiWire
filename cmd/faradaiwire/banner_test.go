@@ -116,8 +116,11 @@ func TestPrintStartupBanner_ZeroBleedTokenMasking(t *testing.T) {
 	if !strings.Contains(out, auth.MaskTokenPrefix(rawKey)) {
 		t.Errorf("expected masked token prefix %q in banner:\n%s", auth.MaskTokenPrefix(rawKey), out)
 	}
-	if !strings.Contains(out, "faradaiwire token") {
-		t.Errorf("expected recovery CLI hint in banner:\n%s", out)
+	if !strings.Contains(out, "docker exec -it <container_name> faradaiwire token") {
+		t.Errorf("expected containerized recovery CLI hint in banner:\n%s", out)
+	}
+	if !strings.Contains(out, "--port <host_port>") {
+		t.Errorf("expected containerized port hint in banner:\n%s", out)
 	}
 }
 
@@ -160,5 +163,30 @@ func TestCLI_TokenCommand_RecoversBootstrapAdminKeyAndMagicLink(t *testing.T) {
 	}
 	if payload["api_key"] != rawKey || !strings.Contains(payload["magic_link"], "?token="+rawKey) {
 		t.Fatalf("unexpected json token payload: %+v", payload)
+	}
+
+	// Verify containerized port hint and --port override
+	t.Setenv("FARADAI_WIRE_ALLOW_STDIO", "false")
+	stdout.Reset()
+	stderr.Reset()
+	code = runCLI([]string{"token"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("faradaiwire token (containerized) exited %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "--port <host_port>") {
+		t.Fatalf("expected containerized port hint in token output:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runCLI([]string{"token", "--port", "19425"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("faradaiwire token --port 19425 exited %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), ":19425/admin/dashboard?token="+rawKey) {
+		t.Fatalf("expected overridden port in Magic Link:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "--port <host_port>") {
+		t.Fatalf("did not expect port hint when --port override is provided:\n%s", stdout.String())
 	}
 }

@@ -50,14 +50,16 @@ func printStartupBanner(cfg *config.Config, out io.Writer) {
 	fmt.Fprintf(out, "├── Ingress Proxy   : http://%s (%s)\n", net.JoinHostPort(cfg.GetListenHost(), strconv.Itoa(cfg.GetListenPort())), transportDesc)
 	fmt.Fprintf(out, "├── Admin Console   : %s://%s\n", adminScheme, net.JoinHostPort(cfg.GetAdminHost(), strconv.Itoa(cfg.GetAdminPort())))
 	if adminKeyPrefix := lookupBannerAdminKeyPrefix(cfg); adminKeyPrefix != "" || (cfg != nil && !cfg.IsStdioAllowed()) {
-		recoverCmd := "faradaiwire token"
-		if cfg != nil && !cfg.IsStdioAllowed() {
-			recoverCmd = "docker exec -it faradaiwire faradaiwire token"
+		containerized := cfg != nil && !cfg.IsStdioAllowed()
+		recoverCmd := auth.TokenRecoveryCommand(containerized)
+		portNote := ""
+		if containerized {
+			portNote = " (" + auth.TokenRecoveryPortHint(cfg.GetAdminPort()) + ")"
 		}
 		if adminKeyPrefix != "" {
-			fmt.Fprintf(out, "├── Bootstrap Key   : %s (recover full key & Magic Link: %s)\n", adminKeyPrefix, recoverCmd)
+			fmt.Fprintf(out, "├── Bootstrap Key   : %s (recover full key & Magic Link: %s)%s\n", adminKeyPrefix, recoverCmd, portNote)
 		} else {
-			fmt.Fprintf(out, "├── Bootstrap Key   : recover full key & Magic Link via '%s'\n", recoverCmd)
+			fmt.Fprintf(out, "├── Bootstrap Key   : recover full key & Magic Link via '%s'%s\n", recoverCmd, portNote)
 		}
 	}
 	fmt.Fprintln(out, "└── Security Engine :")

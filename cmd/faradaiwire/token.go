@@ -96,7 +96,11 @@ func executeToken(args []string, out, errOut io.Writer) int {
 	fmt.Fprintf(out, "  Key ID      : %s\n", adminMeta.ID)
 	fmt.Fprintf(out, "  Role / Scope: %s (%s)\n", adminMeta.Role, adminMeta.AgentName)
 	fmt.Fprintf(out, "  API Key     : %s\n", adminMeta.RawKey)
-	fmt.Fprintf(out, "  Magic Link  : %s\n\n", magicLink)
+	fmt.Fprintf(out, "  Magic Link  : %s\n", magicLink)
+	if !cfg.IsStdioAllowed() && *portOverride <= 0 {
+		fmt.Fprintf(out, "  Note        : %s\n", auth.TokenRecoveryPortHint(port))
+	}
+	fmt.Fprintln(out)
 	return 0
 }
 

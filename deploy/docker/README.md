@@ -22,6 +22,8 @@ This deployment runs **FaradAiWire** as a hardened, HTTP/SSE-only MCP Security G
    docker exec -it faradaiwire faradaiwire token
    ```
 
+   *(If you started the container without `docker-compose.yml` or with a custom name, replace `faradaiwire` with your container name/ID from `docker ps`, e.g. `docker exec -it <container_name> faradaiwire token`. If you mapped a non-default host port like `-p 19425:19415`, pass `--port 19425` so the printed Magic Link matches your host port.)*
+
    Open the printed **Magic Link** (`http://127.0.0.1:19415/admin/dashboard?token=...`) to exchange the token into an `HttpOnly; SameSite=Lax` admin session cookie cleanly stripped from your URL bar (`303 See Other` + `Referrer-Policy: no-referrer`), or paste the `faw_live_...` Admin key into the Web Console unlock dialog.
 
 3. Connect AI agents or upstream HTTP/SSE MCP servers:

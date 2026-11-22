@@ -429,16 +429,18 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	if adminMeta, created, bootErr := auth.EnsureBootstrapAdminKey(keyStore, os.Getenv("FARADAI_WIRE_API_KEY")); bootErr != nil {
 		slog.Warn("Failed to ensure Bootstrap Master Key", slog.String("error", bootErr.Error()))
 	} else if adminMeta != nil {
-		recoverCmd := "faradaiwire token"
-		if !cfg.IsStdioAllowed() {
-			recoverCmd = "docker exec -it faradaiwire faradaiwire token"
-		}
-		slog.Info("Bootstrap Master Key ready (Zero-Bleed Token Recovery)",
+		containerized := !cfg.IsStdioAllowed()
+		recoverCmd := auth.TokenRecoveryCommand(containerized)
+		attrs := []any{
 			slog.String("key_id", adminMeta.ID),
 			slog.String("key_prefix", auth.MaskTokenPrefix(adminMeta.RawKey)),
 			slog.Bool("newly_provisioned", created),
 			slog.String("recover_cmd", recoverCmd),
-		)
+		}
+		if containerized {
+			attrs = append(attrs, slog.String("port_hint", auth.TokenRecoveryPortHint(cfg.GetAdminPort())))
+		}
+		slog.Info("Bootstrap Master Key ready (Zero-Bleed Token Recovery)", attrs...)
 	}
 	deps.KeyStore = keyStore
 

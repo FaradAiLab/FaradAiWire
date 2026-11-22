@@ -616,6 +616,24 @@ func MaskTokenPrefix(rawToken string) string {
 	return "••••••••"
 }
 
+// TokenRecoveryCommand returns the operator CLI command to recover the Bootstrap Master Key
+// without exposing raw secrets in startup logs or banners.
+func TokenRecoveryCommand(containerized bool) string {
+	if containerized {
+		return "docker exec -it <container_name> faradaiwire token"
+	}
+	return "faradaiwire token"
+}
+
+// TokenRecoveryPortHint returns a concise operator note explaining how to match
+// custom Docker host port mappings when generating a Magic Link.
+func TokenRecoveryPortHint(adminPort int) string {
+	if adminPort <= 0 {
+		adminPort = 19415
+	}
+	return fmt.Sprintf("if mapped to a custom host port (-p <host_port>:%d), pass --port <host_port>", adminPort)
+}
+
 // ImportKey stores a caller-provided raw token into the FileKeyStore with salted SHA-256 hashing and 0600 permissions.
 func (f *FileKeyStore) ImportKey(name, role, agentName, rawToken string) (*StoredAPIKey, error) {
 	name = strings.TrimSpace(name)
