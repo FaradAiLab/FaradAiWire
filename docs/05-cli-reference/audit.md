@@ -1,11 +1,11 @@
 ---
-title: "faradaiwire audit"
+title: "faradaiwire skill-audit"
 description: "Scan downloaded agent skill directories or remote Git repositories for malicious code, backdoors, and credential harvesting."
 ---
 
-# `faradaiwire audit` 🔍
+# `faradaiwire skill-audit` 🔍
 
-The `audit` command performs high-speed static security analysis on agent skill directories, MCP server packages, or remote Git repositories before allowing an AI agent to execute or ingest them.
+The `skill-audit` command performs high-speed static security analysis on agent skill directories, MCP server packages, or remote Git repositories before allowing an AI agent to execute or ingest them.
 
 ---
 
@@ -13,10 +13,10 @@ The `audit` command performs high-speed static security analysis on agent skill 
 
 ```bash
 # Audit a local skill directory
-faradaiwire audit <path-to-skill-directory> [--json]
+faradaiwire skill-audit <path-to-skill-directory> [--json]
 
 # Audit a remote Git repository via isolated ephemeral scratchpad
-faradaiwire audit <git-or-https-url> [--json]
+faradaiwire skill-audit <git-or-https-url> [--json]
 ```
 
 ---
@@ -40,7 +40,7 @@ FaradAiWire scans source code (Python, JavaScript, TypeScript, Bash, Go), config
 
 ### 1. Clean Skill Audit (Local Directory)
 ```bash
-faradaiwire audit ./skills/git-helper
+faradaiwire skill-audit ./skills/git-helper
 ```
 
 ```text
@@ -60,7 +60,7 @@ Exit Code: 0
 
 ### 2. Malicious Skill Detected
 ```bash
-faradaiwire audit ./untrusted-skill
+faradaiwire skill-audit ./untrusted-skill
 ```
 
 ```text
@@ -79,7 +79,7 @@ Exit Code: 2
 You can audit remote repositories directly before cloning them into your workspace:
 
 ```bash
-faradaiwire audit https://github.com/org/untrusted-skill
+faradaiwire skill-audit https://github.com/org/untrusted-skill
 ```
 
 1. FaradAiWire creates a secure, isolated scratchpad directory in `/tmp/faradai-audit-<uuid>/`.
@@ -91,7 +91,7 @@ faradaiwire audit https://github.com/org/untrusted-skill
 For programmatic consumption, machine parsing, or GitHub Actions integration, pass the `--json` flag:
 
 ```bash
-faradaiwire audit ./skills/git-helper --json
+faradaiwire skill-audit ./skills/git-helper --json
 ```
 
 ```json
@@ -121,7 +121,7 @@ When vulnerabilities are found, `--json` outputs the full array of issues with l
 
 ## Integrating into CI/CD
 
-Integrate `faradaiwire audit` into your CI/CD pipelines or pre-commit hooks to block malicious dependencies before merging:
+Integrate `faradaiwire skill-audit` into your CI/CD pipelines or pre-commit hooks to block malicious dependencies before merging:
 
 ```yaml
 # .github/workflows/skill-audit.yml
@@ -136,10 +136,10 @@ jobs:
       - name: Install FaradAiWire
         run: curl -fsSL https://raw.githubusercontent.com/FaradAiLab/FaradAiWire/main/install.sh | sh
       - name: Audit Skills
-        run: faradaiwire audit ./skills/
+        run: faradaiwire skill-audit ./skills/
 ```
 
 ---
 
 > [!NOTE]
-> **Static Heuristic Analysis Disclaimer:** `faradaiwire audit` scans source code and manifests against known high-risk threat signatures and opaque binaries. It does not execute dynamic code or provide a guarantee against novel zero-day exploits. To defend against in-flight attacks at runtime, use FaradAiWire Gateway's zero-trust PEP and AI Guard.
+> **Static Heuristic Analysis Disclaimer:** `faradaiwire skill-audit` scans source code and manifests against known high-risk threat signatures and opaque binaries. It does not execute dynamic code or provide a guarantee against novel zero-day exploits. To defend against in-flight attacks at runtime, use FaradAiWire Gateway's zero-trust PEP and AI Guard.

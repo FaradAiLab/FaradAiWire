@@ -206,19 +206,19 @@ func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return executeToken(args[1:], stdout, stderr)
 
-	case "audit":
+	case "skill-audit":
 		target, jsonOutput, showHelp, err := parseAuditArgs(args[1:])
 		if showHelp {
-			printAuditUsage(stdout)
+			printSkillAuditUsage(stdout)
 			return 0
 		}
 		if err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
-			printAuditUsage(stderr)
+			printSkillAuditUsage(stderr)
 			return 1
 		}
 		if target == "" {
-			fmt.Fprintln(stderr, "Error: audit command requires a path or URL. Usage: faradaiwire audit <path|url> [--json]")
+			fmt.Fprintln(stderr, "Error: skill-audit command requires a path or URL. Usage: faradaiwire skill-audit <path|url> [--json]")
 			return 1
 		}
 		return executeAudit(target, jsonOutput, stdout)

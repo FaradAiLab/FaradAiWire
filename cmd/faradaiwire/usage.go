@@ -25,7 +25,7 @@ func printRootUsage(out io.Writer) {
 	fmt.Fprintln(out, "Security & Policy:")
 	w = tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(w, "  guard\tManage neural guardrail models (list, status, install, uninstall)")
-	fmt.Fprintln(w, "  audit\tScan protocols, tools, or repositories for security threats")
+	fmt.Fprintln(w, "  skill-audit\tScan protocols, tools, or repositories for security threats")
 	w.Flush()
 	fmt.Fprintln(out)
 
@@ -136,10 +136,10 @@ func printDoctorUsage(out io.Writer) {
 	w.Flush()
 }
 
-// printAuditUsage prints argument and usage documentation for 'faradaiwire audit'.
-func printAuditUsage(out io.Writer) {
+// printSkillAuditUsage prints argument and usage documentation for 'faradaiwire skill-audit'.
+func printSkillAuditUsage(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  faradaiwire audit <path|url> [flags]")
+	fmt.Fprintln(out, "  faradaiwire skill-audit <path|url> [flags]")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Scans local skill directories, files, or remote git repositories for security threats.")
 	fmt.Fprintln(out)
@@ -151,7 +151,7 @@ func printAuditUsage(out io.Writer) {
 	fmt.Fprintln(out, "Flags:")
 	w = tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(w, "  -json\tOutput scan report as structured JSON")
-	fmt.Fprintln(w, "  -h, --help\tShow help for audit command")
+	fmt.Fprintln(w, "  -h, --help\tShow help for skill-audit command")
 	w.Flush()
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Exit Codes:")

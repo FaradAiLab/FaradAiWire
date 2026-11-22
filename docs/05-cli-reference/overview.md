@@ -18,9 +18,9 @@ Commands:
   run       Start the FaradAiWire PEP gateway daemon
   connect   Register a downstream stdio or SSE MCP server in faradaiwire.yaml
   adopt     Discover and securely wrap local MCP clients to route through FaradAiWire
-  doctor    Diagnose system health, port bindings, and discover local AI Guard inference engines
-  audit     Perform static security analysis on agent skill directories or MCP packages
-  guard     Inspect and manage local AI Guard models (list, status, install, uninstall)
+  doctor       Diagnose system health, port bindings, and discover local AI Guard inference engines
+  skill-audit  Perform static security analysis on agent skill directories or MCP packages
+  guard        Inspect and manage local AI Guard models (list, status, install, uninstall)
   version   Display version, git commit hash, and build architecture
 ```
 
@@ -45,5 +45,5 @@ FaradAiWire conforms to standard UNIX exit code conventions:
 | :--- | :--- | :--- |
 | **`0`** | **Success** | Clean shutdown, health checks passed, or audit reported no threats. |
 | **`1`** | **Fatal Error** | Configuration parse error, port conflict, or database permission failure. |
-| **`2`** | **Security Violation** | `audit` command detected a high-risk security issue (e.g. reverse shell or token harvesting). |
+| **`2`** | **Security Violation** | `skill-audit` command detected a high-risk security issue (e.g. reverse shell or token harvesting). |
 

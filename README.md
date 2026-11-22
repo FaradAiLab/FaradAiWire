@@ -163,7 +163,7 @@ make test
 
 Scan a downloaded agent skill folder for dangerous commands or credential harvesting:
 ```bash
-./faradaiwire audit /path/to/skill-folder
+./faradaiwire skill-audit /path/to/skill-folder
 ```
 
 ---

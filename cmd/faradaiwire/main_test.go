@@ -50,7 +50,7 @@ func TestCLI_Run_StandaloneDefaults(t *testing.T) {
 }
 
 func TestCLI_UsageString(t *testing.T) {
-	usageStr := "Usage: faradaiwire run [--config <path>] [--standalone] [--host <host>] [--port <port>] [--admin-port <admin-port>] | doctor [--config <path>] | audit <path> | version"
+	usageStr := "Usage: faradaiwire run [--config <path>] [--standalone] [--host <host>] [--port <port>] [--admin-port <admin-port>] | doctor [--config <path>] | skill-audit <path> | version"
 	if !strings.Contains(usageStr, "--host <host>") {
 		t.Errorf("expected usage to mention --host <host>")
 	}
@@ -98,7 +98,7 @@ func TestCLI_RunCLI_HelpAndDispatch(t *testing.T) {
 			name:       "root help prints root usage",
 			args:       []string{"help"},
 			wantExit:   0,
-			wantOutput: "Security & Policy:",
+			wantOutput: "skill-audit",
 			isStderr:   false,
 		},
 		{
@@ -137,17 +137,24 @@ func TestCLI_RunCLI_HelpAndDispatch(t *testing.T) {
 			isStderr:   false,
 		},
 		{
-			name:       "audit --help prints audit usage",
-			args:       []string{"audit", "--help"},
+			name:       "skill-audit --help prints skill-audit usage",
+			args:       []string{"skill-audit", "--help"},
 			wantExit:   0,
-			wantOutput: "Usage:\n  faradaiwire audit <path|url> [flags]",
+			wantOutput: "Usage:\n  faradaiwire skill-audit <path|url> [flags]",
 			isStderr:   false,
 		},
 		{
-			name:       "audit missing target prints error",
+			name:       "skill-audit missing target prints error",
+			args:       []string{"skill-audit"},
+			wantExit:   1,
+			wantOutput: "Error: skill-audit command requires a path or URL",
+			isStderr:   true,
+		},
+		{
+			name:       "legacy audit command is reserved and prints unknown/usage error",
 			args:       []string{"audit"},
 			wantExit:   1,
-			wantOutput: "Error: audit command requires a path or URL",
+			wantOutput: "Usage:",
 			isStderr:   true,
 		},
 		{
@@ -298,6 +305,12 @@ func TestCLI_AuditCommand(t *testing.T) {
 	}
 	if len(cleanReport.Issues) != 0 {
 		t.Errorf("expected 0 issues in clean JSON report, got %d", len(cleanReport.Issues))
+	}
+
+	// 1c. Test clean directory via runCLI("skill-audit", ...)
+	var cliOut, cliErr strings.Builder
+	if code := runCLI([]string{"skill-audit", cleanDir, "--json"}, nil, &cliOut, &cliErr); code != 0 {
+		t.Fatalf("runCLI skill-audit failed: exit=%d stderr=%s stdout=%s", code, cliErr.String(), cliOut.String())
 	}
 
 	// 2. Test malicious directory
