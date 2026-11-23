@@ -466,4 +466,3 @@ func BenchmarkRateLimitFilter_FilterRequest(b *testing.B) {
 		_, _ = rateLimiter.FilterRequest(ctx, req)
 	}
 }
-

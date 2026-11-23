@@ -16,7 +16,7 @@ type mockCustomFilter struct {
 }
 
 func (m *mockCustomFilter) Name() string { return m.name }
-func (m *mockCustomFilter) Order() int  { return m.order }
+func (m *mockCustomFilter) Order() int   { return m.order }
 
 func TestBuildPipeline_NilConfig(t *testing.T) {
 	_, _, err := filter.BuildPipeline(nil, nil)
@@ -173,7 +173,7 @@ type customBlockFilter struct {
 }
 
 func (c *customBlockFilter) Name() string { return c.name }
-func (c *customBlockFilter) Order() int  { return c.order }
+func (c *customBlockFilter) Order() int   { return c.order }
 func (c *customBlockFilter) ExecuteRequest(ctx context.Context, req *mcp.Request) (*mcp.Response, error) {
 	return nil, mcp.NewError(mcp.ErrPolicyDenied, "blocked by enterprise policy", nil)
 }

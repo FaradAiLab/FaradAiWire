@@ -24,10 +24,10 @@ type Issue struct {
 
 // AuditReport aggregates all findings, file counts, and category statistics for an audit run.
 type AuditReport struct {
-	RootPath          string                 `json:"root_path"`
-	ScannedFilesCount int                    `json:"scanned_files_count"`
-	FilesByLanguage   map[string]int         `json:"files_by_language"`
-	Issues            []Issue                `json:"issues"`
+	RootPath          string                  `json:"root_path"`
+	ScannedFilesCount int                     `json:"scanned_files_count"`
+	FilesByLanguage   map[string]int          `json:"files_by_language"`
+	Issues            []Issue                 `json:"issues"`
 	PassedCategories  map[ThreatCategory]bool `json:"passed_categories"`
 	FailedCategories  map[ThreatCategory]int  `json:"failed_categories"`
 }

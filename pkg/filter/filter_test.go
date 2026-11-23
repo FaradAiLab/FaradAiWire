@@ -13,7 +13,7 @@ type customFilter struct {
 }
 
 func (c *customFilter) Name() string { return "custom" }
-func (c *customFilter) Order() int    { return filter.OrderDLP }
+func (c *customFilter) Order() int   { return filter.OrderDLP }
 
 func TestFilterPublicAPI(t *testing.T) {
 	// Verify strict order hierarchy

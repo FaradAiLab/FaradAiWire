@@ -147,4 +147,3 @@ func BenchmarkAdaptiveRouter_ClassificationAndFilterCheck(b *testing.B) {
 		_ = router.ShouldExecuteFilter("injection_scanner", path)
 	}
 }
-

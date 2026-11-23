@@ -342,5 +342,3 @@ func TestPipeline_GuardFilter_DegradedMode_MultiChannelAlerting(t *testing.T) {
 		t.Errorf("expected method 'notifications/message', got: %s", sink.notifications[0].Method)
 	}
 }
-
-

@@ -352,4 +352,3 @@ func BenchmarkInMemoryStateStore_AddAndGetToolCalls(b *testing.B) {
 		_, _ = store.AddAndGetToolCalls(ctx, "bench-user", call, window)
 	}
 }
-

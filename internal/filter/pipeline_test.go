@@ -17,8 +17,8 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/adaptive"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/dlp"
 	"github.com/FaradAiLab/FaradAiWire/internal/logger"
-	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
+	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
 type mockFilter struct {
@@ -1328,7 +1328,3 @@ func TestPipeline_LockFreeSnapshot_NonBlockingSwap(t *testing.T) {
 	close(slowFilter.release)
 	<-done
 }
-
-
-
-

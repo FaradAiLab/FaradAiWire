@@ -44,13 +44,13 @@ func (c ThreatCategory) HumanReadableName() string {
 
 // AuditRule represents a compiled, high-performance regex pattern for static scanning.
 type AuditRule struct {
-	ID          string
-	Name        string
-	Category    ThreatCategory
-	Severity    string // "CRITICAL", "HIGH", "WARNING", "INFO"
-	Reason      string
-	Pattern     *regexp.Regexp
-	RawRegex    string
+	ID       string
+	Name     string
+	Category ThreatCategory
+	Severity string // "CRITICAL", "HIGH", "WARNING", "INFO"
+	Reason   string
+	Pattern  *regexp.Regexp
+	RawRegex string
 }
 
 // LoadAuditRuleCatalog builds and compiles the in-memory static audit rule catalog.

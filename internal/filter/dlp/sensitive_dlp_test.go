@@ -248,9 +248,9 @@ func TestSensitiveDLP_ToolOutputs_BlockingMatrix(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		rawResult  string
-		ruleName   string
+		name      string
+		rawResult string
+		ruleName  string
 	}{
 		{
 			name:      "Tool output leaking RSA private key",
