@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -61,6 +63,36 @@ type HTTPProvider struct {
 	probeEpoch    uint64
 	probeCancel   context.CancelFunc
 	probeDone     chan struct{}
+
+	latencyMu      sync.Mutex
+	latencySamples uint64
+	avgLatencyBits atomic.Uint64
+}
+
+// AverageLatencyMS returns the EWMA measured inference latency in milliseconds (0 before samples arrive).
+func (p *HTTPProvider) AverageLatencyMS() float64 {
+	if p == nil {
+		return 0
+	}
+	return math.Float64frombits(p.avgLatencyBits.Load())
+}
+
+func (p *HTTPProvider) recordLatencySample(sampleMS float64) {
+	if sampleMS <= 0 || math.IsNaN(sampleMS) || math.IsInf(sampleMS, 0) {
+		return
+	}
+	const alpha = 0.2
+	p.latencyMu.Lock()
+	prev := math.Float64frombits(p.avgLatencyBits.Load())
+	var next float64
+	if p.latencySamples == 0 || prev <= 0 {
+		next = sampleMS
+	} else {
+		next = alpha*sampleMS + (1-alpha)*prev
+	}
+	p.latencySamples++
+	p.avgLatencyBits.Store(math.Float64bits(next))
+	p.latencyMu.Unlock()
 }
 
 // NewHTTPProvider constructs a thread-safe, connection-pooled HTTP provider.
@@ -519,9 +551,15 @@ func (p *HTTPProvider) CallInspect(ctx context.Context, req *InspectionRequest) 
 	curMode := p.inferenceMode
 	p.mu.RUnlock()
 
+	var callStart time.Time
 	defer func() {
 		if err == nil && res != nil {
 			p.recordSuccessForEpoch(epoch)
+			sampleMS := res.LatencyMS
+			if sampleMS <= 0 && !callStart.IsZero() {
+				sampleMS = elapsedMS(callStart)
+			}
+			p.recordLatencySample(sampleMS)
 		}
 	}()
 
@@ -546,6 +584,7 @@ func (p *HTTPProvider) CallInspect(ctx context.Context, req *InspectionRequest) 
 	}
 
 	start := time.Now()
+	callStart = start
 
 	// 5. Direct Paradigm Routing: Decision Models route straight to SystemOne
 	if (paradigm == ModelParadigmDecisionModel && curMode != "generate" && curMode != "chat") || curMode == "systemone" {

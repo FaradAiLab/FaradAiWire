@@ -197,6 +197,9 @@ func (s *Server) applyDependencies(deps *bootstrap.Dependencies) {
 	s.settingsCache = deps.SettingsCache
 	s.settingsStore = deps.SettingsStore
 	s.desktopNotifier = deps.DesktopNotifier
+	if s.adminServer != nil {
+		s.adminServer.SetIsDrainingFn(s.IsDraining)
+	}
 }
 
 // ProxyHandler returns the HTTP handler for the Gateway Proxy Ingress on listen_port.

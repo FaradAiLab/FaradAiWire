@@ -13,6 +13,7 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/adaptive"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
+	"github.com/FaradAiLab/FaradAiWire/internal/metrics"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
@@ -259,6 +260,9 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 				})
 			}
 
+			metrics.Default().ObserveFilterDuration("request", string(pathType), time.Since(startTime))
+			metrics.Default().ObserveRequest(DecisionCritical, AuditPhaseRequest, currentFilterName, string(pathType))
+
 			finalReq = nil
 			finalErr = mcp.NewError(mcp.ErrInternalError, fmt.Sprintf("Internal error in filter '%s': %v", currentFilterName, r), nil)
 		}
@@ -363,12 +367,28 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 					Response:        errRespJSON,
 				})
 			}
+			metrics.Default().ObserveFilterDuration("request", string(pathType), time.Since(startTime))
+			metrics.Default().ObserveRequest(DecisionBlocked, AuditPhaseRequest, f.Name(), string(pathType))
 			return nil, mcpErr
 		}
 
 		if needAllowAudit && current != nil && !bytes.Equal(lastSeenParams, current.Params) {
 			modifiedFilter = f.Name()
 			lastSeenParams = bytes.Clone(current.Params)
+		}
+	}
+
+	reqDecision := DecisionAllowed
+	metricFilter := "pipeline"
+	if modifiedFilter != "" {
+		reqDecision = DecisionMasked
+		metricFilter = modifiedFilter
+	} else if len(auditMeta.AuditedRules) > 0 {
+		reqDecision = DecisionAudit
+		if auditMeta.FilterName != "" {
+			metricFilter = auditMeta.FilterName
+		} else {
+			metricFilter = "dlp"
 		}
 	}
 
@@ -386,20 +406,12 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 			}
 		}
 
-		reqDecision := DecisionAllowed
-		filterName := "pipeline"
+		filterName := metricFilter
 		matchedRule := ""
 		var auditedRules []string
 		if modifiedFilter != "" {
-			reqDecision = DecisionMasked
-			filterName = modifiedFilter
 			matchedRule = modifiedFilter
 		} else if len(auditMeta.AuditedRules) > 0 {
-			reqDecision = DecisionAudit
-			filterName = auditMeta.FilterName
-			if filterName == "" {
-				filterName = "dlp"
-			}
 			matchedRule = strings.Join(auditMeta.AuditedRules, ",")
 			auditedRules = auditMeta.AuditedRules
 		}
@@ -441,6 +453,9 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 			AuditedRules:    auditedRules,
 		})
 	}
+
+	metrics.Default().ObserveFilterDuration("request", string(pathType), time.Since(startTime))
+	metrics.Default().ObserveRequest(reqDecision, AuditPhaseRequest, metricFilter, string(pathType))
 
 	return current, nil
 }
@@ -536,6 +551,9 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 					OriginalResponse: origResp,
 				})
 			}
+
+			metrics.Default().ObserveFilterDuration("response", string(pathType), time.Since(startTime))
+			metrics.Default().ObserveRequest(DecisionCritical, AuditPhaseResponse, currentFilterName, string(pathType))
 
 			finalResp = nil
 			finalErr = mcp.NewError(mcp.ErrInternalError, fmt.Sprintf("Internal error in filter '%s': %v", currentFilterName, r), nil)
@@ -646,12 +664,31 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 					Response:         errRespJSON,
 				})
 			}
+			metrics.Default().ObserveFilterDuration("response", string(pathType), time.Since(startTime))
+			metrics.Default().ObserveRequest(DecisionBlocked, AuditPhaseResponse, f.Name(), string(pathType))
 			return nil, mcpErr
 		}
 
 		if needAudit && current != nil && !bytes.Equal(lastSeenResult, current.Result) {
 			modifiedFilter = f.Name()
 			lastSeenResult = bytes.Clone(current.Result)
+		}
+	}
+
+	respDecision := DecisionAllowed
+	respFilterName := "pipeline"
+	if hadUpstreamError {
+		respDecision = DecisionError
+		respFilterName = "upstream"
+	} else if modifiedFilter != "" {
+		respDecision = DecisionMasked
+		respFilterName = modifiedFilter
+	} else if len(auditMeta.AuditedRules) > 0 {
+		respDecision = DecisionAudit
+		if auditMeta.FilterName != "" {
+			respFilterName = auditMeta.FilterName
+		} else {
+			respFilterName = "dlp"
 		}
 	}
 
@@ -670,13 +707,11 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 			}
 		}
 
-		decision := DecisionAllowed
-		filterName := "pipeline"
+		decision := respDecision
+		filterName := respFilterName
 		matchedRule := ""
 		var auditedRules []string
 		if hadUpstreamError {
-			decision = DecisionError
-			filterName = "upstream"
 			if modifiedFilter != "" {
 				matchedRule = modifiedFilter
 			} else if len(auditMeta.AuditedRules) > 0 {
@@ -684,15 +719,8 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 				auditedRules = auditMeta.AuditedRules
 			}
 		} else if modifiedFilter != "" {
-			decision = DecisionMasked
-			filterName = modifiedFilter
 			matchedRule = modifiedFilter
 		} else if len(auditMeta.AuditedRules) > 0 {
-			decision = DecisionAudit
-			filterName = auditMeta.FilterName
-			if filterName == "" {
-				filterName = "dlp"
-			}
 			matchedRule = strings.Join(auditMeta.AuditedRules, ",")
 			auditedRules = auditMeta.AuditedRules
 		}
@@ -734,6 +762,9 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 			AuditedRules:     auditedRules,
 		})
 	}
+
+	metrics.Default().ObserveFilterDuration("response", string(pathType), time.Since(startTime))
+	metrics.Default().ObserveRequest(respDecision, AuditPhaseResponse, respFilterName, string(pathType))
 
 	return current, nil
 }

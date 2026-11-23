@@ -919,7 +919,7 @@ func TestHTTPProvider_SystemOne_AutonomousDiscovery(t *testing.T) {
 	waitProbe(provider)
 
 	req := &InspectionRequest{
-		ToolName: "read_file",
+		ToolName:      "read_file",
 		ToolArguments: map[string]interface{}{"path": "README.md"},
 	}
 
@@ -994,7 +994,7 @@ func TestHTTPProvider_AdaptiveTieredSLA(t *testing.T) {
 
 	cfg := DefaultHTTPProviderConfig()
 	cfg.BaseURL = "http://127.0.0.1:8088"
-	cfg.TimeoutSLA = 20 * time.Millisecond     // Hot SLA: 20ms (handler takes 40ms, so hot calls will timeout)
+	cfg.TimeoutSLA = 20 * time.Millisecond      // Hot SLA: 20ms (handler takes 40ms, so hot calls will timeout)
 	cfg.ColdTimeoutSLA = 150 * time.Millisecond // Cold SLA: 150ms (handler takes 40ms, so cold calls succeed)
 	cfg.IdleWarmWindow = 1 * time.Second
 
@@ -1417,4 +1417,51 @@ func TestHTTPProvider_ProbeLifecycleAndIsolation(t *testing.T) {
 			t.Fatalf("expected new model to use SystemOne without stale fallback mode, got res=%+v err=%v", res, err)
 		}
 	})
+}
+
+func TestHTTPProvider_AverageLatencyMS_MeasuresRealInference(t *testing.T) {
+	mockClient := newMockClient(func(r *http.Request) (*http.Response, error) {
+		time.Sleep(12 * time.Millisecond)
+		resp := map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{
+						"content": `{"verdict":"ALLOW","risk_score":0.05,"reason":"ok","cwe":""}`,
+					},
+				},
+			},
+		}
+		b, _ := json.Marshal(resp)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(b)),
+		}, nil
+	})
+
+	cfg := DefaultHTTPProviderConfig()
+	cfg.BaseURL = "http://127.0.0.1:8088"
+	provider := NewHTTPProvider(cfg, mockClient)
+	if provider.AverageLatencyMS() != 0 {
+		t.Fatalf("expected initial AverageLatencyMS == 0, got %v", provider.AverageLatencyMS())
+	}
+
+	var reporter LatencyReporter = provider
+	ctx := context.Background()
+	_ = provider.Start(ctx, &Model{ID: "test-model"})
+	defer provider.Stop(ctx)
+
+	for i := 0; i < 3; i++ {
+		if _, err := provider.CallInspect(ctx, &InspectionRequest{ToolName: "read_file"}); err != nil {
+			t.Fatalf("CallInspect #%d failed: %v", i, err)
+		}
+	}
+
+	avg := reporter.AverageLatencyMS()
+	if avg < 8.0 {
+		t.Fatalf("expected EWMA measured latency >= 8ms, got %.3f", avg)
+	}
+	if avg == 24.2 || avg == 15.0 || avg == 0.2 {
+		t.Fatalf("expected real measured latency rather than hardcoded constant, got %.3f", avg)
+	}
 }

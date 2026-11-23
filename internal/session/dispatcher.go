@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
+	"github.com/FaradAiLab/FaradAiWire/internal/metrics"
 	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
@@ -206,7 +207,9 @@ func (d *SessionToolDispatcher) DispatchTool(ctx context.Context, agentName, too
 		if d.settingsCache != nil {
 			upSess.SetSettingsCache(d.settingsCache)
 		}
+		upStart := time.Now()
 		resp, execErr := upSess.CallToolHTTP(ctx, d.getHTTPClient(), upstreamReq)
+		metrics.Default().ObserveUpstreamDuration("http", time.Since(upStart))
 		if execErr != nil {
 			errResp := mcp.NewErrorResponse(req.ID, mcp.ErrInternalError, fmt.Sprintf("Streamable HTTP tool execution failed: %v", execErr), nil)
 			return &ToolExecutionResult{
@@ -236,7 +239,9 @@ func (d *SessionToolDispatcher) DispatchTool(ctx context.Context, agentName, too
 			upstreamReq = rewriteToolCallRequest(req, rawToolName)
 		}
 
+		upStart := time.Now()
 		resp, execErr := upSess.CallTool(ctx, upstreamReq)
+		metrics.Default().ObserveUpstreamDuration("stdio", time.Since(upStart))
 		if execErr != nil {
 			errResp := mcp.NewErrorResponse(req.ID, mcp.ErrInternalError, fmt.Sprintf("Local tool execution failed: %v", execErr), nil)
 			return &ToolExecutionResult{

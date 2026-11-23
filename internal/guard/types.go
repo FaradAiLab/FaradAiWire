@@ -62,3 +62,9 @@ type Manager interface {
 	Status() ProcessStatus
 	IsRunning() bool
 }
+
+// LatencyReporter is optionally implemented by Guard Managers to report live measured
+// inference latency (EWMA in milliseconds) to metrics and status telemetry.
+type LatencyReporter interface {
+	AverageLatencyMS() float64
+}

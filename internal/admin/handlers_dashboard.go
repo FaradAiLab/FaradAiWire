@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
+	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/guardprobe"
 	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/web"
@@ -84,13 +86,18 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		guardStatus = "active"
 		guardModel = procStatus.ModelID
 		guardEndpoint = fmt.Sprintf("stdio:%s (PID %d)", procStatus.ModelID, procStatus.PID)
-		guardLatencyMS = 24.2
+		guardLatencyMS = 0
 		if catalog != nil && r != nil {
 			if m, err := catalog.Get(r.Context(), procStatus.ModelID); err == nil && m != nil {
 				guardModel = m.Name
 				if m.BenchmarkAvgLatencyMS > 0 {
 					guardLatencyMS = m.BenchmarkAvgLatencyMS
 				}
+			}
+		}
+		if lr, ok := mgr.(guard.LatencyReporter); ok && lr != nil {
+			if measured := lr.AverageLatencyMS(); measured > 0 {
+				guardLatencyMS = math.Round(measured*100) / 100
 			}
 		}
 		classifierURL = guardEndpoint
@@ -102,7 +109,12 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 			guardStatus = "active"
 			guardModel = "External HTTP Classifier"
 			guardEndpoint = redactURLCredentials(classifierURL)
-			guardLatencyMS = 15.0
+			guardLatencyMS = 0
+			if lr, ok := mgr.(guard.LatencyReporter); ok && lr != nil {
+				if measured := lr.AverageLatencyMS(); measured > 0 {
+					guardLatencyMS = math.Round(measured*100) / 100
+				}
+			}
 		} else {
 			guardTier = "regex_standby"
 			guardStatus = "standby"

@@ -149,7 +149,9 @@ func (s *SSEProxy) Handler() http.Handler {
 		if burst <= 0 {
 			burst = 100
 		}
-		h = middleware.HTTPRateLimit(rate, burst)(h)
+		h = middleware.HTTPRateLimitWithOptions(rate, burst, middleware.RateLimitOptions{
+			Port: "proxy",
+		})(h)
 	}
 
 	secMiddleware := middleware.SecurityHeaders(middleware.SecurityHeadersConfig{

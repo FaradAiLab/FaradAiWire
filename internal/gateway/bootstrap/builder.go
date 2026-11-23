@@ -29,6 +29,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/guard/hitltypes"
 	"github.com/FaradAiLab/FaradAiWire/internal/logger"
 	"github.com/FaradAiLab/FaradAiWire/internal/mcpconfig"
+	"github.com/FaradAiLab/FaradAiWire/internal/metrics"
 	"github.com/FaradAiLab/FaradAiWire/internal/notify"
 	"github.com/FaradAiLab/FaradAiWire/internal/policy"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
@@ -625,6 +626,28 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		}
 	}
 
+	metricsReg := metrics.Default()
+	metricsReg.SetActiveSessionsProvider(sessionMgr.ActiveBridgesCount)
+	metricsReg.SetCorrelationEntriesProvider(cStore.Count)
+	if deps.TelemetryEngine != nil {
+		eng := deps.TelemetryEngine
+		metricsReg.SetDroppedEventsProvider("duckdb", eng.DroppedEvents)
+	} else {
+		metricsReg.SetDroppedEventsProvider("duckdb", nil)
+	}
+	if deps.EventBroker != nil {
+		eb := deps.EventBroker
+		metricsReg.SetDroppedEventsProvider("broker", eb.DroppedCount)
+	} else {
+		metricsReg.SetDroppedEventsProvider("broker", nil)
+	}
+	if deps.AuditLog != nil {
+		al := deps.AuditLog
+		metricsReg.SetDroppedEventsProvider("jsonl", al.DroppedEvents)
+	} else {
+		metricsReg.SetDroppedEventsProvider("jsonl", nil)
+	}
+
 	if cfg.AdminPort > 0 || cfg.IsStandalone() || adminPort > 0 {
 		var safeClient *http.Client
 		if len(cb) > 0 {
@@ -685,6 +708,10 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 			ReloadConfigFunc:     reloadConfigHook,
 			SchemaClearFunc:      clearBaselinesHook,
 			ActiveSessionChecker: sessionMgr.HasActiveSessions,
+			Metrics:              metricsReg,
+		}
+		if deps.AuditLog != nil {
+			adminDeps.AuditLogDroppedFn = deps.AuditLog.DroppedEvents
 		}
 		if deps.TelemetryEngine != nil {
 			adminDeps.TelemetryEngine = deps.TelemetryEngine

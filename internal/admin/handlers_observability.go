@@ -2,15 +2,29 @@ package admin
 
 import (
 	"context"
+	"database/sql"
+	"math"
 	"net/http"
+	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/config"
+	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/logger"
+	"github.com/FaradAiLab/FaradAiWire/internal/metrics"
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
 )
 
 // TelemetryIntegrityVerifier runs in-process cryptographic audit integrity checks across DuckDB tables.
 type TelemetryIntegrityVerifier interface {
 	VerifyIntegrity(ctx context.Context, hmacKey []byte) (*duckdb.IntegrityReport, error)
+}
+
+type telemetryDBProvider interface {
+	DB() *sql.DB
+}
+
+type droppedEventsCounter interface {
+	DroppedEvents() uint64
 }
 
 func (a *AdminServer) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
@@ -48,4 +62,149 @@ func (a *AdminServer) handleAuditVerify(w http.ResponseWriter, r *http.Request) 
 		"duckdb": dbReport,
 		"jsonl":  jsonlReport,
 	})
+}
+
+func (a *AdminServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	reg := a.metrics
+	if reg == nil {
+		reg = metrics.Default()
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(reg.RenderPrometheus()))
+}
+
+func (a *AdminServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	cfg := a.Config()
+	draining := a.isDraining()
+
+	duckHealth, duckOK := a.checkDuckDBHealth(r.Context(), cfg)
+
+	var duckDrops, brokerDrops, jsonlDrops uint64
+	if dc, ok := a.telemetryEngine.(droppedEventsCounter); ok && dc != nil {
+		duckDrops = dc.DroppedEvents()
+	}
+	if a.eventBroker != nil {
+		brokerDrops = a.eventBroker.DroppedCount()
+	}
+	if a.auditLogDroppedFn != nil {
+		jsonlDrops = a.auditLogDroppedFn()
+	}
+	totalDrops := duckDrops + brokerDrops + jsonlDrops
+
+	jsonlStatus := "disabled"
+	if cfg != nil && cfg.AuditLog.Enabled {
+		jsonlStatus = "healthy"
+		if jsonlDrops > 0 {
+			jsonlStatus = "degraded"
+		}
+	} else if jsonlDrops > 0 {
+		jsonlStatus = "degraded"
+	}
+
+	brokerStatus := "disabled"
+	if a.eventBroker != nil {
+		brokerStatus = "healthy"
+		if brokerDrops > 0 {
+			brokerStatus = "degraded"
+		}
+	}
+
+	guardComp := map[string]interface{}{"status": "standby"}
+	if a.guardManager == nil {
+		guardComp["status"] = "disabled"
+	} else {
+		if a.guardManager.IsRunning() {
+			guardComp["status"] = "healthy"
+		}
+		if lr, ok := a.guardManager.(guard.LatencyReporter); ok && lr != nil {
+			if avg := lr.AverageLatencyMS(); avg > 0 {
+				guardComp["guard_latency_ms"] = math.Round(avg*100) / 100
+			}
+		}
+	}
+
+	droppedHealth := map[string]interface{}{
+		"status": "healthy",
+		"duckdb": duckDrops,
+		"broker": brokerDrops,
+		"jsonl":  jsonlDrops,
+		"total":  totalDrops,
+	}
+	if totalDrops > 0 {
+		droppedHealth["status"] = "degraded"
+	}
+
+	overallStatus := "healthy"
+	httpCode := http.StatusOK
+	if draining {
+		overallStatus = "draining"
+		httpCode = http.StatusServiceUnavailable
+	} else if !duckOK || totalDrops > 0 {
+		overallStatus = "degraded"
+		httpCode = http.StatusServiceUnavailable
+	}
+
+	writeJSON(w, httpCode, map[string]interface{}{
+		"status":   overallStatus,
+		"draining": draining,
+		"components": map[string]interface{}{
+			"duckdb":         duckHealth,
+			"jsonl_writer":   map[string]interface{}{"status": jsonlStatus, "dropped": jsonlDrops},
+			"event_broker":   map[string]interface{}{"status": brokerStatus, "dropped": brokerDrops},
+			"dropped_events": droppedHealth,
+			"guard":          guardComp,
+		},
+	})
+}
+
+const readyzPingCacheTTL = 2 * time.Second
+
+func (a *AdminServer) checkDuckDBHealth(ctx context.Context, cfg *config.Config) (map[string]interface{}, bool) {
+	if cfg != nil && !cfg.IsTelemetryEnabled() {
+		return map[string]interface{}{"status": "disabled"}, true
+	}
+
+	if a.telemetryEngine == nil {
+		if cfg != nil && cfg.Telemetry.Enabled != nil && *cfg.Telemetry.Enabled {
+			return map[string]interface{}{"status": "unhealthy", "error": "telemetry engine not initialized"}, false
+		}
+		return map[string]interface{}{"status": "disabled"}, true
+	}
+
+	provider, ok := a.telemetryEngine.(telemetryDBProvider)
+	if !ok {
+		return map[string]interface{}{"status": "healthy"}, true
+	}
+	db := provider.DB()
+	if db == nil {
+		return map[string]interface{}{"status": "unhealthy", "error": "database connection closed"}, false
+	}
+
+	now := time.Now()
+	a.dbPingMu.Lock()
+	if !a.dbPingAt.IsZero() && now.Sub(a.dbPingAt) < readyzPingCacheTTL {
+		err := a.dbPingErr
+		a.dbPingMu.Unlock()
+		if err != nil {
+			return map[string]interface{}{"status": "unhealthy", "error": err.Error()}, false
+		}
+		return map[string]interface{}{"status": "healthy"}, true
+	}
+	a.dbPingMu.Unlock()
+
+	pingCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	err := db.PingContext(pingCtx)
+
+	a.dbPingMu.Lock()
+	a.dbPingAt = time.Now()
+	a.dbPingErr = err
+	a.dbPingMu.Unlock()
+
+	if err != nil {
+		return map[string]interface{}{"status": "unhealthy", "error": err.Error()}, false
+	}
+	return map[string]interface{}{"status": "healthy"}, true
 }

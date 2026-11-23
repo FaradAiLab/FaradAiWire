@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
+	"github.com/FaradAiLab/FaradAiWire/internal/metrics"
 	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
@@ -250,7 +251,9 @@ func (f *Forwarder) ForwardMessage(
 	client := f.httpClient
 	f.mu.RUnlock()
 
+	upStart := time.Now()
 	resp, err := client.Do(backReq)
+	metrics.Default().ObserveUpstreamDuration("sse", time.Since(upStart))
 	if err != nil {
 		slog.WarnContext(r.Context(), "Upstream corporate gateway unreachable",
 			slog.String("target_url", logURL),

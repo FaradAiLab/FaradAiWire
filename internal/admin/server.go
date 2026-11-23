@@ -22,6 +22,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/schema"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/mcpprobe"
+	"github.com/FaradAiLab/FaradAiWire/internal/metrics"
 	"github.com/FaradAiLab/FaradAiWire/internal/middleware"
 	"github.com/FaradAiLab/FaradAiWire/internal/policy"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
@@ -79,6 +80,9 @@ type AdminDependencies struct {
 	ReloadConfigFunc     func(*config.Config) error
 	SchemaClearFunc      func()
 	ActiveSessionChecker func(agentName string) bool
+	Metrics              *metrics.Registry
+	AuditLogDroppedFn    func() uint64
+	IsDrainingFn         func() bool
 }
 
 // AdminServer manages gateway configuration, inspection, diff previews, approval, and live telemetry.
@@ -115,6 +119,13 @@ type AdminServer struct {
 	wsHub                *WSHub
 	loginLimiter         *adminLoginLimiter
 	activeSessionChecker func(agentName string) bool
+	metrics              *metrics.Registry
+	auditLogDroppedFn    func() uint64
+	drainingMu           sync.RWMutex
+	isDrainingFn         func() bool
+	dbPingMu             sync.Mutex
+	dbPingAt             time.Time
+	dbPingErr            error
 	shutdownOnce         sync.Once
 	closed               bool
 }
@@ -150,6 +161,9 @@ func NewAdminServer(deps AdminDependencies) *AdminServer {
 		reloadConfigFunc:     deps.ReloadConfigFunc,
 		schemaClear:          deps.SchemaClearFunc,
 		activeSessionChecker: deps.ActiveSessionChecker,
+		metrics:              deps.Metrics,
+		auditLogDroppedFn:    deps.AuditLogDroppedFn,
+		isDrainingFn:         deps.IsDrainingFn,
 		wsHub:                hub,
 		loginLimiter:         newAdminLoginLimiter(),
 	}
@@ -330,6 +344,20 @@ func (a *AdminServer) WSHub() *WSHub {
 	return a.wsHub
 }
 
+// SetIsDrainingFn binds the gateway draining status check for /admin/readyz.
+func (a *AdminServer) SetIsDrainingFn(fn func() bool) {
+	a.drainingMu.Lock()
+	a.isDrainingFn = fn
+	a.drainingMu.Unlock()
+}
+
+func (a *AdminServer) isDraining() bool {
+	a.drainingMu.RLock()
+	fn := a.isDrainingFn
+	a.drainingMu.RUnlock()
+	return fn != nil && fn()
+}
+
 // probeTimeout resolves the active MCP probe timeout from settings cache, defaulting to 5s.
 func (a *AdminServer) probeTimeout() time.Duration {
 	if sCache := a.settingsCache; sCache != nil {
@@ -386,6 +414,8 @@ func (a *AdminServer) Handler() http.Handler {
 
 	// Runtime inspection and local telemetry endpoints (zero-auth localhost access)
 	registerExactMethods(apiMux, "/admin/status", a.handleStatus, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/metrics", a.handleMetrics, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/readyz", a.handleReadyz, http.MethodGet)
 	registerExactMethods(apiMux, "/admin/host/resources", a.handleHostResources, http.MethodGet)
 	registerExactMethods(apiMux, "/admin/guards/probe", a.handleGuardProbe, http.MethodGet, http.MethodPost)
 	registerExactMethods(apiMux, "/admin/audit-logs", a.handleAuditLogs, http.MethodGet)
@@ -505,7 +535,9 @@ func (a *AdminServer) Handler() http.Handler {
 
 	if cfg != nil && cfg.Security.RateLimiting.Enabled != nil && *cfg.Security.RateLimiting.Enabled {
 		rlCfg := cfg.GetHTTPRateLimitConfig()
-		h = middleware.HTTPRateLimit(rlCfg.Rate, rlCfg.Burst)(h)
+		h = middleware.HTTPRateLimitWithOptions(rlCfg.Rate, rlCfg.Burst, middleware.RateLimitOptions{
+			Port: "admin",
+		})(h)
 	}
 
 	var allowedOrigins []string
@@ -652,6 +684,7 @@ func (a *AdminServer) withAdminSecurity(next http.Handler) http.Handler {
 				now := time.Now()
 				if a.loginLimiter != nil && a.loginLimiter.isLocked(clientIP, now) {
 					a.logSecurityAuditAs(r, "anonymous", "unknown", "admin_auth_lockout", "bearer_auth", "admin_auth", r.URL.Path, "locked", "too_many_failed_attempts", nil)
+					metrics.Default().IncAuthFailure("admin", "too_many_attempts")
 					writeError(w, http.StatusTooManyRequests, "TOO_MANY_ATTEMPTS", "Too many failed authentication attempts; try again later")
 					return
 				}
@@ -664,12 +697,14 @@ func (a *AdminServer) withAdminSecurity(next http.Handler) http.Handler {
 						a.loginLimiter.recordFailure(clientIP, now, rlCfg.LoginMaxAttempts, rlCfg.LoginLockoutSec)
 					}
 					a.logSecurityAuditAs(r, "anonymous", "unknown", "admin_auth_failed", "bearer_auth", "admin_auth", r.URL.Path, "denied", "invalid_bearer_token", nil)
+					metrics.Default().IncAuthFailure("admin", "invalid_bearer_token")
 					w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
 					http.Error(w, "Unauthorized: invalid admin bearer token", http.StatusUnauthorized)
 					return
 				}
 				if !isAdmin {
 					a.logSecurityAuditAs(r, actorID, "non_admin", "admin_auth_forbidden", "bearer_auth", "admin_auth", r.URL.Path, "denied", "admin_role_required", nil)
+					metrics.Default().IncAuthFailure("admin", "admin_role_required")
 					writeError(w, http.StatusForbidden, "ADMIN_ROLE_REQUIRED", "Forbidden: admin role required; scoped agent keys are restricted to ingress")
 					return
 				}
@@ -689,6 +724,7 @@ func (a *AdminServer) withAdminSecurity(next http.Handler) http.Handler {
 				})
 			} else {
 				a.logSecurityAuditAs(r, "anonymous", "unknown", "admin_auth_failed", "session_auth", "admin_auth", r.URL.Path, "denied", "missing_or_invalid_session", nil)
+				metrics.Default().IncAuthFailure("admin", "missing_or_invalid_session")
 				w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
 				http.Error(w, "Unauthorized: admin bearer token or session required", http.StatusUnauthorized)
 				return

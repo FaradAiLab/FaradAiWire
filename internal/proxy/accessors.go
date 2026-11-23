@@ -17,6 +17,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/auth"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
+	"github.com/FaradAiLab/FaradAiWire/internal/metrics"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
@@ -185,6 +186,7 @@ func (s *SSEProxy) writeUnauthorized(w http.ResponseWriter, r *http.Request) {
 		method = r.Method
 	}
 	s.logIngressSecurityRejection(r, "ingress_auth_failed", method, "ingress_mcp", path, "invalid_or_missing_credentials")
+	metrics.Default().IncAuthFailure("proxy", "invalid_api_key")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire"`)
@@ -308,6 +310,7 @@ func (s *SSEProxy) writeRoutingError(w http.ResponseWriter, r *http.Request, err
 			method = r.Method
 		}
 		s.logIngressSecurityRejection(r, "ingress_auth_forbidden", method, "agent", path, "agent_access_denied")
+		metrics.Default().IncAuthFailure("proxy", "agent_access_denied")
 		w.WriteHeader(http.StatusForbidden)
 	} else if errors.Is(err, agent.ErrAgentNotFound) || errors.Is(err, agent.ErrProtocolNotFound) || strings.Contains(err.Error(), "MCP_NOT_FOUND") || strings.Contains(err.Error(), "AGENT_NOT_FOUND") {
 		w.WriteHeader(http.StatusNotFound)

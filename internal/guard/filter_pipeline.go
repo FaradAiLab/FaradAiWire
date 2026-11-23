@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
+	"github.com/FaradAiLab/FaradAiWire/internal/metrics"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
@@ -158,7 +160,9 @@ func (f *GuardFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (*
 		EnableL1Cascade:  false, // L1 already executed above in Go
 	}
 
+	inspStart := time.Now()
 	result, err := mgr.CallInspect(ctx, inspReq)
+	metrics.Default().ObserveGuardDuration("response", time.Since(inspStart))
 	if err != nil {
 		f.handleInspectError(ctx, toolName, "response", err)
 		return resp, nil
@@ -372,6 +376,7 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 	// 2.3 ModeGuardedBlock and ModeGuardedHITL: Semantic Security Guard Deep Inspection
 	// Fault tolerance / Graceful Degradation: When Semantic Security Guard is stopped, safely fallback to L1-Only mode
 	if mgr == nil || !mgr.IsRunning() {
+		metrics.Default().IncGuardFallback("request")
 		slog.DebugContext(ctx, "Semantic Security Guard is stopped; degrading guarded tool safely to L1-Only fallback",
 			slog.String("tool", callParams.Name),
 			slog.String("mode", string(mode)),
@@ -387,7 +392,9 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 		EnableL1Cascade:  false, // L1 already executed above in Go
 	}
 
+	inspStart := time.Now()
 	result, err := mgr.CallInspect(ctx, inspReq)
+	metrics.Default().ObserveGuardDuration("request", time.Since(inspStart))
 	if err != nil {
 		f.handleInspectError(ctx, callParams.Name, "request", err)
 		return req, nil
@@ -508,12 +515,14 @@ func (f *GuardFilter) handleInspectError(ctx context.Context, toolName, phase st
 		return
 	}
 	if errors.Is(err, ErrQueueFull) {
+		metrics.Default().IncGuardLoadShed(phase)
 		slog.WarnContext(ctx, "Semantic Security Guard queue depth exceeded; load shedding to L1",
 			slog.String("tool", toolName),
 			slog.String("phase", phase),
 		)
 		return
 	}
+	metrics.Default().IncGuardFallback(phase)
 	slog.WarnContext(ctx, "Semantic Security Guard inspection failed; degrading safely to L1-Only fallback",
 		slog.String("tool", toolName),
 		slog.String("phase", phase),

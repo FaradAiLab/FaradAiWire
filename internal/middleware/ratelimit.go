@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/FaradAiLab/FaradAiWire/internal/metrics"
 )
 
 // ClientIP extracts the remote client's IP address strictly from the network socket (r.RemoteAddr).
@@ -118,6 +120,7 @@ func TotalRateLimitDrops() int64 {
 
 // RateLimitOptions configures non-blocking observability and windowed warning summaries for HTTPRateLimitWithOptions.
 type RateLimitOptions struct {
+	Port          string
 	WarnWindow    time.Duration
 	Counter       *atomic.Int64
 	OnRateLimited func(clientIP, path string)
@@ -196,6 +199,7 @@ func HTTPRateLimitWithOptions(rate float64, burst int, opts RateLimitOptions) fu
 			ip := ClientIP(r)
 			if !limiter.Allow(ip) {
 				globalRateLimitDrops.Add(1)
+				metrics.Default().IncRateLimitRejection(opts.Port)
 				if opts.Counter != nil {
 					opts.Counter.Add(1)
 				}
