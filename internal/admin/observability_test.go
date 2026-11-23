@@ -3,17 +3,20 @@ package admin
 import (
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/metrics"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/broker"
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
 )
@@ -257,4 +260,173 @@ func TestAdminReadyz_StatesAndDisabledTelemetry(t *testing.T) {
 			t.Fatalf("expected 200 when healthy, got %d (%s)", rec.Code, rec.Body.String())
 		}
 	})
+}
+
+func TestAdminAnalyticsSecurityLogsAndRedactedExport(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "arch053.duckdb")
+	enabled := true
+	eng, err := duckdb.New(duckdb.Config{DBPath: dbPath, BufferSize: 100, BatchFlushMs: 10})
+	if err != nil {
+		t.Fatalf("duckdb.New: %v", err)
+	}
+	defer eng.Close()
+
+	now := time.Now().UTC()
+	eng.LogEvent(&filter.AuditEvent{
+		ID:              "exp-1",
+		TraceID:         "trace-exp-1",
+		Timestamp:       now.Add(-5 * time.Minute),
+		AgentName:       "alpha",
+		ToolName:        "=cmd|'/C calc'!A0",
+		Decision:        filter.DecisionBlocked,
+		RequestDecision: filter.DecisionBlocked,
+		MatchedRule:     "dlp_key",
+		OriginalRequest: "RAW_UNMASKED_SECRET_MUST_NEVER_BLEED",
+		OriginalPayload: "RAW_ORIG_PAYLOAD_MUST_NEVER_BLEED",
+		Request:         "raw_blocked_request_body",
+		RawPayload:      "UNMASKED_BAD_PREVIEW",
+	})
+	eng.LogEvent(&filter.AuditEvent{
+		ID:               "exp-2",
+		TraceID:          "trace-exp-2",
+		Timestamp:        now.Add(-3 * time.Minute),
+		AgentName:        "beta",
+		ToolName:         "+malicious_plus",
+		Decision:         filter.DecisionAllowed,
+		RequestDecision:  filter.DecisionAllowed,
+		MatchedRule:      "",
+		OriginalRequest:  "LOCAL_VAULT_ORIG_REQUEST",
+		OriginalResponse: "LOCAL_VAULT_ORIG_RESPONSE",
+		Request:          `{"ok":true}`,
+		RawPayload:       `{"ok":true}`,
+	})
+	eng.LogEvent(&filter.AuditEvent{
+		ID:        "exp-3",
+		TraceID:   "trace-exp-3",
+		Timestamp: now.Add(-2 * time.Minute),
+		AgentName: "gamma",
+		ToolName:  "@formula_tool",
+		Decision:  filter.DecisionAllowed,
+	})
+	eng.LogSecurityEvent(&filter.SecurityAuditEvent{
+		ID:        "sec-a-1",
+		Timestamp: now.Add(-1 * time.Minute),
+		EventType: "API_KEY_CREATED",
+		ActorID:   "local-operator",
+		ActorRole: "admin",
+		Action:    "create",
+		Outcome:   "allowed",
+	})
+	if err := eng.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	opSettings := settings.DefaultOperationalSettings()
+	opSettings.Maintenance.AuditExportMaxRows = 2
+	sCache := settings.NewCache(opSettings)
+
+	srv := newTestAdminServer(func(d *AdminDependencies) {
+		d.Config = &config.Config{
+			RuntimeMode: config.RuntimeModeStandalone,
+			AdminHost:   "127.0.0.1",
+			Telemetry:   config.TelemetryConfig{Enabled: &enabled},
+		}
+		d.TelemetryEngine = eng
+		d.SettingsCache = sCache
+		d.GuardManager = &mockGuardWithLatency{running: true, modelID: "qwen", latencyMS: 9.5}
+	})
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+	h := srv.Handler()
+
+	// 1. /admin/audit-logs date + rule + metadata q
+	sinceStr := now.Add(-10 * time.Minute).Format(time.RFC3339)
+	reqLogs := httptest.NewRequest(http.MethodGet, "/admin/audit-logs?since="+sinceStr+"&matched_rule=dlp_key&q=alpha", nil)
+	recLogs := httptest.NewRecorder()
+	h.ServeHTTP(recLogs, reqLogs)
+	if recLogs.Code != http.StatusOK {
+		t.Fatalf("expected 200 on filtered /admin/audit-logs, got %d (%s)", recLogs.Code, recLogs.Body.String())
+	}
+	var logsBody struct {
+		Total int64                `json:"total"`
+		Logs  []duckdb.AuditRecord `json:"logs"`
+	}
+	if err := json.Unmarshal(recLogs.Body.Bytes(), &logsBody); err != nil {
+		t.Fatalf("unmarshal /admin/audit-logs: %v", err)
+	}
+	if logsBody.Total != 1 || logsBody.Logs[0].ID != "exp-1" {
+		t.Fatalf("expected filtered audit log exp-1, got total=%d logs=%+v", logsBody.Total, logsBody.Logs)
+	}
+
+	// 2. /admin/security-audit-logs
+	reqSec := httptest.NewRequest(http.MethodGet, "/admin/security-audit-logs?event_type=API_KEY_CREATED&actor_id=local-operator", nil)
+	recSec := httptest.NewRecorder()
+	h.ServeHTTP(recSec, reqSec)
+	if recSec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on /admin/security-audit-logs, got %d (%s)", recSec.Code, recSec.Body.String())
+	}
+	if !strings.Contains(recSec.Body.String(), "sec-a-1") {
+		t.Fatalf("expected sec-a-1 in response, got %s", recSec.Body.String())
+	}
+
+	// 3. /admin/analytics/summary?window=1h
+	reqSum := httptest.NewRequest(http.MethodGet, "/admin/analytics/summary?window=1h", nil)
+	recSum := httptest.NewRecorder()
+	h.ServeHTTP(recSum, reqSum)
+	if recSum.Code != http.StatusOK {
+		t.Fatalf("expected 200 on /admin/analytics/summary, got %d (%s)", recSum.Code, recSum.Body.String())
+	}
+	var sumBody map[string]interface{}
+	if err := json.Unmarshal(recSum.Body.Bytes(), &sumBody); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if sumBody["total_calls"] != float64(3) {
+		t.Fatalf("expected total_calls=3, got %v", sumBody["total_calls"])
+	}
+	if sumBody["guard_latency_ms"] != 9.5 {
+		t.Fatalf("expected guard_latency_ms=9.5, got %v", sumBody["guard_latency_ms"])
+	}
+
+	// 4. /admin/audit-logs/export?format=jsonl (must NOT collide with {id}, must respect maxRows=2 and Zero-DLP Bleed)
+	reqJSONL := httptest.NewRequest(http.MethodGet, "/admin/audit-logs/export?format=jsonl", nil)
+	recJSONL := httptest.NewRecorder()
+	h.ServeHTTP(recJSONL, reqJSONL)
+	if recJSONL.Code != http.StatusOK {
+		t.Fatalf("expected 200 on jsonl export (no {id} collision!), got %d (%s)", recJSONL.Code, recJSONL.Body.String())
+	}
+	jsonlOut := recJSONL.Body.String()
+	for _, secret := range []string{
+		"RAW_UNMASKED_SECRET_MUST_NEVER_BLEED",
+		"RAW_ORIG_PAYLOAD_MUST_NEVER_BLEED",
+		"UNMASKED_BAD_PREVIEW",
+		"raw_blocked_request_body",
+		"LOCAL_VAULT_ORIG_REQUEST",
+		"LOCAL_VAULT_ORIG_RESPONSE",
+	} {
+		if strings.Contains(jsonlOut, secret) {
+			t.Fatalf("ZERO-DLP BLEED VIOLATION: export leaked %q:\n%s", secret, jsonlOut)
+		}
+	}
+	lines := strings.Split(strings.TrimSpace(jsonlOut), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected maintenance.audit_export_max_rows=2 to cap lines at 2, got %d", len(lines))
+	}
+
+	// 5. /admin/audit-logs/export?format=csv neutralizes =,+,-,@,\t,\r formula cells
+	reqCSV := httptest.NewRequest(http.MethodGet, "/admin/audit-logs/export?format=csv", nil)
+	recCSV := httptest.NewRecorder()
+	h.ServeHTTP(recCSV, reqCSV)
+	if recCSV.Code != http.StatusOK {
+		t.Fatalf("expected 200 on csv export, got %d (%s)", recCSV.Code, recCSV.Body.String())
+	}
+	csvRows, err := csv.NewReader(strings.NewReader(recCSV.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("parse CSV: %v", err)
+	}
+	if len(csvRows) != 3 { // header + 2 capped rows (exp-3, exp-2 sorted DESC)
+		t.Fatalf("expected 3 CSV rows (header + 2 capped data rows), got %d", len(csvRows))
+	}
+	csvText := recCSV.Body.String()
+	if !strings.Contains(csvText, "'@formula_tool") || !strings.Contains(csvText, "'+malicious_plus") {
+		t.Fatalf("expected formula-escaped @formula_tool and +malicious_plus in CSV:\n%s", csvText)
+	}
 }

@@ -42,6 +42,16 @@ type TelemetryDetailReader interface {
 	GetAuditLogByID(ctx context.Context, id string) (*duckdb.AuditRecord, error)
 }
 
+// TelemetrySecurityReader queries control-plane security audit logs in DuckDB.
+type TelemetrySecurityReader interface {
+	QuerySecurityAuditLogs(ctx context.Context, filter duckdb.SecurityQueryFilter) (*duckdb.SecurityQueryResult, error)
+}
+
+// TelemetryAnalyticsReader provides cached traffic analytics summaries from DuckDB.
+type TelemetryAnalyticsReader interface {
+	GetAnalyticsSummary(ctx context.Context, window string) (*duckdb.AnalyticsSummary, error)
+}
+
 // EventBroadcaster defines the multi-client live event stream interface for SSE endpoints.
 type EventBroadcaster interface {
 	Subscribe() (chan []*filter.AuditEvent, func())
@@ -420,7 +430,10 @@ func (a *AdminServer) Handler() http.Handler {
 	registerExactMethods(apiMux, "/admin/guards/probe", a.handleGuardProbe, http.MethodGet, http.MethodPost)
 	registerExactMethods(apiMux, "/admin/audit-logs", a.handleAuditLogs, http.MethodGet)
 	registerExactMethods(apiMux, "/admin/audit-logs/events", a.handleLogEventsStream, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/audit-logs/export", a.handleAuditLogsExport, http.MethodGet)
 	registerExactMethods(apiMux, "/admin/audit-logs/{id}", a.handleAuditLogDetail, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/security-audit-logs", a.handleSecurityAuditLogs, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/analytics/summary", a.handleAnalyticsSummary, http.MethodGet)
 	registerExactMethods(apiMux, "/admin/audit/verify", a.handleAuditVerify, http.MethodGet)
 	registerExactMethods(apiMux, "/api/v1/logs/events", a.handleLogEventsStream, http.MethodGet)
 	registerExactMethods(apiMux, "/admin/mcp/tools", a.handleMCPTools, http.MethodGet)

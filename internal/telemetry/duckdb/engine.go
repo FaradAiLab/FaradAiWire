@@ -36,16 +36,18 @@ type eventOrBarrier struct {
 
 // Engine represents an embedded DuckDB telemetry engine with an asynchronous write-behind buffer.
 type Engine struct {
-	db            *sql.DB
-	ownedDB       bool
-	cfg           Config
-	settingsCache atomic.Pointer[settings.Cache]
-	eventChan     chan eventOrBarrier
-	done          chan struct{}
-	wg            sync.WaitGroup
-	retention     *RetentionCleaner
-	droppedEvents uint64
-	isClosed      atomic.Bool
+	db             *sql.DB
+	ownedDB        bool
+	cfg            Config
+	settingsCache  atomic.Pointer[settings.Cache]
+	eventChan      chan eventOrBarrier
+	done           chan struct{}
+	wg             sync.WaitGroup
+	retention      *RetentionCleaner
+	droppedEvents  uint64
+	isClosed       atomic.Bool
+	analyticsMu    sync.Mutex
+	analyticsCache map[string]cachedAnalyticsEntry
 }
 
 // New creates and initializes a new embedded DuckDB telemetry engine.
@@ -821,13 +823,25 @@ func (e *Engine) findExistingInvocationIDInTx(ctx context.Context, tx *sql.Tx, i
 	return ""
 }
 
-const consolidatedAuditCTE = `
-WITH latest_resp AS (
+func escapeSQLLike(s string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(s)
+}
+
+func buildConsolidatedAuditCTE(logsWhereSQL string) string {
+	return fmt.Sprintf(`
+WITH filtered_logs AS (
+	SELECT *
+	FROM tool_audit_logs
+	%s
+),
+latest_resp AS (
 	SELECT DISTINCT ON (invocation_id)
 		invocation_id, response_decision, matched_rule, error_code, audited_rules, error_message,
 		latency_ms, output_size_bytes, raw_payload_preview, original_payload_preview,
 		original_response, response
 	FROM tool_audit_responses
+	WHERE invocation_id IN (SELECT id FROM filtered_logs)
 	ORDER BY invocation_id, timestamp DESC
 ),
 consolidated AS (
@@ -881,54 +895,87 @@ consolidated AS (
 		COALESCE(NULLIF(r.response, ''), l.response) AS response,
 		COALESCE(NULLIF(l.hash_version, ''), 'v1') AS hash_version,
 		l.integrity_hash
-	FROM tool_audit_logs l
+	FROM filtered_logs l
 	LEFT JOIN latest_resp r ON r.invocation_id = l.id
 )
-`
+`, logsWhereSQL)
+}
 
-// QueryAuditLogs retrieves filtered, paginated audit records from DuckDB.
+// QueryAuditLogs retrieves filtered, paginated audit records from DuckDB with predicate pushdown.
 func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResult, error) {
 	if e == nil || e.db == nil {
 		return nil, fmt.Errorf("telemetry engine not initialized")
 	}
 
-	var whereClauses []string
-	var args []interface{}
-
-	if strings.TrimSpace(f.Decision) != "" {
-		whereClauses = append(whereClauses, "LOWER(decision) = LOWER(?)")
-		args = append(args, strings.TrimSpace(f.Decision))
+	// Push table-local predicates down into filtered_logs before joining tool_audit_responses.
+	var logClauses []string
+	var logArgs []interface{}
+	if v := strings.TrimSpace(f.AgentName); v != "" {
+		logClauses = append(logClauses, "agent_name = ?")
+		logArgs = append(logArgs, v)
 	}
-	if strings.TrimSpace(f.AgentName) != "" {
-		whereClauses = append(whereClauses, "agent_name = ?")
-		args = append(args, strings.TrimSpace(f.AgentName))
+	if v := strings.TrimSpace(f.ToolName); v != "" {
+		logClauses = append(logClauses, "tool_name = ?")
+		logArgs = append(logArgs, v)
 	}
-	if strings.TrimSpace(f.ToolName) != "" {
-		whereClauses = append(whereClauses, "tool_name = ?")
-		args = append(args, strings.TrimSpace(f.ToolName))
-	}
-	if strings.TrimSpace(f.TraceID) != "" {
-		whereClauses = append(whereClauses, "trace_id = ?")
-		args = append(args, strings.TrimSpace(f.TraceID))
+	if v := strings.TrimSpace(f.TraceID); v != "" {
+		logClauses = append(logClauses, "trace_id = ?")
+		logArgs = append(logArgs, v)
 	}
 	if f.Since != nil {
-		whereClauses = append(whereClauses, "timestamp >= ?")
-		args = append(args, *f.Since)
+		logClauses = append(logClauses, "timestamp >= ?")
+		logArgs = append(logArgs, *f.Since)
 	}
 	if f.Until != nil {
-		whereClauses = append(whereClauses, "timestamp <= ?")
-		args = append(args, *f.Until)
+		logClauses = append(logClauses, "timestamp <= ?")
+		logArgs = append(logArgs, *f.Until)
 	}
 
-	whereSQL := ""
-	if len(whereClauses) > 0 {
-		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
+	logsWhereSQL := ""
+	if len(logClauses) > 0 {
+		logsWhereSQL = "WHERE " + strings.Join(logClauses, " AND ")
 	}
+
+	// Post-merge predicates (values that can be refined by tool_audit_responses).
+	var consClauses []string
+	var consArgs []interface{}
+	if v := strings.TrimSpace(f.Decision); v != "" {
+		consClauses = append(consClauses, "LOWER(decision) = LOWER(?)")
+		consArgs = append(consArgs, v)
+	}
+	if v := strings.TrimSpace(f.MatchedRule); v != "" {
+		escaped := escapeSQLLike(strings.ToLower(v))
+		consClauses = append(consClauses, `(LOWER(matched_rule) = LOWER(?) OR (',' || LOWER(matched_rule) || ',') LIKE ? ESCAPE '\')`)
+		consArgs = append(consArgs, v, "%,"+escaped+",%")
+	}
+	if v := strings.TrimSpace(f.Search); v != "" {
+		// Metadata-only search: never scan 512KB-4MB payload columns.
+		pattern := "%" + escapeSQLLike(v) + "%"
+		consClauses = append(consClauses, `(
+			tool_name ILIKE ? ESCAPE '\' OR
+			agent_name ILIKE ? ESCAPE '\' OR
+			matched_rule ILIKE ? ESCAPE '\' OR
+			error_message ILIKE ? ESCAPE '\' OR
+			user_id ILIKE ? ESCAPE '\' OR
+			trace_id ILIKE ? ESCAPE '\'
+		)`)
+		consArgs = append(consArgs, pattern, pattern, pattern, pattern, pattern, pattern)
+	}
+
+	consWhereSQL := ""
+	if len(consClauses) > 0 {
+		consWhereSQL = "WHERE " + strings.Join(consClauses, " AND ")
+	}
+
+	cteSQL := buildConsolidatedAuditCTE(logsWhereSQL)
+	allArgs := make([]interface{}, 0, len(logArgs)+len(consArgs))
+	allArgs = append(allArgs, logArgs...)
+	allArgs = append(allArgs, consArgs...)
 
 	// 1. Query total count
-	countQuery := consolidatedAuditCTE + "SELECT COUNT(*) FROM consolidated " + whereSQL
+	countQuery := cteSQL + "SELECT COUNT(*) FROM consolidated " + consWhereSQL
 	var total int64
-	if err := e.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+	if err := e.db.QueryRowContext(ctx, countQuery, allArgs...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("failed to count audit logs: %w", err)
 	}
 
@@ -973,9 +1020,11 @@ func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResul
 		%s
 		ORDER BY timestamp DESC
 		LIMIT ? OFFSET ?
-	`, consolidatedAuditCTE, selectCols, whereSQL)
+	`, cteSQL, selectCols, consWhereSQL)
 
-	queryArgs := append(args, limit, offset)
+	queryArgs := make([]interface{}, 0, len(allArgs)+2)
+	queryArgs = append(queryArgs, allArgs...)
+	queryArgs = append(queryArgs, limit, offset)
 	rows, err := e.db.QueryContext(ctx, querySQL, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query audit logs: %w", err)
@@ -1013,7 +1062,7 @@ func (e *Engine) GetAuditLogByID(ctx context.Context, id string) (*AuditRecord, 
 		return nil, fmt.Errorf("audit log id cannot be empty")
 	}
 
-	querySQL := consolidatedAuditCTE + `
+	querySQL := buildConsolidatedAuditCTE("WHERE id = ? OR trace_id = ?") + `
 		SELECT id, timestamp, trace_id, agent_name, release_version, tool_name, caller_role,
 		       user_id, client_ip, api_key_id, path_type,
 		       decision, request_decision, response_decision, matched_rule, error_code, audited_rules,
@@ -1023,7 +1072,6 @@ func (e *Engine) GetAuditLogByID(ctx context.Context, id string) (*AuditRecord, 
 		       original_request, request, original_response, response,
 		       hash_version, integrity_hash
 		FROM consolidated
-		WHERE id = ? OR trace_id = ?
 		ORDER BY timestamp DESC
 		LIMIT 1
 	`

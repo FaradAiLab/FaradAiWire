@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"math"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
@@ -207,4 +209,153 @@ func (a *AdminServer) checkDuckDBHealth(ctx context.Context, cfg *config.Config)
 		return map[string]interface{}{"status": "unhealthy", "error": err.Error()}, false
 	}
 	return map[string]interface{}{"status": "healthy"}, true
+}
+
+func (a *AdminServer) collectDroppedEvents() (duckDrops, brokerDrops, jsonlDrops uint64) {
+	if dc, ok := a.telemetryEngine.(droppedEventsCounter); ok && dc != nil {
+		duckDrops = dc.DroppedEvents()
+	}
+	if a.eventBroker != nil {
+		brokerDrops = a.eventBroker.DroppedCount()
+	}
+	if a.auditLogDroppedFn != nil {
+		jsonlDrops = a.auditLogDroppedFn()
+	}
+	return duckDrops, brokerDrops, jsonlDrops
+}
+
+func (a *AdminServer) handleSecurityAuditLogs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 50
+	if lStr := q.Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	offset := 0
+	if oStr := q.Get("offset"); oStr != "" {
+		if o, err := strconv.Atoi(oStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+	since, err := parseOptionalRFC3339(q.Get("since"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_TIME_RANGE", "invalid since timestamp: "+err.Error())
+		return
+	}
+	until, err := parseOptionalRFC3339(q.Get("until"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_TIME_RANGE", "invalid until timestamp: "+err.Error())
+		return
+	}
+
+	secReader, ok := a.telemetryEngine.(TelemetrySecurityReader)
+	if !ok || secReader == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"enabled": false,
+			"total":   0,
+			"limit":   limit,
+			"offset":  offset,
+			"events":  []interface{}{},
+		})
+		return
+	}
+
+	res, err := secReader.QuerySecurityAuditLogs(r.Context(), duckdb.SecurityQueryFilter{
+		Limit:     limit,
+		Offset:    offset,
+		EventType: strings.TrimSpace(q.Get("event_type")),
+		ActorID:   strings.TrimSpace(q.Get("actor_id")),
+		Outcome:   strings.TrimSpace(q.Get("outcome")),
+		Since:     since,
+		Until:     until,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "SECURITY_AUDIT_QUERY_FAILED", "Failed to query security audit logs: "+err.Error())
+		return
+	}
+
+	events := res.Events
+	if events == nil {
+		events = []duckdb.SecurityAuditRecord{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"enabled": true,
+		"total":   res.Total,
+		"limit":   res.Limit,
+		"offset":  res.Offset,
+		"events":  events,
+	})
+}
+
+func (a *AdminServer) handleAnalyticsSummary(w http.ResponseWriter, r *http.Request) {
+	window := strings.TrimSpace(r.URL.Query().Get("window"))
+	duckDrops, brokerDrops, jsonlDrops := a.collectDroppedEvents()
+
+	var guardLatencyMS float64
+	if lr, ok := a.guardManager.(guard.LatencyReporter); ok && lr != nil {
+		if avg := lr.AverageLatencyMS(); avg > 0 {
+			guardLatencyMS = math.Round(avg*100) / 100
+		}
+	}
+
+	droppedMap := map[string]uint64{
+		"duckdb": duckDrops,
+		"broker": brokerDrops,
+		"jsonl":  jsonlDrops,
+		"total":  duckDrops + brokerDrops + jsonlDrops,
+	}
+
+	analyticsReader, ok := a.telemetryEngine.(TelemetryAnalyticsReader)
+	if !ok || analyticsReader == nil {
+		normWin := "24h"
+		if window == "1h" || window == "7d" {
+			normWin = window
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"enabled":          false,
+			"window":           normWin,
+			"total_calls":      0,
+			"allowed_count":    0,
+			"blocked_count":    0,
+			"masked_count":     0,
+			"audit_count":      0,
+			"error_count":      0,
+			"block_rate":       0,
+			"p50_latency_ms":   0,
+			"p95_latency_ms":   0,
+			"p99_latency_ms":   0,
+			"top_rules":        []interface{}{},
+			"top_tools":        []interface{}{},
+			"dropped_events":   droppedMap,
+			"guard_latency_ms": guardLatencyMS,
+		})
+		return
+	}
+
+	summary, err := analyticsReader.GetAnalyticsSummary(r.Context(), window)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "ANALYTICS_QUERY_FAILED", "Failed to compute analytics summary: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"enabled":          true,
+		"window":           summary.Window,
+		"generated_at":     summary.GeneratedAt,
+		"total_calls":      summary.TotalCalls,
+		"allowed_count":    summary.AllowedCount,
+		"blocked_count":    summary.BlockedCount,
+		"masked_count":     summary.MaskedCount,
+		"audit_count":      summary.AuditCount,
+		"error_count":      summary.ErrorCount,
+		"block_rate":       summary.BlockRate,
+		"p50_latency_ms":   summary.P50LatencyMS,
+		"p95_latency_ms":   summary.P95LatencyMS,
+		"p99_latency_ms":   summary.P99LatencyMS,
+		"top_rules":        summary.TopRules,
+		"top_tools":        summary.TopTools,
+		"dropped_events":   droppedMap,
+		"guard_latency_ms": guardLatencyMS,
+	})
 }

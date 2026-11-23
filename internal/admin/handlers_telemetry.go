@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"cmp"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,33 +19,65 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
 )
 
+func parseOptionalRFC3339(raw string) (*time.Time, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, v)
+	if err != nil {
+		return nil, err
+	}
+	utc := parsed.UTC()
+	return &utc, nil
+}
+
+func parseAuditQueryFilter(r *http.Request) (duckdb.QueryFilter, error) {
+	q := r.URL.Query()
+	limit := 50
+	if lStr := q.Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	offset := 0
+	if oStr := q.Get("offset"); oStr != "" {
+		if o, err := strconv.Atoi(oStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+	since, err := parseOptionalRFC3339(q.Get("since"))
+	if err != nil {
+		return duckdb.QueryFilter{}, fmt.Errorf("invalid since timestamp: %w", err)
+	}
+	until, err := parseOptionalRFC3339(q.Get("until"))
+	if err != nil {
+		return duckdb.QueryFilter{}, fmt.Errorf("invalid until timestamp: %w", err)
+	}
+	return duckdb.QueryFilter{
+		Limit:       limit,
+		Offset:      offset,
+		Decision:    strings.TrimSpace(q.Get("decision")),
+		AgentName:   strings.TrimSpace(q.Get("agent_name")),
+		ToolName:    strings.TrimSpace(q.Get("tool_name")),
+		TraceID:     strings.TrimSpace(q.Get("trace_id")),
+		MatchedRule: strings.TrimSpace(q.Get("matched_rule")),
+		Search:      strings.TrimSpace(q.Get("q")),
+		SummaryOnly: q.Get("summary") == "1",
+		Since:       since,
+		Until:       until,
+	}, nil
+}
+
 func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	// 1. DuckDB Telemetry Engine: serve filtered, paginated query results (TICK-CORE-002)
 	engine := a.telemetryEngine
 
 	if engine != nil {
-		limit := 50
-		if lStr := r.URL.Query().Get("limit"); lStr != "" {
-			if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
-				limit = l
-			}
-		}
-
-		offset := 0
-		if oStr := r.URL.Query().Get("offset"); oStr != "" {
-			if o, err := strconv.Atoi(oStr); err == nil && o >= 0 {
-				offset = o
-			}
-		}
-
-		filter := duckdb.QueryFilter{
-			Limit:       limit,
-			Offset:      offset,
-			Decision:    strings.TrimSpace(r.URL.Query().Get("decision")),
-			AgentName:   strings.TrimSpace(r.URL.Query().Get("agent_name")),
-			ToolName:    strings.TrimSpace(r.URL.Query().Get("tool_name")),
-			TraceID:     strings.TrimSpace(r.URL.Query().Get("trace_id")),
-			SummaryOnly: r.URL.Query().Get("summary") == "1",
+		filter, err := parseAuditQueryFilter(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_TIME_RANGE", err.Error())
+			return
 		}
 
 		result, err := engine.QueryAuditLogs(r.Context(), filter)
@@ -249,5 +282,207 @@ func (a *AdminServer) handleLogEventsStream(w http.ResponseWriter, r *http.Reque
 			fmt.Fprintf(w, "event: audit_batch\ndata: %s\n\n", data)
 			flusher.Flush()
 		}
+	}
+}
+
+func (a *AdminServer) exportMaxRows() int {
+	maxRows := 50000
+	if cache := a.getSettingsCache(); cache != nil {
+		if s := cache.Get(); s != nil && s.Maintenance.AuditExportMaxRows > 0 {
+			maxRows = s.Maintenance.AuditExportMaxRows
+		}
+	}
+	return maxRows
+}
+
+func sanitizeAuditRecordForExport(rec duckdb.AuditRecord) duckdb.AuditRecord {
+	// ZERO-DLP BLEED: Never export raw unmasked local-vault payload snapshots.
+	rec.OriginalPayloadPreview = ""
+	rec.OriginalRequest = ""
+	rec.OriginalResponse = ""
+
+	if strings.EqualFold(rec.Decision, "BLOCKED") ||
+		strings.EqualFold(rec.Decision, "CRITICAL") ||
+		strings.EqualFold(rec.RequestDecision, "BLOCKED") ||
+		strings.EqualFold(rec.ResponseDecision, "BLOCKED") {
+		rec.Request = ""
+		rec.Response = ""
+		if !strings.HasPrefix(rec.RawPayloadPreview, "[REDACTED") {
+			rec.RawPayloadPreview = fmt.Sprintf("[REDACTED - Blocked by %s]", cmp.Or(rec.MatchedRule, "policy"))
+		}
+	}
+	return rec
+}
+
+func sanitizeCSVCell(v string) string {
+	if len(v) == 0 {
+		return v
+	}
+	switch v[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + v
+	default:
+		return v
+	}
+}
+
+var csvExportHeader = []string{
+	"id",
+	"timestamp",
+	"trace_id",
+	"agent_name",
+	"tool_name",
+	"caller_role",
+	"user_id",
+	"client_ip",
+	"api_key_id",
+	"path_type",
+	"decision",
+	"request_decision",
+	"response_decision",
+	"matched_rule",
+	"error_code",
+	"human_approved",
+	"approved_by",
+	"approval_channel",
+	"error_message",
+	"latency_ms",
+	"input_size_bytes",
+	"output_size_bytes",
+	"raw_payload_preview",
+	"request",
+	"response",
+	"hash_version",
+	"integrity_hash",
+}
+
+func formatAuditRecordCSVRow(rec duckdb.AuditRecord) []string {
+	raw := []string{
+		rec.ID,
+		rec.Timestamp.UTC().Format(time.RFC3339Nano),
+		rec.TraceID,
+		rec.AgentName,
+		rec.ToolName,
+		rec.CallerRole,
+		rec.UserID,
+		rec.ClientIP,
+		rec.APIKeyID,
+		rec.PathType,
+		rec.Decision,
+		rec.RequestDecision,
+		rec.ResponseDecision,
+		rec.MatchedRule,
+		strconv.Itoa(rec.ErrorCode),
+		strconv.FormatBool(rec.HumanApproved),
+		rec.ApprovedBy,
+		rec.ApprovalChannel,
+		rec.ErrorMessage,
+		strconv.FormatFloat(rec.LatencyMs, 'f', 3, 64),
+		strconv.Itoa(rec.InputSizeBytes),
+		strconv.Itoa(rec.OutputSizeBytes),
+		rec.RawPayloadPreview,
+		rec.Request,
+		rec.Response,
+		rec.HashVersion,
+		rec.IntegrityHash,
+	}
+	for i := range raw {
+		raw[i] = sanitizeCSVCell(raw[i])
+	}
+	return raw
+}
+
+func (a *AdminServer) handleAuditLogsExport(w http.ResponseWriter, r *http.Request) {
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = "jsonl"
+	}
+	if format != "jsonl" && format != "csv" {
+		writeError(w, http.StatusBadRequest, "INVALID_EXPORT_FORMAT", "Unsupported export format; expected 'jsonl' or 'csv'")
+		return
+	}
+
+	filter, err := parseAuditQueryFilter(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_TIME_RANGE", err.Error())
+		return
+	}
+
+	maxRows := a.exportMaxRows()
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	if format == "csv" {
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="faradaiwire-audit.csv"`)
+	} else {
+		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="faradaiwire-audit.jsonl"`)
+	}
+	w.WriteHeader(http.StatusOK)
+
+	flusher, _ := w.(http.Flusher)
+	var csvWriter *csv.Writer
+	if format == "csv" {
+		csvWriter = csv.NewWriter(w)
+		_ = csvWriter.Write(csvExportHeader)
+		csvWriter.Flush()
+	}
+
+	engine := a.telemetryEngine
+	if engine == nil {
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
+	}
+
+	const chunkSize = 500
+	offset := 0
+	exported := 0
+
+	for exported < maxRows {
+		remaining := maxRows - exported
+		pageLimit := chunkSize
+		if remaining < pageLimit {
+			pageLimit = remaining
+		}
+		pageFilter := filter
+		pageFilter.Limit = pageLimit
+		pageFilter.Offset = offset
+		pageFilter.SummaryOnly = false
+
+		res, qErr := engine.QueryAuditLogs(r.Context(), pageFilter)
+		if qErr != nil || res == nil || len(res.Logs) == 0 {
+			break
+		}
+
+		for _, rawRec := range res.Logs {
+			safeRec := sanitizeAuditRecordForExport(rawRec)
+			if format == "csv" {
+				_ = csvWriter.Write(formatAuditRecordCSVRow(safeRec))
+			} else {
+				line, mErr := json.Marshal(safeRec)
+				if mErr != nil {
+					continue
+				}
+				_, _ = w.Write(line)
+				_, _ = w.Write([]byte{'\n'})
+			}
+			exported++
+			if exported >= maxRows {
+				break
+			}
+		}
+
+		if csvWriter != nil {
+			csvWriter.Flush()
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		if len(res.Logs) < pageLimit {
+			break
+		}
+		offset += len(res.Logs)
 	}
 }
