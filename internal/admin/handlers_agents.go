@@ -157,6 +157,9 @@ func (a *AdminServer) handleCreateAgent(w http.ResponseWriter, r *http.Request) 
 	toolsMeta, _ := repo.GetAgentManifest(agentName)
 	effectiveTools := cfg.ComputeEffectiveTools(toolsMeta)
 	a.triggerBestEffortReload(r, agentName)
+	a.logSecurityAudit(r, "agent_mutated", "create", "agent", agentName, "allowed", "Agent profile created", map[string]any{
+		"routing_mode": routingMode,
+	})
 
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"status": "created",
@@ -218,6 +221,9 @@ func (a *AdminServer) handleUpdateAgent(w http.ResponseWriter, r *http.Request) 
 	toolsMeta, _ := repo.GetAgentManifest(agentName)
 	effectiveTools := updatedCfg.ComputeEffectiveTools(toolsMeta)
 	a.triggerBestEffortReload(r, agentName)
+	a.logSecurityAudit(r, "agent_mutated", "update", "agent", agentName, "allowed", "Agent profile updated", map[string]any{
+		"protocols_updated": protocolsUpdated,
+	})
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status": "updated",
@@ -274,6 +280,7 @@ func (a *AdminServer) handleDeleteAgent(w http.ResponseWriter, r *http.Request) 
 	}
 
 	a.triggerBestEffortReload(r, agentName)
+	a.logSecurityAudit(r, "agent_mutated", "delete", "agent", agentName, "allowed", "Agent profile deleted", nil)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "success",
 		"message": fmt.Sprintf("Agent '%s' successfully deleted", agentName),

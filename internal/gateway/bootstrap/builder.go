@@ -577,8 +577,10 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 			policyCompiler = policy.NewCompiler(deps.PolicyStore, policy.WithReloader(reloader))
 		}
 		var auditLoggers []admin.AuditEventLogger
+		var securityAuditLoggers []admin.SecurityAuditEventLogger
 		if deps.TelemetryEngine != nil {
 			auditLoggers = append(auditLoggers, deps.TelemetryEngine)
+			securityAuditLoggers = append(securityAuditLoggers, deps.TelemetryEngine)
 		}
 		if deps.EventBroker != nil {
 			auditLoggers = append(auditLoggers, deps.EventBroker)
@@ -600,6 +602,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 			SettingsStore:        deps.SettingsStore,
 			SettingsCache:        deps.SettingsCache,
 			AuditLoggers:         auditLoggers,
+			SecurityAuditLoggers: securityAuditLoggers,
 			Pipeline:             pipe,
 			SafeHTTPClient:       safeClient,
 			ReloadFunc:           reloadHook,

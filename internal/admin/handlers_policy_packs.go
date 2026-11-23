@@ -67,6 +67,10 @@ func (a *AdminServer) handleCreatePolicyPack(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	a.logSecurityAudit(r, "policy_pack_mutated", "create", "policy_pack", pack.ID, "allowed", "Policy pack created", map[string]any{
+		"rule_count": len(pack.RuleIDs),
+	})
+
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"pack": pack})
 }
 
@@ -125,6 +129,10 @@ func (a *AdminServer) handleUpdatePolicyPack(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
+	a.logSecurityAudit(r, "policy_pack_mutated", "update", "policy_pack", packID, "allowed", "Policy pack updated", map[string]any{
+		"rule_count": len(pack.RuleIDs),
+	})
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"pack":              pack,
 		"recompiled_agents": recompiledAgents,
@@ -146,6 +154,8 @@ func (a *AdminServer) handleDeletePolicyPack(w http.ResponseWriter, r *http.Requ
 		writePackStorageError(w, packID, err, "DELETE_PACK_FAILED", "Built-in policy packs cannot be deleted")
 		return
 	}
+
+	a.logSecurityAudit(r, "policy_pack_mutated", "delete", "policy_pack", packID, "allowed", "Policy pack deleted", nil)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status": "deleted",

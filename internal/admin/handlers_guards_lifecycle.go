@@ -132,9 +132,12 @@ func (a *AdminServer) handleGuardDeactivateGlobal(w http.ResponseWriter, r *http
 	stopRunningGuardManager(a.getGuardManager())
 	a.setGuardEnabled(false)
 	a.broadcastGuardStatus("", false, nil)
+	activeID := "*"
 	if active != nil {
+		activeID = active.ID
 		a.broadcastGuardModelUpdated(active.ID)
 	}
+	a.logSecurityAudit(r, "guard_mutated", "deactivate_global", "guard_model", activeID, "allowed", "Guard model deactivated globally", nil)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "INACTIVE",
@@ -164,6 +167,7 @@ func (a *AdminServer) handleGuardDeactivateModel(w http.ResponseWriter, r *http.
 		a.broadcastGuardStatus("", false, nil)
 	}
 	a.broadcastGuardModelUpdated(modelID)
+	a.logSecurityAudit(r, "guard_mutated", "deactivate", "guard_model", modelID, "allowed", "Guard model deactivated", nil)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":   "INACTIVE",
@@ -297,6 +301,12 @@ func (a *AdminServer) handleGuardConnect(w http.ResponseWriter, r *http.Request)
 		slog.Float64("latency_ms", probeResult.LatencyMS),
 	)
 
+	a.logSecurityAudit(r, "guard_mutated", "connect", "guard_model", modelID, "allowed", "Semantic Security Guard connected and activated", map[string]any{
+		"endpoint_url":   redactURLCredentials(reqPayload.EndpointURL),
+		"runtime_type":   reqPayload.RuntimeType,
+		"context_window": reqPayload.ContextWindow,
+	})
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":         "ACTIVE",
 		"model_id":       modelID,
@@ -369,6 +379,7 @@ func (a *AdminServer) handleGuardActivate(w http.ResponseWriter, r *http.Request
 	a.ensureGuardFilterRegistered(mgr)
 	a.broadcastGuardStatus(modelID, true, nil)
 	a.broadcastGuardModelUpdated(modelID)
+	a.logSecurityAudit(r, "guard_mutated", "activate", "guard_model", modelID, "allowed", "Guard model activated", nil)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":   "ACTIVE",
@@ -404,6 +415,8 @@ func (a *AdminServer) handleGuardInstall(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "INSTALL_FAILED", err.Error())
 		return
 	}
+
+	a.logSecurityAudit(r, "guard_mutated", "install", "guard_model", modelID, "allowed", "Guard model installation started", nil)
 
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
 		"status":   "INSTALLING",

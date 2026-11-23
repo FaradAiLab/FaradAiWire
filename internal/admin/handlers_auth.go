@@ -151,25 +151,25 @@ func (e *adminStartCredentialError) Error() string {
 	return "refusing to bind Admin Server to non-loopback host \"" + e.adminHost + "\" without ADMIN_API_KEY, FARADAI_WIRE_ADMIN_TOKEN, or an active Admin key in KeyStore configured"
 }
 
-// validateAdminCredential verifies an incoming bearer or login credential and checks Admin role membership.
-func (a *AdminServer) validateAdminCredential(rawToken string) (valid bool, isAdmin bool) {
+// validateAdminCredential verifies an incoming bearer or login credential and returns validity, Admin role membership, and verified actor ID.
+func (a *AdminServer) validateAdminCredential(rawToken string) (valid bool, isAdmin bool, actorID string) {
 	rawToken = strings.TrimSpace(rawToken)
 	if rawToken == "" {
-		return false, false
+		return false, false, ""
 	}
 	if expected := resolveConfiguredAdminToken(); expected != "" {
 		providedHash := sha256.Sum256([]byte(rawToken))
 		expectedHash := sha256.Sum256([]byte(expected))
 		if subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) == 1 {
-			return true, true
+			return true, true, "env:admin_token"
 		}
 	}
 	if a.keyStore != nil {
 		if rec, ok := a.keyStore.ValidateKey(rawToken); ok && rec != nil && !rec.Revoked {
-			return true, strings.EqualFold(rec.Role, "Admin")
+			return true, strings.EqualFold(rec.Role, "Admin"), rec.ID
 		}
 	}
-	return false, false
+	return false, false, ""
 }
 
 func (a *AdminServer) deriveAdminSessionSecrets() [][]byte {
@@ -198,46 +198,80 @@ func (a *AdminServer) deriveAdminSessionSecrets() [][]byte {
 	return secrets
 }
 
-func (a *AdminServer) signAdminSessionCookieValue() (string, bool) {
+func (a *AdminServer) signAdminSessionCookieValue(actorID string) (string, bool) {
 	secrets := a.deriveAdminSessionSecrets()
 	if len(secrets) == 0 {
 		return "", false
 	}
+	actorID = strings.TrimSpace(actorID)
+	if actorID == "" {
+		actorID = "env:admin_token"
+	}
 	expHex := strconv.FormatInt(time.Now().Add(adminSessionTTL).Unix(), 16)
+	payload := expHex + "." + actorID
 	mac := hmac.New(sha256.New, secrets[0])
-	_, _ = mac.Write([]byte(expHex))
+	_, _ = mac.Write([]byte(payload))
 	sigHex := hex.EncodeToString(mac.Sum(nil))
-	return expHex + "." + sigHex, true
+	return payload + "." + sigHex, true
 }
 
-func (a *AdminServer) isValidAdminSessionCookie(r *http.Request) bool {
+func (a *AdminServer) extractValidAdminSessionCookie(r *http.Request) (string, bool) {
 	if r == nil {
-		return false
+		return "", false
 	}
 	cookie, err := r.Cookie(adminSessionCookieName)
-	if err != nil || strings.TrimSpace(cookie.Value) == "" {
-		return false
+	if err != nil {
+		return "", false
 	}
-	expHex, sigHex, ok := strings.Cut(strings.TrimSpace(cookie.Value), ".")
-	if !ok || expHex == "" || sigHex == "" {
-		return false
+	raw := strings.TrimSpace(cookie.Value)
+	if raw == "" {
+		return "", false
+	}
+	firstDot := strings.IndexByte(raw, '.')
+	lastDot := strings.LastIndexByte(raw, '.')
+	if firstDot <= 0 || lastDot <= 0 || lastDot >= len(raw)-1 {
+		return "", false
+	}
+	expHex := raw[:firstDot]
+	sigHex := raw[lastDot+1:]
+	if sigHex == "" {
+		return "", false
 	}
 	expUnix, parseErr := strconv.ParseInt(expHex, 16, 64)
 	if parseErr != nil || expUnix <= time.Now().Unix() {
-		return false
+		return "", false
 	}
 	sigBytes, hexErr := hex.DecodeString(sigHex)
 	if hexErr != nil || len(sigBytes) != sha256.Size {
-		return false
+		return "", false
 	}
+
+	var payload, actorID string
+	if firstDot == lastDot {
+		// Backward-compatible legacy 2-part cookie: expHex.sigHex
+		payload = expHex
+		actorID = "legacy:session"
+	} else {
+		actorID = raw[firstDot+1 : lastDot]
+		if actorID == "" {
+			return "", false
+		}
+		payload = raw[:lastDot]
+	}
+
 	for _, secret := range a.deriveAdminSessionSecrets() {
 		mac := hmac.New(sha256.New, secret)
-		_, _ = mac.Write([]byte(expHex))
+		_, _ = mac.Write([]byte(payload))
 		if hmac.Equal(sigBytes, mac.Sum(nil)) {
-			return true
+			return actorID, true
 		}
 	}
-	return false
+	return "", false
+}
+
+func (a *AdminServer) isValidAdminSessionCookie(r *http.Request) bool {
+	_, ok := a.extractValidAdminSessionCookie(r)
+	return ok
 }
 
 func isHTTPSRequest(r *http.Request) bool {
@@ -293,11 +327,12 @@ func (a *AdminServer) authenticateAndSetSessionCookie(w http.ResponseWriter, r *
 			slog.String("client_ip", clientIP),
 			slog.String("reason", "TOO_MANY_ATTEMPTS"),
 		)
+		a.logSecurityAuditAs(r, "anonymous", "unknown", "admin_auth_lockout", flow, "admin_auth", r.URL.Path, "locked", "too_many_failed_attempts", nil)
 		writeError(w, http.StatusTooManyRequests, "TOO_MANY_ATTEMPTS", "Too many failed authentication attempts; try again later")
 		return false
 	}
 
-	valid, isAdmin := a.validateAdminCredential(rawCredential)
+	valid, isAdmin, actorID := a.validateAdminCredential(rawCredential)
 	if !valid {
 		rlCfg := a.Config().GetHTTPRateLimitConfig()
 		if a.loginLimiter != nil {
@@ -308,6 +343,7 @@ func (a *AdminServer) authenticateAndSetSessionCookie(w http.ResponseWriter, r *
 			slog.String("client_ip", clientIP),
 			slog.String("reason", "INVALID_CREDENTIALS"),
 		)
+		a.logSecurityAuditAs(r, "anonymous", "unknown", "admin_auth_failed", flow, "admin_auth", r.URL.Path, "denied", "invalid_credentials", nil)
 		if jsonUnauthorized {
 			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Invalid API key")
 		} else {
@@ -321,6 +357,7 @@ func (a *AdminServer) authenticateAndSetSessionCookie(w http.ResponseWriter, r *
 			slog.String("client_ip", clientIP),
 			slog.String("reason", "ADMIN_ROLE_REQUIRED"),
 		)
+		a.logSecurityAuditAs(r, actorID, "non_admin", "admin_auth_forbidden", flow, "admin_auth", r.URL.Path, "denied", "admin_role_required", nil)
 		writeError(w, http.StatusForbidden, "ADMIN_ROLE_REQUIRED", "Forbidden: admin role required; scoped agent keys are restricted to ingress")
 		return false
 	}
@@ -328,12 +365,13 @@ func (a *AdminServer) authenticateAndSetSessionCookie(w http.ResponseWriter, r *
 	if a.loginLimiter != nil {
 		a.loginLimiter.reset(clientIP)
 	}
-	cookieVal, ok := a.signAdminSessionCookieValue()
+	cookieVal, ok := a.signAdminSessionCookieValue(actorID)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "SESSION_SIGN_FAILED", "Failed to initialize admin session")
 		return false
 	}
 	setAdminSessionCookie(w, r, cookieVal)
+	a.logSecurityAuditAs(r, actorID, "admin", "admin_auth_success", flow, "admin_auth", r.URL.Path, "allowed", "session_established", nil)
 	return true
 }
 
@@ -358,6 +396,13 @@ func (a *AdminServer) handleAdminSessionCreate(w http.ResponseWriter, r *http.Re
 
 // handleAdminSessionLogout clears the active Admin session cookie (POST /admin/auth/logout).
 func (a *AdminServer) handleAdminSessionLogout(w http.ResponseWriter, r *http.Request) {
+	actorID := "anonymous"
+	if id, ok := a.extractValidAdminSessionCookie(r); ok && id != "" {
+		actorID = id
+	} else if !a.isAdminAuthRequired() {
+		actorID = "local-operator"
+	}
+	a.logSecurityAuditAs(r, actorID, "admin", "admin_auth_logout", "logout", "admin_auth", r.URL.Path, "allowed", "session_cleared", nil)
 	clearAdminSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":        "logged_out",

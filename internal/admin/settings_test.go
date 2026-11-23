@@ -27,8 +27,9 @@ import (
 )
 
 type mockAuditLogger struct {
-	mu     sync.Mutex
-	events []*filter.AuditEvent
+	mu        sync.Mutex
+	events    []*filter.AuditEvent
+	secEvents []*filter.SecurityAuditEvent
 }
 
 func (m *mockAuditLogger) LogEvent(event *filter.AuditEvent) {
@@ -42,6 +43,20 @@ func (m *mockAuditLogger) GetEvents() []*filter.AuditEvent {
 	defer m.mu.Unlock()
 	copied := make([]*filter.AuditEvent, len(m.events))
 	copy(copied, m.events)
+	return copied
+}
+
+func (m *mockAuditLogger) LogSecurityEvent(event *filter.SecurityAuditEvent) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.secEvents = append(m.secEvents, event)
+}
+
+func (m *mockAuditLogger) GetSecurityEvents() []*filter.SecurityAuditEvent {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copied := make([]*filter.SecurityAuditEvent, len(m.secEvents))
+	copy(copied, m.secEvents)
 	return copied
 }
 
@@ -66,13 +81,14 @@ func setupTestAdminSettings(t *testing.T) (*AdminServer, *settings.DuckDBStore, 
 	logger := &mockAuditLogger{}
 	telemetry := &mockTelemetryWithLogger{mockAuditLogger: logger}
 	server := NewAdminServer(AdminDependencies{
-		Config:          cfg,
-		ReloadFunc:      func() error { return nil },
-		SchemaClearFunc: func() {},
-		SettingsStore:   store,
-		SettingsCache:   cache,
-		TelemetryEngine: telemetry,
-		AuditLoggers:    []AuditEventLogger{telemetry},
+		Config:               cfg,
+		ReloadFunc:           func() error { return nil },
+		SchemaClearFunc:      func() {},
+		SettingsStore:        store,
+		SettingsCache:        cache,
+		TelemetryEngine:      telemetry,
+		AuditLoggers:         []AuditEventLogger{telemetry},
+		SecurityAuditLoggers: []SecurityAuditEventLogger{telemetry},
 	})
 
 	return server, store, cache, logger
@@ -199,16 +215,19 @@ func TestSettingsAPI_MutateAndReset(t *testing.T) {
 		t.Errorf("expected override row to be deleted from DuckDB after reset")
 	}
 
-	// Verify audit logs were captured
-	events := logger.GetEvents()
-	if len(events) < 2 {
-		t.Fatalf("expected at least 2 audit events, got %d", len(events))
+	// Verify control-plane mutations route to security_audit_logs, not tool_audit_logs.
+	if toolEvents := logger.GetEvents(); len(toolEvents) != 0 {
+		t.Errorf("expected 0 tool_audit_logs events for settings mutations, got %d", len(toolEvents))
 	}
-	if events[0].Method != "SETTINGS_MUTATE" {
-		t.Errorf("expected SETTINGS_MUTATE, got %s", events[0].Method)
+	secEvents := logger.GetSecurityEvents()
+	if len(secEvents) < 2 {
+		t.Fatalf("expected at least 2 security audit events, got %d", len(secEvents))
 	}
-	if events[1].Method != "SETTINGS_RESET" {
-		t.Errorf("expected SETTINGS_RESET, got %s", events[1].Method)
+	if secEvents[0].Action != "settings_mutate" {
+		t.Errorf("expected settings_mutate, got %s", secEvents[0].Action)
+	}
+	if secEvents[1].Action != "settings_reset" {
+		t.Errorf("expected settings_reset, got %s", secEvents[1].Action)
 	}
 }
 

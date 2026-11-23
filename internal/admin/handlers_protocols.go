@@ -434,6 +434,8 @@ func (a *AdminServer) handleCreateProtocol(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	a.logSecurityAudit(r, "protocol_mutated", "create", "protocol", p.ID, "allowed", "Protocol created", map[string]any{"type": p.Type})
+
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"status":   "created",
 		"protocol": p.MaskSecrets(),
@@ -478,6 +480,8 @@ func (a *AdminServer) handleUpdateProtocol(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	a.logSecurityAudit(r, "protocol_mutated", "update", "protocol", protocolID, "allowed", "Protocol updated", map[string]any{"type": p.Type})
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":   "updated",
 		"protocol": p.MaskSecrets(),
@@ -510,6 +514,8 @@ func (a *AdminServer) handleDeleteProtocol(w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
+
+	a.logSecurityAudit(r, "protocol_mutated", "delete", "protocol", protocolID, "allowed", "Protocol deleted", nil)
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "success",

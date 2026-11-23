@@ -99,6 +99,14 @@ func (a *AdminServer) handlePinSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	pinAction := "unpin"
+	if *payload.Pinned {
+		pinAction = "pin"
+	}
+	a.logSecurityAudit(r, "schema_pinned", pinAction, "schema", toolName, "allowed", fmt.Sprintf("Schema pinned state set to %v", *payload.Pinned), map[string]any{
+		"is_pinned": *payload.Pinned,
+	})
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":    "ok",
 		"tool_name": toolName,

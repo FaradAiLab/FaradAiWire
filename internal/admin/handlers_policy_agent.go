@@ -110,6 +110,10 @@ func (a *AdminServer) handleUpdateAgentDLP(w http.ResponseWriter, r *http.Reques
 		compiled, _ = compiler.Compile(r.Context(), &cfg)
 	}
 
+	a.logSecurityAudit(r, "agent_dlp_updated", "update", "agent_dlp", agentName, "allowed", "Agent DLP configuration updated", map[string]any{
+		"pack_count": len(cfg.PackIDs),
+	})
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":     "saved",
 		"agent_name": agentName,

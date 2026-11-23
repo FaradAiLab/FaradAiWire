@@ -22,6 +22,8 @@ func (a *AdminServer) handleClearSchemas(w http.ResponseWriter, r *http.Request)
 		a.schemaClear()
 	}
 
+	a.logSecurityAudit(r, "schemas_cleared", "schemas_clear", "schemas", "*", "allowed", "Pinned schema baselines cleared", nil)
+
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "success",
 		"message": "Pinned schema baselines successfully cleared",
@@ -126,16 +128,17 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Emit configuration audit trail event (Task 7)
-	a.logAuditEvent(&filter.AuditEvent{
-		Timestamp:  time.Now(),
-		Method:     "CONFIG_TOGGLE",
-		ToolName:   req.FilterName,
-		FilterName: "admin_config",
-		Decision:   "ALLOWED",
-		Message:    fmt.Sprintf("Filter %s toggled to %v", req.FilterName, enabled),
-		User:       a.extractUserContext(r),
-	})
+	// Emit control-plane security audit event (segregated from tool_audit_logs)
+	a.logSecurityAudit(
+		r,
+		"config_mutated",
+		"config_toggle",
+		"filter_toggle",
+		req.FilterName,
+		"allowed",
+		fmt.Sprintf("Filter %s toggled to %v", req.FilterName, enabled),
+		map[string]any{"enabled": enabled},
+	)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":      "success",
@@ -384,15 +387,16 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, aEv := range audits {
-		a.logAuditEvent(&filter.AuditEvent{
-			Timestamp:  time.Now(),
-			Method:     "SETTINGS_MUTATE",
-			ToolName:   aEv.key,
-			FilterName: "admin_settings",
-			Decision:   "ALLOWED",
-			Message:    fmt.Sprintf("Setting %q updated from %v to %v", aEv.key, aEv.oldVal, aEv.newVal),
-			User:       a.extractUserContext(r),
-		})
+		a.logSecurityAudit(
+			r,
+			"settings_mutated",
+			"settings_mutate",
+			"settings",
+			aEv.key,
+			"allowed",
+			fmt.Sprintf("Setting %q updated from %v to %v", aEv.key, aEv.oldVal, aEv.newVal),
+			map[string]any{"old_value": aEv.oldVal, "new_value": aEv.newVal},
+		)
 	}
 
 	if sCache != nil {
@@ -569,16 +573,17 @@ func (a *AdminServer) handleSettingsReset(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Emit Audit Event (Task 7)
-	a.logAuditEvent(&filter.AuditEvent{
-		Timestamp:  time.Now(),
-		Method:     "SETTINGS_RESET",
-		ToolName:   req.Key,
-		FilterName: "admin_settings",
-		Decision:   "ALLOWED",
-		Message:    fmt.Sprintf("Setting %q reset to baseline default", req.Key),
-		User:       a.extractUserContext(r),
-	})
+	// Emit control-plane security audit event (segregated from tool_audit_logs)
+	a.logSecurityAudit(
+		r,
+		"settings_reset",
+		"settings_reset",
+		"settings",
+		req.Key,
+		"allowed",
+		fmt.Sprintf("Setting %q reset to baseline default", req.Key),
+		nil,
+	)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "success",
@@ -587,20 +592,14 @@ func (a *AdminServer) handleSettingsReset(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// extractUserContext parses caller provenance headers or falls back to admin defaults.
+// extractUserContext resolves the verified actor identity established by admin middleware.
 func (a *AdminServer) extractUserContext(r *http.Request) *filter.UserContext {
-	role := r.Header.Get("X-User-Role")
-	if role == "" {
-		role = "admin"
-	}
-	userID := r.Header.Get("X-User-ID")
-	if userID == "" {
-		userID = "local-operator"
-	}
-
+	actor := adminActorFromRequest(r)
 	return &filter.UserContext{
-		Role:      role,
-		UserID:    userID,
+		Role:      actor.ActorRole,
+		UserID:    actor.ActorID,
+		APIKeyID:  apiKeyIDFromActor(actor.ActorID),
+		ClientIP:  actor.ClientIP,
 		AgentName: "admin-console",
 	}
 }
@@ -635,6 +634,8 @@ func (a *AdminServer) handleReload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	a.logSecurityAudit(r, "config_reloaded", "config_reload", "config", "runtime", "allowed", "Configuration hot-reloaded", nil)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "success",

@@ -27,6 +27,8 @@ type wsClient struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	hub       *WSHub
+	actorID   string
+	clientIP  string
 }
 
 func (c *wsClient) trySend(frame []byte) bool {
@@ -64,12 +66,12 @@ func (c *wsClient) close() {
 
 // WSHub manages active WebSocket client connections and event broadcasting.
 type WSHub struct {
-	clients                 map[*wsClient]bool
-	allowedOrigins          []string
+	clients                  map[*wsClient]bool
+	allowedOrigins           []string
 	allowSameHostNonLoopback atomic.Bool
-	mu                      sync.RWMutex
-	onConnect               func(client *wsClient)
-	onMessage               func(client *wsClient, payload []byte)
+	mu                       sync.RWMutex
+	onConnect                func(client *wsClient)
+	onMessage                func(client *wsClient, payload []byte)
 }
 
 // SetAllowSameHostNonLoopback permits exact same-host Origin headers when AdminServer binds non-loopback.
@@ -294,11 +296,14 @@ func (h *WSHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	actor := adminActorFromRequest(r)
 	client := &wsClient{
-		conn: conn,
-		send: make(chan []byte, 64),
-		done: make(chan struct{}),
-		hub:  h,
+		conn:     conn,
+		send:     make(chan []byte, 64),
+		done:     make(chan struct{}),
+		hub:      h,
+		actorID:  actor.ActorID,
+		clientIP: actor.ClientIP,
 	}
 
 	h.register(client)

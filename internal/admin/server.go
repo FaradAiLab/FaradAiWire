@@ -72,6 +72,7 @@ type AdminDependencies struct {
 	TelemetryEngine      TelemetryReader
 	EventBroker          EventBroadcaster
 	AuditLoggers         []AuditEventLogger
+	SecurityAuditLoggers []SecurityAuditEventLogger
 	Pipeline             *filter.Pipeline
 	SafeHTTPClient       *http.Client
 	ReloadFunc           func() error
@@ -92,6 +93,7 @@ type AdminServer struct {
 	telemetryEngine      TelemetryReader
 	eventBroker          EventBroadcaster
 	auditLoggers         []AuditEventLogger
+	securityAuditLoggers []filter.SecurityAuditLogger
 	serverMu             sync.Mutex
 	server               *http.Server
 	safeClientMu         sync.Mutex
@@ -143,6 +145,7 @@ func NewAdminServer(deps AdminDependencies) *AdminServer {
 		telemetryEngine:      deps.TelemetryEngine,
 		eventBroker:          deps.EventBroker,
 		auditLoggers:         slices.Clone(deps.AuditLoggers),
+		securityAuditLoggers: slices.Clone(deps.SecurityAuditLoggers),
 		reloadFunc:           deps.ReloadFunc,
 		reloadConfigFunc:     deps.ReloadConfigFunc,
 		schemaClear:          deps.SchemaClearFunc,
@@ -222,6 +225,10 @@ func (a *AdminServer) getSettingsCache() *settings.Cache {
 
 func (a *AdminServer) getAuditLoggers() []AuditEventLogger {
 	return a.auditLoggers
+}
+
+func (a *AdminServer) getSecurityAuditLoggers() []filter.SecurityAuditLogger {
+	return a.securityAuditLoggers
 }
 
 // SetConfig updates the active configuration atomically on the AdminServer.
@@ -621,26 +628,61 @@ func (a *AdminServer) withAdminSecurity(next http.Handler) http.Handler {
 		}
 
 		// 2. Enforce Admin-role authentication (Bearer token or HttpOnly HMAC cookie) when configured or non-loopback.
+		clientIP := clientIPFromRequest(r)
 		if isProtectedPath && a.isAdminAuthRequired() {
 			authHeader := r.Header.Get("Authorization")
 			const bearerPrefix = "Bearer "
 			if len(authHeader) > len(bearerPrefix) && strings.EqualFold(authHeader[:len(bearerPrefix)], bearerPrefix) {
+				now := time.Now()
+				if a.loginLimiter != nil && a.loginLimiter.isLocked(clientIP, now) {
+					a.logSecurityAuditAs(r, "anonymous", "unknown", "admin_auth_lockout", "bearer_auth", "admin_auth", r.URL.Path, "locked", "too_many_failed_attempts", nil)
+					writeError(w, http.StatusTooManyRequests, "TOO_MANY_ATTEMPTS", "Too many failed authentication attempts; try again later")
+					return
+				}
+
 				providedToken := strings.TrimSpace(authHeader[len(bearerPrefix):])
-				valid, isAdmin := a.validateAdminCredential(providedToken)
+				valid, isAdmin, actorID := a.validateAdminCredential(providedToken)
 				if !valid {
+					if a.loginLimiter != nil {
+						rlCfg := a.Config().GetHTTPRateLimitConfig()
+						a.loginLimiter.recordFailure(clientIP, now, rlCfg.LoginMaxAttempts, rlCfg.LoginLockoutSec)
+					}
+					a.logSecurityAuditAs(r, "anonymous", "unknown", "admin_auth_failed", "bearer_auth", "admin_auth", r.URL.Path, "denied", "invalid_bearer_token", nil)
 					w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
 					http.Error(w, "Unauthorized: invalid admin bearer token", http.StatusUnauthorized)
 					return
 				}
 				if !isAdmin {
+					a.logSecurityAuditAs(r, actorID, "non_admin", "admin_auth_forbidden", "bearer_auth", "admin_auth", r.URL.Path, "denied", "admin_role_required", nil)
 					writeError(w, http.StatusForbidden, "ADMIN_ROLE_REQUIRED", "Forbidden: admin role required; scoped agent keys are restricted to ingress")
 					return
 				}
-			} else if !a.isValidAdminSessionCookie(r) {
+				if a.loginLimiter != nil {
+					a.loginLimiter.reset(clientIP)
+				}
+				r = withVerifiedAdminActor(r, verifiedAdminActor{
+					ActorID:   actorID,
+					ActorRole: "admin",
+					ClientIP:  clientIP,
+				})
+			} else if actorID, ok := a.extractValidAdminSessionCookie(r); ok {
+				r = withVerifiedAdminActor(r, verifiedAdminActor{
+					ActorID:   actorID,
+					ActorRole: "admin",
+					ClientIP:  clientIP,
+				})
+			} else {
+				a.logSecurityAuditAs(r, "anonymous", "unknown", "admin_auth_failed", "session_auth", "admin_auth", r.URL.Path, "denied", "missing_or_invalid_session", nil)
 				w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
 				http.Error(w, "Unauthorized: admin bearer token or session required", http.StatusUnauthorized)
 				return
 			}
+		} else if isProtectedPath {
+			r = withVerifiedAdminActor(r, verifiedAdminActor{
+				ActorID:   "local-operator",
+				ActorRole: "admin",
+				ClientIP:  clientIP,
+			})
 		}
 
 		next.ServeHTTP(w, r)

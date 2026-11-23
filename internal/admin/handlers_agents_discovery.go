@@ -326,6 +326,10 @@ func (a *AdminServer) handleAgentSyncTools(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	a.logSecurityAudit(r, "agent_mutated", "sync_tools", "agent", req.AgentName, "allowed", "Agent tools synchronized", map[string]any{
+		"tools_count": len(allDiscoveredTools),
+	})
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status": "success",
 		"tools":  allDiscoveredTools,

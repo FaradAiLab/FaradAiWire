@@ -70,6 +70,10 @@ func (a *AdminServer) handleAgentRollback(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	a.logSecurityAudit(r, "agent_mutated", "rollback", "agent", req.AgentName, "allowed", "Agent rolled back to archive snapshot", map[string]any{
+		"timestamp": req.Timestamp,
+	})
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "success",
 		"message": fmt.Sprintf("Agent '%s' successfully rolled back to %s", req.AgentName, req.Timestamp),

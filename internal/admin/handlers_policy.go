@@ -94,6 +94,11 @@ func (a *AdminServer) handleCreateDlpRule(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	a.logSecurityAudit(r, "dlp_rule_mutated", "create", "dlp_rule", rule.ID, "allowed", "DLP rule created", map[string]any{
+		"category":       rule.Category,
+		"default_action": rule.DefaultAction,
+	})
+
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"rule": rule})
 }
 
@@ -113,6 +118,7 @@ func (a *AdminServer) handleGetDlpRule(w http.ResponseWriter, r *http.Request) {
 		writeRuleStorageError(w, ruleID, err, "GET_RULE_FAILED", "")
 		return
 	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{"rule": rule})
 }
 
@@ -144,6 +150,11 @@ func (a *AdminServer) handleUpdateDlpRule(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	a.logSecurityAudit(r, "dlp_rule_mutated", "update", "dlp_rule", ruleID, "allowed", "DLP rule updated", map[string]any{
+		"category":       rule.Category,
+		"default_action": rule.DefaultAction,
+	})
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{"rule": rule})
 }
 
@@ -162,6 +173,8 @@ func (a *AdminServer) handleDeleteDlpRule(w http.ResponseWriter, r *http.Request
 		writeRuleStorageError(w, ruleID, err, "DELETE_RULE_FAILED", "Built-in rules cannot be deleted")
 		return
 	}
+
+	a.logSecurityAudit(r, "dlp_rule_mutated", "delete", "dlp_rule", ruleID, "allowed", "DLP rule deleted", nil)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status": "deleted",

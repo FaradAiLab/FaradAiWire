@@ -81,6 +81,13 @@ func (a *AdminServer) handleCreateAPIKey(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	a.logSecurityAudit(r, "api_key_created", "create", "api_key", record.ID, "allowed", "API key generated", map[string]any{
+		"name":       record.Name,
+		"role":       record.Role,
+		"agent_name": record.AgentName,
+		"prefix":     record.Prefix,
+	})
+
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":         record.ID,
 		"name":       record.Name,
@@ -115,6 +122,8 @@ func (a *AdminServer) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "REVOKE_FAILED", err.Error())
 		return
 	}
+
+	a.logSecurityAudit(r, "api_key_revoked", "revoke", "api_key", keyID, "allowed", "API key revoked", nil)
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "success",

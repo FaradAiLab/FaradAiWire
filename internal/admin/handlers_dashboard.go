@@ -384,6 +384,11 @@ func (a *AdminServer) handleGuardConfigure(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	a.logSecurityAudit(r, "guard_mutated", "configure", "guard", "classifier", "allowed", "AI Guard configuration updated", map[string]any{
+		"mode":           req.Mode,
+		"classifier_url": redactURLCredentials(targetURL),
+	})
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":         "success",
 		"classifier_url": redactURLCredentials(targetURL),

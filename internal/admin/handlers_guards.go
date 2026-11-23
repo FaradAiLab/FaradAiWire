@@ -139,6 +139,7 @@ func (a *AdminServer) handleDeleteGuardModel(w http.ResponseWriter, r *http.Requ
 
 	a.broadcastGuardStatus("", false, nil)
 	a.broadcastGuardModelUpdated(modelID)
+	a.logSecurityAudit(r, "guard_mutated", "delete", "guard_model", modelID, "allowed", "Guard model uninstalled", nil)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":   "NOT_INSTALLED",
@@ -195,6 +196,10 @@ func (a *AdminServer) handleGuardPolicyUpdate(w http.ResponseWriter, r *http.Req
 	}
 
 	a.broadcastGuardModelUpdated(modelID)
+	a.logSecurityAudit(r, "guard_policy_updated", "update_policy", "guard_model", modelID, "allowed", "Guard threat enforcement policy updated", map[string]any{
+		"default_action": polReq.DefaultAction,
+		"critical_count": len(sanitizedTools),
+	})
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":         "updated",
