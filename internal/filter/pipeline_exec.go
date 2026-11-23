@@ -120,6 +120,23 @@ func (p *Pipeline) EmitResponseFailure(
 	})
 }
 
+func emitToolAuditEvent(logger AuditLogger, user *types.UserContext, meta *types.AuditMetadata, ev *AuditEvent) {
+	if logger == nil || ev == nil {
+		return
+	}
+	if user != nil {
+		ev.User = user
+		ev.APIKeyID = user.APIKeyID
+		ev.ClientIP = user.ClientIP
+	}
+	if meta != nil {
+		ev.HumanApproved = meta.HumanApproved
+		ev.ApprovedBy = meta.ApprovedBy
+		ev.ApprovalChannel = meta.ApprovalChannel
+	}
+	logger.LogEvent(ev)
+}
+
 func formatBlockedRPCResponse(reqID any, mcpErr *mcp.Error) string {
 	if mcpErr == nil {
 		return ""
@@ -217,7 +234,7 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 				if retainLocalPayloads && len(rawReqBytes) > 0 {
 					origReq = MakeBoundedPreview(rawReqBytes, previewLimit)
 				}
-				logger.LogEvent(&AuditEvent{
+				emitToolAuditEvent(logger, user, types.GetAuditMetadata(ctx), &AuditEvent{
 					ID:              invocationID,
 					Timestamp:       time.Now(),
 					AgentName:       agentName,
@@ -321,7 +338,7 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 					}
 					errRespJSON = formatBlockedRPCResponse(reqID, mcpErr)
 				}
-				logger.LogEvent(&AuditEvent{
+				emitToolAuditEvent(logger, user, auditMeta, &AuditEvent{
 					ID:              invocationID,
 					Timestamp:       time.Now(),
 					AgentName:       agentName,
@@ -400,7 +417,7 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 
 		// Log allowed/masked/audited request if it passed all filters
 		totalLatency := float64(time.Since(startTime).Microseconds()) / 1000.0
-		logger.LogEvent(&AuditEvent{
+		emitToolAuditEvent(logger, user, auditMeta, &AuditEvent{
 			ID:              invocationID,
 			Timestamp:       time.Now(),
 			AgentName:       agentName,
@@ -494,7 +511,7 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 				if retainLocalPayloads && len(rawRespBytes) > 0 {
 					origResp = MakeBoundedPreview(rawRespBytes, previewLimit)
 				}
-				logger.LogEvent(&AuditEvent{
+				emitToolAuditEvent(logger, user, types.GetAuditMetadata(ctx), &AuditEvent{
 					ID:               invocationID,
 					Timestamp:        time.Now(),
 					AgentName:        agentName,
@@ -506,6 +523,7 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 					MatchedRule:      currentFilterName,
 					Phase:            AuditPhaseResponse,
 					Decision:         DecisionCritical,
+					RequestDecision:  DecisionCritical,
 					ResponseDecision: DecisionCritical,
 					ErrorCode:        mcp.ErrInternalError,
 					Message:          errMsg,
@@ -603,7 +621,7 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 					}
 					errRespJSON = formatBlockedRPCResponse(respID, mcpErr)
 				}
-				logger.LogEvent(&AuditEvent{
+				emitToolAuditEvent(logger, user, auditMeta, &AuditEvent{
 					ID:               invocationID,
 					Timestamp:        time.Now(),
 					AgentName:        agentName,
@@ -691,7 +709,7 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 
 		// Log allowed/masked/audited response
 		totalLatency := float64(time.Since(startTime).Microseconds()) / 1000.0
-		logger.LogEvent(&AuditEvent{
+		emitToolAuditEvent(logger, user, auditMeta, &AuditEvent{
 			ID:               invocationID,
 			Timestamp:        time.Now(),
 			AgentName:        agentName,

@@ -748,3 +748,160 @@ func TestWSHub_CapturesVerifiedActorAndClientIP(t *testing.T) {
 		t.Fatal("expected non-empty wsClient.clientIP")
 	}
 }
+
+func buildMaskedWSTextFrame(payload []byte) []byte {
+	maskKey := [4]byte{0x12, 0x34, 0x56, 0x78}
+	var out []byte
+	out = append(out, 0x81) // FIN + text frame
+	n := len(payload)
+	switch {
+	case n < 126:
+		out = append(out, byte(0x80|n))
+	default:
+		out = append(out, 0x80|126, byte(n>>8), byte(n))
+	}
+	out = append(out, maskKey[:]...)
+	for i, b := range payload {
+		out = append(out, b^maskKey[i%4])
+	}
+	return out
+}
+
+func TestAdminSecurity_HITLRespond_RESTAndWS_PropagatesActorAndChannel(t *testing.T) {
+	t.Setenv("FARADAI_WIRE_ADMIN_TOKEN", "")
+
+	ks, err := auth.NewFileKeyStore(filepath.Join(t.TempDir(), "keys", "api_keys.json"))
+	if err != nil {
+		t.Fatalf("NewFileKeyStore: %v", err)
+	}
+	adminRaw, adminRec, err := ks.GenerateKey("hitl-operator", "Admin", "*")
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	secSpy := &spySecurityAuditLogger{}
+	dispatcher := guard.NewHITLDispatcher(guard.HITLDispatcherConfig{
+		Timeout:       2 * time.Second,
+		DisableTTY:    true,
+		AllowRESTOnly: true,
+	})
+	srv := NewAdminServer(AdminDependencies{
+		Config:               &config.Config{RuntimeMode: config.RuntimeModeStandalone, AdminHost: "0.0.0.0", AdminPort: 19415},
+		KeyStore:             ks,
+		GuardHITL:            dispatcher,
+		SecurityAuditLoggers: []SecurityAuditEventLogger{secSpy},
+	})
+	h := srv.Handler()
+
+	// 1. REST handleHITLRespond
+	restReq := &guard.HITLRequest{CallID: "hitl-rest-call", ToolName: "drop_db"}
+	restDone := make(chan bool, 1)
+	go func() {
+		ok, _ := dispatcher.RequestApproval(context.Background(), restReq)
+		restDone <- ok
+	}()
+	deadline := time.Now().Add(time.Second)
+	for len(dispatcher.ListPending()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	httpReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:19415/admin/guards/hitl/respond", strings.NewReader(`{"call_id":"hitl-rest-call","approved":true}`))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+adminRaw)
+	httpReq.RemoteAddr = "198.51.100.50:4444"
+	httpRec := httptest.NewRecorder()
+	h.ServeHTTP(httpRec, httpReq)
+	if httpRec.Code != http.StatusOK {
+		t.Fatalf("POST /admin/guards/hitl/respond = %d: %s", httpRec.Code, httpRec.Body.String())
+	}
+	if !<-restDone {
+		t.Fatal("expected REST approval to succeed")
+	}
+	if restReq.ApprovedBy != adminRec.ID || restReq.ApprovalChannel != "web_rest" {
+		t.Fatalf("unexpected REST HITL provenance: %+v", restReq)
+	}
+
+	// 2. WebSocket HITL_RESPOND
+	loginReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:19415/admin/auth/session", strings.NewReader(`{"token":"`+adminRaw+`"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRec := httptest.NewRecorder()
+	h.ServeHTTP(loginRec, loginReq)
+	var sessionCookie *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Name == adminSessionCookieName {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("expected admin session cookie")
+	}
+
+	ts := newTestServer(t, h)
+	if ts == nil {
+		return
+	}
+	defer ts.Close()
+
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("net.DialTimeout: %v", err)
+	}
+	defer conn.Close()
+
+	upgradeReq := "GET /ws HTTP/1.1\r\n" +
+		"Host: " + addr + "\r\n" +
+		"Origin: http://" + addr + "\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+		"Sec-WebSocket-Version: 13\r\n" +
+		"Cookie: " + sessionCookie.Name + "=" + sessionCookie.Value + "\r\n\r\n"
+	if _, err := conn.Write([]byte(upgradeReq)); err != nil {
+		t.Fatalf("write upgrade: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("WS upgrade failed: %v (%v)", err, resp)
+	}
+
+	wsReq := &guard.HITLRequest{CallID: "hitl-ws-call", ToolName: "exec_cmd"}
+	wsDone := make(chan bool, 1)
+	go func() {
+		ok, _ := dispatcher.RequestApproval(context.Background(), wsReq)
+		wsDone <- ok
+	}()
+	deadline = time.Now().Add(time.Second)
+	for len(dispatcher.ListPending()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	msgBytes, _ := json.Marshal(map[string]any{
+		"type":     "HITL_RESPOND",
+		"call_id":  "hitl-ws-call",
+		"approved": false,
+	})
+	if _, err := conn.Write(buildMaskedWSTextFrame(msgBytes)); err != nil {
+		t.Fatalf("write WS frame: %v", err)
+	}
+	if <-wsDone {
+		t.Fatal("expected WS rejection to deny")
+	}
+	if wsReq.ApprovedBy != adminRec.ID || wsReq.ApprovalChannel != "web_ws" {
+		t.Fatalf("unexpected WS HITL provenance: %+v", wsReq)
+	}
+
+	var restAudit, wsAudit bool
+	for _, ev := range secSpy.Events() {
+		if ev.EventType == "HITL_RESOLVED" && ev.ResourceID == "hitl-rest-call" && ev.ActorID == adminRec.ID && ev.Outcome == "allowed" {
+			restAudit = true
+		}
+		if ev.EventType == "HITL_RESOLVED" && ev.ResourceID == "hitl-ws-call" && ev.ActorID == adminRec.ID && ev.Outcome == "denied" {
+			wsAudit = true
+		}
+	}
+	if !restAudit || !wsAudit {
+		t.Fatalf("missing HITL_RESOLVED security events (rest=%v ws=%v): %+v", restAudit, wsAudit, secSpy.Events())
+	}
+}

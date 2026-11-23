@@ -160,14 +160,16 @@ func (d *DLPFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.R
 			cwe = result.HITLRule
 		}
 
-		approved, err := dispatcher.RequestApproval(hitlCtx, &hitltypes.HITLRequest{
+		hitlReq := &hitltypes.HITLRequest{
 			ToolName:       callParams.Name,
 			Arguments:      callParams.Arguments,
 			RiskScore:      1.0,
 			ThreatDomain:   "DLP_POLICY",
 			CWE:            cwe,
 			DecisionEngine: "DLP_HITL_GATE",
-		})
+		}
+		approved, err := dispatcher.RequestApproval(hitlCtx, hitlReq)
+		types.SetHITLResolution(ctx, approved, hitlReq.ApprovedBy, hitlReq.ApprovalChannel)
 		if err != nil || !approved {
 			msg := fmt.Sprintf("Human-in-the-loop approval denied for tool '%s'", callParams.Name)
 			if err != nil {

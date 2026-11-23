@@ -1,13 +1,17 @@
 package proxy
 
 import (
+	"cmp"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
@@ -56,6 +60,13 @@ func (s *SSEProxy) SetKeyValidator(v auth.KeyValidator) {
 	} else {
 		s.contextExtractor = NewContextExtractor(s.userCtxCfg, v)
 	}
+}
+
+// SetSecurityAuditLogger binds the non-blocking control-plane/ingress security audit logger.
+func (s *SSEProxy) SetSecurityAuditLogger(l filter.SecurityAuditLogger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.securityAuditLogger = l
 }
 
 // SessionManager returns the underlying session manager instance from coordinator.
@@ -118,7 +129,63 @@ func (s *SSEProxy) resolveTargetURL(r *http.Request) (string, error) {
 
 const unauthorizedPayload = `{"error":"UNAUTHORIZED","message":"Missing, invalid, or revoked API key. Provide Authorization: Bearer <key> or X-API-Key."}`
 
-func (s *SSEProxy) writeUnauthorized(w http.ResponseWriter) {
+var ingressSecSeq atomic.Uint64
+
+func nextIngressSecEventID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return "sec-" + hex.EncodeToString(b[:])
+	}
+	return fmt.Sprintf("sec-%d-%d", time.Now().UnixNano(), ingressSecSeq.Add(1))
+}
+
+func (s *SSEProxy) logIngressSecurityRejection(r *http.Request, eventType, action, resourceType, resourceID, reason string) {
+	s.mu.RLock()
+	logger := s.securityAuditLogger
+	s.mu.RUnlock()
+	if logger == nil {
+		return
+	}
+
+	var clientIP, traceID string
+	actorID := "anonymous"
+	actorRole := "unknown"
+	if r != nil {
+		if ip := extractClientIP(r); ip != nil {
+			clientIP = ip.String()
+		}
+		traceID = strings.TrimSpace(r.Header.Get("X-Request-ID"))
+		if uCtx, ok := r.Context().Value(filter.UserContextKey).(*filter.UserContext); ok && uCtx != nil {
+			actorID = cmp.Or(uCtx.APIKeyID, uCtx.UserID, "anonymous")
+			actorRole = cmp.Or(uCtx.Role, "unknown")
+		}
+	}
+
+	logger.LogSecurityEvent(&filter.SecurityAuditEvent{
+		ID:           nextIngressSecEventID(),
+		TraceID:      traceID,
+		Timestamp:    time.Now().UTC(),
+		EventType:    eventType,
+		ActorID:      actorID,
+		ActorRole:    actorRole,
+		ClientIP:     clientIP,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		Action:       action,
+		Outcome:      "denied",
+		Reason:       reason,
+	})
+}
+
+func (s *SSEProxy) writeUnauthorized(w http.ResponseWriter, r *http.Request) {
+	path := ""
+	method := ""
+	if r != nil {
+		path = r.URL.Path
+		method = r.Method
+	}
+	s.logIngressSecurityRejection(r, "ingress_auth_failed", method, "ingress_mcp", path, "invalid_or_missing_credentials")
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire"`)
 	w.WriteHeader(http.StatusUnauthorized)
@@ -231,9 +298,16 @@ func (s *SSEProxy) checkAggregatedAgent(r *http.Request) (string, bool, error) {
 	return "", false, nil
 }
 
-func (s *SSEProxy) writeRoutingError(w http.ResponseWriter, err error) {
+func (s *SSEProxy) writeRoutingError(w http.ResponseWriter, r *http.Request, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	if strings.Contains(err.Error(), "AGENT_ACCESS_DENIED") {
+		path := ""
+		method := ""
+		if r != nil {
+			path = r.URL.Path
+			method = r.Method
+		}
+		s.logIngressSecurityRejection(r, "ingress_auth_forbidden", method, "agent", path, "agent_access_denied")
 		w.WriteHeader(http.StatusForbidden)
 	} else if errors.Is(err, agent.ErrAgentNotFound) || errors.Is(err, agent.ErrProtocolNotFound) || strings.Contains(err.Error(), "MCP_NOT_FOUND") || strings.Contains(err.Error(), "AGENT_NOT_FOUND") {
 		w.WriteHeader(http.StatusNotFound)

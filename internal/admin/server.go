@@ -192,7 +192,22 @@ func NewAdminServer(deps AdminDependencies) *AdminServer {
 		}
 		if err := json.Unmarshal(payload, &msg); err == nil && msg.Type == "HITL_RESPOND" && msg.CallID != "" {
 			if hitl := s.getGuardHITL(); hitl != nil {
-				hitl.Resolve(msg.CallID, msg.Approved)
+				actorID := client.actorID
+				if actorID == "" {
+					actorID = "local-operator"
+				}
+				resolved := hitl.ResolveWithContext(msg.CallID, msg.Approved, "web_ws", actorID, client.clientIP)
+				if resolved && !hitl.HasOnResolved() {
+					outcome := "denied"
+					if msg.Approved {
+						outcome = "allowed"
+					}
+					s.logSecurityAuditAs(nil, actorID, "admin", "HITL_RESOLVED", "hitl_resolve", "hitl_request", msg.CallID, outcome, "web_ws", map[string]any{
+						"approval_channel": "web_ws",
+						"approved":         msg.Approved,
+						"client_ip":        client.clientIP,
+					})
+				}
 			}
 		}
 	})

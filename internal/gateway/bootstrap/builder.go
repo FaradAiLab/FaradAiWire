@@ -1,7 +1,10 @@
 package bootstrap
 
 import (
+	"cmp"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,6 +26,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/limit"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/schema"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
+	"github.com/FaradAiLab/FaradAiWire/internal/guard/hitltypes"
 	"github.com/FaradAiLab/FaradAiWire/internal/logger"
 	"github.com/FaradAiLab/FaradAiWire/internal/mcpconfig"
 	"github.com/FaradAiLab/FaradAiWire/internal/notify"
@@ -69,13 +73,50 @@ type Dependencies struct {
 
 // FilterWiringDependencies holds all shared stores and services needed to wire runtime filter instances.
 type FilterWiringDependencies struct {
-	SchemaStore     schema.Store
-	SettingsCache   *settings.Cache
-	GuardCatalog    guard.CatalogStore
-	GuardManager    guard.Manager
-	GuardHITL       *guard.HITLDispatcher
-	DesktopNotifier notify.DesktopNotifier
-	AgentRepo       agent.Resolver
+	SchemaStore         schema.Store
+	SettingsCache       *settings.Cache
+	GuardCatalog        guard.CatalogStore
+	GuardManager        guard.Manager
+	GuardHITL           *guard.HITLDispatcher
+	DesktopNotifier     notify.DesktopNotifier
+	AgentRepo           agent.Resolver
+	SecurityAuditLogger filter.SecurityAuditLogger
+}
+
+func hitlResolutionSecurityCallback(secLogger filter.SecurityAuditLogger) func(hitltypes.HITLResolutionInfo) {
+	if secLogger == nil {
+		return nil
+	}
+	return func(info hitltypes.HITLResolutionInfo) {
+		var buf [8]byte
+		id := fmt.Sprintf("sec-%d", time.Now().UnixNano())
+		if _, err := rand.Read(buf[:]); err == nil {
+			id = "sec-" + hex.EncodeToString(buf[:])
+		}
+		actorRole := "operator"
+		if strings.HasPrefix(info.ApprovedBy, "system:") {
+			actorRole = "system"
+		}
+		secLogger.LogSecurityEvent(&filter.SecurityAuditEvent{
+			ID:           id,
+			Timestamp:    time.Now().UTC(),
+			EventType:    "HITL_RESOLVED",
+			ActorID:      cmp.Or(info.ApprovedBy, "local-operator"),
+			ActorRole:    actorRole,
+			ClientIP:     info.ActorIP,
+			ResourceType: "hitl_request",
+			ResourceID:   cmp.Or(info.CallID, info.ToolName),
+			Action:       "hitl_resolve",
+			Outcome:      info.Outcome,
+			Reason:       info.ApprovalChannel,
+			Metadata: map[string]any{
+				"approval_channel": info.ApprovalChannel,
+				"approved":         info.Approved,
+				"tool_name":        info.ToolName,
+				"decision_engine":  info.DecisionEngine,
+			},
+		})
+	}
 }
 
 // WireFilterDependencies binds all shared runtime stores and managers to pipeline filters.
@@ -96,12 +137,17 @@ func WireFilterDependencies(pipe *filter.Pipeline, cfg *config.Config, deps Filt
 	}
 
 	// 2. DLP & HITL Safety Dispatcher
+	if hitlFilter, ok := pipe.GetFilter("hitl").(*hitl.HITLFilter); ok && hitlFilter != nil {
+		if deps.GuardHITL != nil {
+			hitlFilter.SetHITLDispatcher(deps.GuardHITL)
+		}
+		if cb := hitlResolutionSecurityCallback(deps.SecurityAuditLogger); cb != nil {
+			hitlFilter.SetOnResolved(cb)
+		}
+	}
 	if deps.GuardHITL != nil {
 		if dlpFilter, ok := pipe.GetFilter("dlp").(*dlp.DLPFilter); ok && dlpFilter != nil {
 			dlpFilter.SetHITLDispatcher(deps.GuardHITL)
-		}
-		if hitlFilter, ok := pipe.GetFilter("hitl").(*hitl.HITLFilter); ok && hitlFilter != nil {
-			hitlFilter.SetHITLDispatcher(deps.GuardHITL)
 		}
 	}
 
@@ -464,6 +510,9 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	// 11. Dual-Channel HITL Safety Dispatcher (GUARD-005)
 	hitlCfg := guard.DefaultHITLDispatcherConfig()
 	hitlCfg.DesktopNotifier = desktopNotifier
+	if deps.TelemetryEngine != nil {
+		hitlCfg.OnResolved = hitlResolutionSecurityCallback(deps.TelemetryEngine)
+	}
 	hitlDispatcher := guard.NewHITLDispatcher(hitlCfg)
 	deps.GuardHITL = hitlDispatcher
 
@@ -486,13 +535,14 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 
 	// 12. Wire all pipeline filters with shared runtime dependencies
 	WireFilterDependencies(pipe, cfg, FilterWiringDependencies{
-		SchemaStore:     deps.SchemaStore,
-		SettingsCache:   deps.SettingsCache,
-		GuardCatalog:    deps.GuardCatalog,
-		GuardManager:    guardManager,
-		GuardHITL:       hitlDispatcher,
-		DesktopNotifier: desktopNotifier,
-		AgentRepo:       agentRepo,
+		SchemaStore:         deps.SchemaStore,
+		SettingsCache:       deps.SettingsCache,
+		GuardCatalog:        deps.GuardCatalog,
+		GuardManager:        guardManager,
+		GuardHITL:           hitlDispatcher,
+		DesktopNotifier:     desktopNotifier,
+		AgentRepo:           agentRepo,
+		SecurityAuditLogger: deps.TelemetryEngine,
 	})
 
 	// 13. AI Guard Model Installer
@@ -529,6 +579,9 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		sseP := proxy.NewSSEProxyWithCoordinator(listenPort, cfg.SSE.TargetURL, coordinator, cfg.UserContext, secCfg)
 		sseP.SetHost(listenHost)
 		sseP.SetKeyValidator(keyStore)
+		if deps.TelemetryEngine != nil {
+			sseP.SetSecurityAuditLogger(deps.TelemetryEngine)
+		}
 		deps.SSEProxy = sseP
 	}
 

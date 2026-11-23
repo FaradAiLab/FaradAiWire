@@ -28,22 +28,23 @@ type sessionBinding struct {
 
 // SSEProxy acts as a thin HTTP Reverse Proxy for SSE and MCP JSON-RPC messages.
 type SSEProxy struct {
-	host               string
-	port               int
-	targetURL          string
-	server             *http.Server
-	httpClient         *http.Client
-	mu                 sync.RWMutex
-	sessionTargets     map[string]sessionBinding // sessionId -> sessionBinding
-	userCtxCfg         config.UserContextConfig
-	contextExtractor   *ContextExtractor
-	secCfg             config.SecurityConfig
-	keyValidator       auth.KeyValidator
-	drainingMiddleware func(http.Handler) http.Handler
-	shutdownOnce       sync.Once
-	closed             bool
-	baseCtx            context.Context
-	baseCancel         context.CancelFunc
+	host                string
+	port                int
+	targetURL           string
+	server              *http.Server
+	httpClient          *http.Client
+	mu                  sync.RWMutex
+	sessionTargets      map[string]sessionBinding // sessionId -> sessionBinding
+	userCtxCfg          config.UserContextConfig
+	contextExtractor    *ContextExtractor
+	secCfg              config.SecurityConfig
+	keyValidator        auth.KeyValidator
+	securityAuditLogger filter.SecurityAuditLogger
+	drainingMiddleware  func(http.Handler) http.Handler
+	shutdownOnce        sync.Once
+	closed              bool
+	baseCtx             context.Context
+	baseCancel          context.CancelFunc
 
 	coordinator *session.InboundCoordinator
 }
@@ -194,7 +195,7 @@ func (s *SSEProxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	uCtx, err := s.authenticate(r)
 	if err != nil {
-		s.writeUnauthorized(w)
+		s.writeUnauthorized(w, r)
 		return
 	}
 	if uCtx != nil {
@@ -202,7 +203,7 @@ func (s *SSEProxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if agentName, isAgg, err := s.checkAggregatedAgent(r); err != nil {
-		s.writeRoutingError(w, err)
+		s.writeRoutingError(w, r, err)
 		return
 	} else if isAgg {
 		s.handleAggregatedSSE(w, r, agentName)
@@ -211,7 +212,7 @@ func (s *SSEProxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	targetURLStr, err := s.resolveTargetURL(r)
 	if err != nil {
-		s.writeRoutingError(w, err)
+		s.writeRoutingError(w, r, err)
 		return
 	}
 
@@ -286,8 +287,11 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	uCtx, err := s.authenticate(r)
 	if err != nil {
-		s.writeUnauthorized(w)
+		s.writeUnauthorized(w, r)
 		return
+	}
+	if uCtx != nil {
+		r = r.WithContext(context.WithValue(r.Context(), filter.UserContextKey, uCtx))
 	}
 
 	body, ok := s.readRequestBody(w, r)
@@ -320,7 +324,7 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 	explicitAgent := extractExplicitAgent(r)
 	pathAgent := extractAgentNameFromPath(r.URL.Path)
 	if pathAgent != "" && explicitAgent != "" && !strings.EqualFold(pathAgent, explicitAgent) {
-		s.writeRoutingError(w, fmt.Errorf("AGENT_ACCESS_DENIED: explicit agent '%s' conflicts with URL path agent '%s'", explicitAgent, pathAgent))
+		s.writeRoutingError(w, r, fmt.Errorf("AGENT_ACCESS_DENIED: explicit agent '%s' conflicts with URL path agent '%s'", explicitAgent, pathAgent))
 		return
 	}
 	agentName := explicitAgent
@@ -328,7 +332,7 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 		agentName = pathAgent
 	}
 	if agentName != "" && keyAgent != "" && !strings.EqualFold(keyAgent, agentName) {
-		s.writeRoutingError(w, fmt.Errorf("AGENT_ACCESS_DENIED: API key is scoped to agent '%s', access to '%s' is forbidden", keyAgent, agentName))
+		s.writeRoutingError(w, r, fmt.Errorf("AGENT_ACCESS_DENIED: API key is scoped to agent '%s', access to '%s' is forbidden", keyAgent, agentName))
 		return
 	}
 	if agentName == "" && keyAgent != "" {
@@ -355,7 +359,7 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 	if repo != nil && agentName != "" {
 		agentCfg, err = repo.GetAgentConfig(agentName)
 		if err != nil {
-			s.writeRoutingError(w, err)
+			s.writeRoutingError(w, r, err)
 			return
 		}
 	}
@@ -370,7 +374,7 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 		if !isDirect {
 			if _, bErr := mgr.GetOrCreateBridge(s.lifecycleCtx(), agentName, clientSessionID, r.Header); bErr != nil {
 				if errors.Is(bErr, session.ErrBridgeAgentMismatch) {
-					s.writeRoutingError(w, fmt.Errorf("AGENT_ACCESS_DENIED: %w", bErr))
+					s.writeRoutingError(w, r, fmt.Errorf("AGENT_ACCESS_DENIED: %w", bErr))
 					return
 				}
 				slog.WarnContext(r.Context(), "Failed to prepare session bridge for incoming message",

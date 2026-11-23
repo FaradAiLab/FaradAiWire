@@ -44,6 +44,7 @@ type HITLFilter struct {
 	cliIn            io.Reader
 	cliOut           io.Writer
 	hitlDispatcher   HITLApprover
+	onResolved       func(hitltypes.HITLResolutionInfo)
 	mu               sync.RWMutex
 }
 
@@ -92,6 +93,22 @@ func (h *HITLFilter) SetHITLDispatcher(dispatcher HITLApprover) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.hitlDispatcher = dispatcher
+}
+
+// SetOnResolved registers a callback fired when direct CLI or webhook channels resolve HITL.
+func (h *HITLFilter) SetOnResolved(fn func(hitltypes.HITLResolutionInfo)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onResolved = fn
+}
+
+func (h *HITLFilter) emitResolved(info hitltypes.HITLResolutionInfo) {
+	h.mu.RLock()
+	fn := h.onResolved
+	h.mu.RUnlock()
+	if fn != nil {
+		fn(info)
+	}
 }
 
 // HITLDispatcher returns the currently configured dual-channel HITL dispatcher.
@@ -176,9 +193,31 @@ func (h *HITLFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.
 
 	if strings.EqualFold(h.approvalMode, "webhook") {
 		if strings.TrimSpace(h.webhookURL) == "" {
+			types.SetHITLResolution(ctx, false, "system:misconfigured", "webhook")
 			return nil, mcp.NewError(mcp.ErrHITLDenied, "Human-in-the-loop approval failed: webhook mode configured without webhook URL", nil)
 		}
-		approved, err = h.promptWebhook(ctx, callParams.Name, callParams.Arguments, userID)
+		var approvedBy string
+		approved, approvedBy, err = h.promptWebhook(ctx, callParams.Name, callParams.Arguments, userID)
+		outcome := "denied"
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, hitltypes.ErrHITLTimeout) {
+				outcome = "timeout"
+				approvedBy = "system:timeout"
+			} else if approvedBy == "" {
+				approvedBy = "webhook"
+			}
+		} else if approved {
+			outcome = "allowed"
+		}
+		types.SetHITLResolution(ctx, approved, approvedBy, "webhook")
+		h.emitResolved(hitltypes.HITLResolutionInfo{
+			ToolName:        callParams.Name,
+			Approved:        approved,
+			ApprovedBy:      approvedBy,
+			ApprovalChannel: "webhook",
+			Outcome:         outcome,
+			DecisionEngine:  "hitl_filter",
+		})
 	} else if dispatcher != nil && !hasCustomCLI {
 		argsMap := make(map[string]interface{})
 		if len(callParams.Arguments) > 0 {
@@ -189,20 +228,43 @@ func (h *HITLFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.
 		waitCtx, cancel := context.WithTimeout(ctx, h.timeout)
 		defer cancel()
 
-		approved, err = dispatcher.RequestApproval(waitCtx, &hitltypes.HITLRequest{
+		hitlReq := &hitltypes.HITLRequest{
 			ToolName:       callParams.Name,
 			Arguments:      argsMap,
 			RiskScore:      1.0,
 			ThreatDomain:   "DESTRUCTIVE_TOOL_POLICY",
 			DecisionEngine: "hitl_filter",
-		})
+		}
+		approved, err = dispatcher.RequestApproval(waitCtx, hitlReq)
 		if errors.Is(err, hitltypes.ErrHITLDenied) {
 			err = nil
 			approved = false
 		}
+		types.SetHITLResolution(ctx, approved, hitlReq.ApprovedBy, hitlReq.ApprovalChannel)
 	} else {
 		// Standalone CLI console fallback
 		approved, err = h.promptCLI(ctx, callParams.Name, string(callParams.Arguments))
+		approvedBy := "local-operator"
+		outcome := "denied"
+		if err != nil {
+			if errors.Is(err, hitltypes.ErrHITLTimeout) || errors.Is(err, context.DeadlineExceeded) {
+				approvedBy = "system:timeout"
+				outcome = "timeout"
+			} else if errors.Is(err, hitltypes.ErrHeadlessFailClosed) {
+				approvedBy = "system:fail_closed"
+			}
+		} else if approved {
+			outcome = "allowed"
+		}
+		types.SetHITLResolution(ctx, approved, approvedBy, "cli_tty")
+		h.emitResolved(hitltypes.HITLResolutionInfo{
+			ToolName:        callParams.Name,
+			Approved:        approved,
+			ApprovedBy:      approvedBy,
+			ApprovalChannel: "cli_tty",
+			Outcome:         outcome,
+			DecisionEngine:  "hitl_filter",
+		})
 	}
 
 	if err != nil {
@@ -307,7 +369,8 @@ type webhookPayload struct {
 }
 
 type webhookResponse struct {
-	Approved bool `json:"approved"`
+	Approved   bool   `json:"approved"`
+	ApprovedBy string `json:"approved_by,omitempty"`
 }
 
 func redactURLForLog(raw string) string {
@@ -321,12 +384,12 @@ func redactURLForLog(raw string) string {
 	return u.String()
 }
 
-func (h *HITLFilter) promptWebhook(ctx context.Context, toolName string, args json.RawMessage, userID string) (bool, error) {
+func (h *HITLFilter) promptWebhook(ctx context.Context, toolName string, args json.RawMessage, userID string) (bool, string, error) {
 	resolvedURL := os.ExpandEnv(h.webhookURL)
 	safeLogURL := redactURLForLog(resolvedURL)
 	if err := transport.ValidateURL(resolvedURL, h.ssrfOpts); err != nil {
 		slog.WarnContext(ctx, "Webhook URL rejected by SSRF guardrails", slog.String("url", safeLogURL), slog.String("error", err.Error()))
-		return false, fmt.Errorf("SSRF protection blocked webhook dispatch: %w", err)
+		return false, "webhook", fmt.Errorf("SSRF protection blocked webhook dispatch: %w", err)
 	}
 
 	payload := webhookPayload{
@@ -337,7 +400,7 @@ func (h *HITLFilter) promptWebhook(ctx context.Context, toolName string, args js
 
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		return false, err
+		return false, "webhook", err
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, h.timeout)
@@ -345,7 +408,7 @@ func (h *HITLFilter) promptWebhook(ctx context.Context, toolName string, args js
 
 	req, err := http.NewRequestWithContext(waitCtx, "POST", resolvedURL, bytes.NewBuffer(bodyBytes))
 	if err != nil {
-		return false, fmt.Errorf("failed to construct webhook request: %w", err)
+		return false, "webhook", fmt.Errorf("failed to construct webhook request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -357,20 +420,24 @@ func (h *HITLFilter) promptWebhook(ctx context.Context, toolName string, args js
 	if err != nil {
 		var uErr *url.Error
 		if errors.As(err, &uErr) {
-			return false, fmt.Errorf("webhook request failed: %w", uErr.Err)
+			return false, "webhook", fmt.Errorf("webhook request failed: %w", uErr.Err)
 		}
-		return false, fmt.Errorf("webhook request failed: %w", err)
+		return false, "webhook", fmt.Errorf("webhook request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("webhook returned non-200 status: %d", resp.StatusCode)
+		return false, "webhook", fmt.Errorf("webhook returned non-200 status: %d", resp.StatusCode)
 	}
 
 	var webResp webhookResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&webResp); err != nil {
-		return false, fmt.Errorf("failed to decode webhook response: %w", err)
+		return false, "webhook", fmt.Errorf("failed to decode webhook response: %w", err)
 	}
 
-	return webResp.Approved, nil
+	approvedBy := strings.TrimSpace(webResp.ApprovedBy)
+	if approvedBy == "" {
+		approvedBy = "webhook"
+	}
+	return webResp.Approved, approvedBy, nil
 }

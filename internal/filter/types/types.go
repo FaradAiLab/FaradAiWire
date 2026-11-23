@@ -31,11 +31,13 @@ const (
 // UserContext represents the end-user metadata triggering the AI agent.
 type UserContext = types.UserContext
 
-// AuditMetadata records non-mutating audit observations (e.g. ActionAudit) across filter pipelines.
+// AuditMetadata records non-mutating audit observations and HITL resolution provenance across filter pipelines.
 type AuditMetadata struct {
-	AuditedRules  []string
-	FilterName    string
-	HumanApproved bool
+	AuditedRules    []string
+	FilterName      string
+	HumanApproved   bool
+	ApprovedBy      string
+	ApprovalChannel string
 }
 
 // WithAuditMetadata attaches an AuditMetadata pointer to context.
@@ -60,6 +62,15 @@ func WithHumanApproved(ctx context.Context, approved bool) context.Context {
 func SetHumanApproved(ctx context.Context, approved bool) {
 	if meta := GetAuditMetadata(ctx); meta != nil {
 		meta.HumanApproved = approved
+	}
+}
+
+// SetHITLResolution records the full HITL decision provenance on the request's AuditMetadata.
+func SetHITLResolution(ctx context.Context, approved bool, approvedBy, channel string) {
+	if meta := GetAuditMetadata(ctx); meta != nil {
+		meta.HumanApproved = approved
+		meta.ApprovedBy = approvedBy
+		meta.ApprovalChannel = channel
 	}
 }
 

@@ -26,9 +26,20 @@ func (a *AdminServer) handleHITLRespond(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if !hitl.Resolve(req.CallID, req.Approved) {
+	actor := adminActorFromRequest(r)
+	if !hitl.ResolveWithContext(req.CallID, req.Approved, "web_rest", actor.ActorID, actor.ClientIP) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("Pending HITL approval request '%s' not found or already resolved", req.CallID))
 		return
+	}
+	if !hitl.HasOnResolved() {
+		outcome := "denied"
+		if req.Approved {
+			outcome = "allowed"
+		}
+		a.logSecurityAudit(r, "HITL_RESOLVED", "hitl_resolve", "hitl_request", req.CallID, outcome, "web_rest", map[string]any{
+			"approval_channel": "web_rest",
+			"approved":         req.Approved,
+		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{

@@ -46,9 +46,17 @@ const (
 	hitlStateCancelled
 )
 
+type hitlDecision struct {
+	approved bool
+	channel  string
+	actorID  string
+	actorIP  string
+	state    string
+}
+
 type pendingApproval struct {
 	req    *HITLRequest
-	respCh chan bool
+	respCh chan hitlDecision
 	state  atomic.Int32
 }
 
@@ -61,6 +69,7 @@ type HITLDispatcherConfig struct {
 	AllowRESTOnly   bool
 	WSHub           WebSocketHub
 	DesktopNotifier notify.DesktopNotifier
+	OnResolved      func(hitltypes.HITLResolutionInfo)
 }
 
 // DefaultHITLDispatcherConfig provides the standard 60-second fail-closed configuration.
@@ -190,6 +199,18 @@ func (d *HITLDispatcher) RequestApproval(ctx context.Context, req *HITLRequest) 
 			slog.String("call_id", req.CallID),
 			slog.String("tool", req.ToolName),
 		)
+		req.ApprovedBy = "system:fail_closed"
+		req.ApprovalChannel = "cli_tty"
+		req.ResolutionState = "headless_fail_closed"
+		d.notifyResolved(hitltypes.HITLResolutionInfo{
+			CallID:          req.CallID,
+			ToolName:        req.ToolName,
+			Approved:        false,
+			ApprovedBy:      "system:fail_closed",
+			ApprovalChannel: "cli_tty",
+			Outcome:         "denied",
+			DecisionEngine:  req.DecisionEngine,
+		})
 		return false, ErrHeadlessFailClosed
 	}
 
@@ -198,7 +219,7 @@ func (d *HITLDispatcher) RequestApproval(ctx context.Context, req *HITLRequest) 
 
 	pa := &pendingApproval{
 		req:    req,
-		respCh: make(chan bool, 1),
+		respCh: make(chan hitlDecision, 1),
 	}
 
 	d.mu.Lock()
@@ -258,35 +279,80 @@ func (d *HITLDispatcher) RequestApproval(ctx context.Context, req *HITLRequest) 
 	defer timer.Stop()
 
 	// 3. Await first response from either channel, or enforce 60s fail-closed expiration
+	timeoutChannel := defaultTimeoutChannel(isTTYAvail, wsHub, allowRESTOnly)
 	select {
-	case approved := <-pa.respCh:
-		if approved {
+	case dec := <-pa.respCh:
+		req.ApprovedBy = dec.actorID
+		req.ApprovalChannel = dec.channel
+		req.ResolutionState = dec.state
+		if dec.approved {
 			slog.InfoContext(ctx, "HITL tool call approved by operator",
 				slog.String("call_id", req.CallID),
 				slog.String("tool", req.ToolName),
+				slog.String("channel", dec.channel),
+				slog.String("actor_id", dec.actorID),
 			)
 			return true, nil
 		}
 		slog.WarnContext(ctx, "HITL tool call rejected by operator",
 			slog.String("call_id", req.CallID),
 			slog.String("tool", req.ToolName),
+			slog.String("channel", dec.channel),
+			slog.String("actor_id", dec.actorID),
 		)
 		return false, ErrHITLDenied
 
 	case <-timer.C:
 		if pa.state.CompareAndSwap(hitlStatePending, hitlStateTimeout) {
+			req.ApprovedBy = "system:timeout"
+			req.ApprovalChannel = timeoutChannel
+			req.ResolutionState = "timeout"
 			slog.WarnContext(ctx, "HITL tool call timed out: failing-closed",
 				slog.String("call_id", req.CallID),
 				slog.String("tool", req.ToolName),
 				slog.Duration("timeout", timeout),
+				slog.String("channel", timeoutChannel),
 			)
 			d.broadcastResolution(req.CallID, false, "timeout")
+			d.notifyResolved(hitltypes.HITLResolutionInfo{
+				CallID:          req.CallID,
+				ToolName:        req.ToolName,
+				Approved:        false,
+				ApprovedBy:      "system:timeout",
+				ApprovalChannel: timeoutChannel,
+				Outcome:         "timeout",
+				DecisionEngine:  req.DecisionEngine,
+			})
+		} else {
+			select {
+			case dec := <-pa.respCh:
+				req.ApprovedBy = dec.actorID
+				req.ApprovalChannel = dec.channel
+				req.ResolutionState = dec.state
+				if dec.approved {
+					return true, nil
+				}
+				return false, ErrHITLDenied
+			default:
+			}
 		}
 		return false, ErrHITLTimeout
 
 	case <-ctx.Done():
 		if pa.state.CompareAndSwap(hitlStatePending, hitlStateCancelled) {
+			req.ApprovedBy = "system:cancelled"
+			req.ApprovalChannel = timeoutChannel
+			req.ResolutionState = "cancelled"
 			d.broadcastResolution(req.CallID, false, "cancelled")
+			d.notifyResolved(hitltypes.HITLResolutionInfo{
+				CallID:          req.CallID,
+				ToolName:        req.ToolName,
+				Approved:        false,
+				ApprovedBy:      "system:cancelled",
+				ApprovalChannel: timeoutChannel,
+				Outcome:         "cancelled",
+				DecisionEngine:  req.DecisionEngine,
+			})
 		}
 		return false, ctx.Err()
 	}
@@ -350,7 +416,7 @@ func (d *HITLDispatcher) promptTTY(ctx context.Context, req *HITLRequest, pa *pe
 		return
 	}
 
-	d.Resolve(req.CallID, console.ParseYesNoAnswer(line))
+	d.ResolveWithContext(req.CallID, console.ParseYesNoAnswer(line), "cli_tty", "local-operator", "")
 }
 
 func writeExternalResolutionNotice(w io.Writer, state int32) {
@@ -364,9 +430,55 @@ func writeExternalResolutionNotice(w io.Writer, state int32) {
 	}
 }
 
-// Resolve resolves a pending approval request by CallID.
+// SetOnResolved attaches an optional callback fired once whenever an HITL request terminates.
+func (d *HITLDispatcher) SetOnResolved(fn func(hitltypes.HITLResolutionInfo)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cfg.OnResolved = fn
+}
+
+// HasOnResolved reports whether an OnResolved hook is currently configured on this dispatcher.
+func (d *HITLDispatcher) HasOnResolved() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.cfg.OnResolved != nil
+}
+
+func (d *HITLDispatcher) notifyResolved(info hitltypes.HITLResolutionInfo) {
+	d.mu.RLock()
+	fn := d.cfg.OnResolved
+	d.mu.RUnlock()
+	if fn != nil {
+		fn(info)
+	}
+}
+
+func defaultTimeoutChannel(isTTYAvail bool, wsHub WebSocketHub, allowRESTOnly bool) string {
+	if wsHub != nil && wsHub.ClientCount() > 0 && !isTTYAvail {
+		return "web_ws"
+	}
+	if isTTYAvail {
+		return "cli_tty"
+	}
+	if allowRESTOnly {
+		return "web_rest"
+	}
+	return "web_ws"
+}
+
+// Resolve resolves a pending approval request by CallID using default local operator provenance.
 // Returns true if successfully resolved, or false if not found or already resolved.
 func (d *HITLDispatcher) Resolve(callID string, approved bool) bool {
+	return d.ResolveWithContext(callID, approved, "web_rest", "local-operator", "")
+}
+
+// ResolveWithProvenance resolves a pending approval request with explicit channel and actor attribution.
+func (d *HITLDispatcher) ResolveWithProvenance(callID string, approved bool, channel, actorID string) bool {
+	return d.ResolveWithContext(callID, approved, channel, actorID, "")
+}
+
+// ResolveWithContext resolves a pending approval request with explicit channel, actor ID, and source IP.
+func (d *HITLDispatcher) ResolveWithContext(callID string, approved bool, channel, actorID, actorIP string) bool {
 	d.mu.RLock()
 	pa, exists := d.pending[callID]
 	d.mu.RUnlock()
@@ -375,19 +487,44 @@ func (d *HITLDispatcher) Resolve(callID string, approved bool) bool {
 		return false
 	}
 
+	if channel == "" {
+		channel = "web_rest"
+	}
+	if actorID == "" {
+		actorID = "local-operator"
+	}
+
 	targetState := hitlStateDenied
-	reason := "denied"
+	stateStr := "denied"
+	outcome := "denied"
 	if approved {
 		targetState = hitlStateApproved
-		reason = "approved"
+		stateStr = "approved"
+		outcome = "allowed"
 	}
 	if !pa.state.CompareAndSwap(hitlStatePending, targetState) {
 		return false
 	}
 
-	d.broadcastResolution(callID, approved, reason)
+	d.broadcastResolution(callID, approved, stateStr)
 	d.removePending(callID)
-	pa.respCh <- approved
+	d.notifyResolved(hitltypes.HITLResolutionInfo{
+		CallID:          callID,
+		ToolName:        pa.req.ToolName,
+		Approved:        approved,
+		ApprovedBy:      actorID,
+		ApprovalChannel: channel,
+		Outcome:         outcome,
+		ActorIP:         actorIP,
+		DecisionEngine:  pa.req.DecisionEngine,
+	})
+	pa.respCh <- hitlDecision{
+		approved: approved,
+		channel:  channel,
+		actorID:  actorID,
+		actorIP:  actorIP,
+		state:    stateStr,
+	}
 	return true
 }
 

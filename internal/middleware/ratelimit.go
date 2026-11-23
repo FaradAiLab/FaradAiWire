@@ -3,11 +3,13 @@ package middleware
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -102,13 +104,106 @@ func (l *TokenBucketLimiter) Allow(ip string) bool {
 	return false
 }
 
+const (
+	defaultRateLimitWarnWindow = 30 * time.Second
+	maxWarnBuckets             = 10000
+)
+
+var globalRateLimitDrops atomic.Int64
+
+// TotalRateLimitDrops returns the cumulative count of HTTP 429 responses emitted across all instances.
+func TotalRateLimitDrops() int64 {
+	return globalRateLimitDrops.Load()
+}
+
+// RateLimitOptions configures non-blocking observability and windowed warning summaries for HTTPRateLimitWithOptions.
+type RateLimitOptions struct {
+	WarnWindow    time.Duration
+	Counter       *atomic.Int64
+	OnRateLimited func(clientIP, path string)
+}
+
+type rateLimitWarnBucket struct {
+	lastWarn   time.Time
+	suppressed int64
+}
+
+type rateLimitWarnAggregator struct {
+	mu      sync.Mutex
+	window  time.Duration
+	buckets map[string]*rateLimitWarnBucket
+}
+
+func newRateLimitWarnAggregator(window time.Duration) *rateLimitWarnAggregator {
+	if window <= 0 {
+		window = defaultRateLimitWarnWindow
+	}
+	return &rateLimitWarnAggregator{
+		window:  window,
+		buckets: make(map[string]*rateLimitWarnBucket),
+	}
+}
+
+func (a *rateLimitWarnAggregator) record(ip, path string) {
+	now := time.Now()
+	a.mu.Lock()
+	if len(a.buckets) >= maxWarnBuckets {
+		for k, b := range a.buckets {
+			if now.Sub(b.lastWarn) > a.window*2 {
+				delete(a.buckets, k)
+			}
+		}
+		if len(a.buckets) >= maxWarnBuckets {
+			a.buckets = make(map[string]*rateLimitWarnBucket)
+		}
+	}
+	b, ok := a.buckets[ip]
+	if !ok {
+		b = &rateLimitWarnBucket{}
+		a.buckets[ip] = b
+	}
+	b.suppressed++
+	shouldWarn := b.lastWarn.IsZero() || now.Sub(b.lastWarn) >= a.window
+	var emitCount int64
+	if shouldWarn {
+		emitCount = b.suppressed
+		b.suppressed = 0
+		b.lastWarn = now
+	}
+	a.mu.Unlock()
+
+	if shouldWarn {
+		slog.Warn("HTTP rate limit exceeded (windowed summary)",
+			slog.String("client_ip", ip),
+			slog.String("path", path),
+			slog.Int64("rejected_count", emitCount),
+			slog.Duration("window", a.window),
+		)
+	}
+}
+
 // HTTPRateLimit returns an HTTP middleware enforcing token-bucket rate limiting per client IP.
 func HTTPRateLimit(rate float64, burst int) func(http.Handler) http.Handler {
+	return HTTPRateLimitWithOptions(rate, burst, RateLimitOptions{})
+}
+
+// HTTPRateLimitWithOptions returns a token-bucket HTTP rate limiter with non-blocking drop aggregation.
+func HTTPRateLimitWithOptions(rate float64, burst int, opts RateLimitOptions) func(http.Handler) http.Handler {
 	limiter := NewTokenBucketLimiter(rate, burst)
+	agg := newRateLimitWarnAggregator(opts.WarnWindow)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := ClientIP(r)
 			if !limiter.Allow(ip) {
+				globalRateLimitDrops.Add(1)
+				if opts.Counter != nil {
+					opts.Counter.Add(1)
+				}
+				if opts.OnRateLimited != nil {
+					opts.OnRateLimited(ip, r.URL.Path)
+				}
+				agg.record(ip, r.URL.Path)
+
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", "1")
 				w.WriteHeader(http.StatusTooManyRequests)

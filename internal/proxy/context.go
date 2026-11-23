@@ -143,6 +143,10 @@ func (c *ContextExtractor) Authenticate(r *http.Request) (*filter.UserContext, e
 	incomingUser := strings.TrimSpace(r.Header.Get(userHeader))
 	incomingRole := strings.TrimSpace(r.Header.Get(roleHeader))
 	clientIP := extractClientIP(r)
+	var clientIPStr string
+	if clientIP != nil {
+		clientIPStr = clientIP.String()
+	}
 
 	// 1. Check for client API key / Bearer token
 	var rawToken string
@@ -169,16 +173,18 @@ func (c *ContextExtractor) Authenticate(r *http.Request) (*filter.UserContext, e
 					UserID:    user,
 					Role:      keyRecord.Role,
 					AgentName: keyRecord.AgentName,
+					APIKeyID:  keyRecord.ID,
+					ClientIP:  clientIPStr,
 				}, nil
 			}
 
 			// Invalid or revoked token provided -> fail-closed HTTP 401
-			slog.WarnContext(r.Context(), "Invalid or revoked API key presented", slog.String("client_ip", clientIP.String()))
+			slog.WarnContext(r.Context(), "Invalid or revoked API key presented", slog.String("client_ip", clientIPStr))
 			return nil, ErrUnauthorized
 		}
 
 		// Token provided but no keyValidator configured -> fail-closed HTTP 401
-		slog.WarnContext(r.Context(), "Token presented but no KeyValidator is configured", slog.String("client_ip", clientIP.String()))
+		slog.WarnContext(r.Context(), "Token presented but no KeyValidator is configured", slog.String("client_ip", clientIPStr))
 		return nil, ErrUnauthorized
 	}
 
@@ -196,21 +202,23 @@ func (c *ContextExtractor) Authenticate(r *http.Request) (*filter.UserContext, e
 			role = fallbackRole
 		}
 		return &filter.UserContext{
-			UserID: user,
-			Role:   role,
+			UserID:   user,
+			Role:     role,
+			ClientIP: clientIPStr,
 		}, nil
 	}
 
 	// 3. Untrusted / unauthenticated client (no credentials, no HMAC, not trusted IP)
 	if c.keyValidator != nil {
-		slog.WarnContext(r.Context(), "Unauthenticated client rejected", slog.String("client_ip", clientIP.String()))
+		slog.WarnContext(r.Context(), "Unauthenticated client rejected", slog.String("client_ip", clientIPStr))
 		return nil, ErrUnauthorized
 	}
 
 	// 4. In testing harnesses without keyValidator and without provenance requirements:
 	return &filter.UserContext{
-		UserID: fallbackUser,
-		Role:   fallbackRole,
+		UserID:   fallbackUser,
+		Role:     fallbackRole,
+		ClientIP: clientIPStr,
 	}, nil
 }
 

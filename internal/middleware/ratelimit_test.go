@@ -1,8 +1,12 @@
 package middleware
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -266,5 +270,58 @@ func BenchmarkClientIP_SocketExtraction(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_ = ClientIP(req)
+	}
+}
+
+func TestHTTPRateLimitWithOptions_429CounterAndWindowedWarn(t *testing.T) {
+	var logBuf bytes.Buffer
+	oldDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(oldDefault)
+
+	var observerHits atomic.Int64
+	var dropCounter atomic.Int64
+	baseBefore := TotalRateLimitDrops()
+
+	mw := HTTPRateLimitWithOptions(1.0, 2, RateLimitOptions{
+		WarnWindow: time.Minute,
+		Counter:    &dropCounter,
+		OnRateLimited: func(ip, path string) {
+			observerHits.Add(1)
+		},
+	})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// 2 allowed, 48 rejected with 429
+	for i := 0; i < 50; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/message", nil)
+		req.RemoteAddr = "198.51.100.77:12345"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		want := http.StatusOK
+		if i >= 2 {
+			want = http.StatusTooManyRequests
+		}
+		if rec.Code != want {
+			t.Fatalf("req %d: status = %d, want %d", i, rec.Code, want)
+		}
+	}
+
+	if got := dropCounter.Load(); got != 48 {
+		t.Fatalf("Counter = %d, want 48", got)
+	}
+	if got := observerHits.Load(); got != 48 {
+		t.Fatalf("OnRateLimited hits = %d, want 48", got)
+	}
+	if delta := TotalRateLimitDrops() - baseBefore; delta < 48 {
+		t.Fatalf("TotalRateLimitDrops delta = %d, want >= 48", delta)
+	}
+
+	// Windowed summary: 48 rapid rejections from 1 IP bucket must NOT emit 48 log lines
+	lines := strings.Count(strings.TrimSpace(logBuf.String()), "\n") + 1
+	if strings.TrimSpace(logBuf.String()) == "" || lines > 3 {
+		t.Fatalf("expected 1-3 windowed slog.Warn summaries, got %d lines:\n%s", lines, logBuf.String())
 	}
 }

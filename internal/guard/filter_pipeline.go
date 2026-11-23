@@ -344,14 +344,16 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 		hitlCtx, cancel := context.WithTimeout(ctx, f.getHITLTimeout())
 		defer cancel()
 
-		approved, err := hitl.RequestApproval(hitlCtx, &HITLRequest{
+		hitlReq := &HITLRequest{
 			ToolName:       callParams.Name,
 			Arguments:      callParams.Arguments,
 			RiskScore:      1.0,
 			ThreatDomain:   "STRICT_POLICY",
 			CWE:            "HITL-MANDATORY",
 			DecisionEngine: "STRICT_HITL_GATE",
-		})
+		}
+		approved, err := hitl.RequestApproval(hitlCtx, hitlReq)
+		types.SetHITLResolution(ctx, approved, hitlReq.ApprovedBy, hitlReq.ApprovalChannel)
 		if err != nil || !approved {
 			msg := fmt.Sprintf("Human-in-the-loop approval denied for tool '%s'", callParams.Name)
 			if err != nil {
@@ -464,14 +466,16 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 				hitlCtx, cancel := context.WithTimeout(ctx, f.getHITLTimeout())
 				defer cancel()
 
-				approved, err := hitl.RequestApproval(hitlCtx, &HITLRequest{
+				hitlReq := &HITLRequest{
 					ToolName:       callParams.Name,
 					Arguments:      callParams.Arguments,
 					RiskScore:      result.MaliciousProbability,
 					ThreatDomain:   result.ThreatDomain,
 					CWE:            result.CWE,
 					DecisionEngine: engine,
-				})
+				}
+				approved, err := hitl.RequestApproval(hitlCtx, hitlReq)
+				types.SetHITLResolution(ctx, approved, hitlReq.ApprovedBy, hitlReq.ApprovalChannel)
 				if err != nil || !approved {
 					msg := fmt.Sprintf("Human-in-the-loop approval denied for tool '%s'", callParams.Name)
 					if err != nil {
