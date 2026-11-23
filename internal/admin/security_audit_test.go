@@ -28,6 +28,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/policy"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
 	"github.com/FaradAiLab/FaradAiWire/internal/settings"
+	"os"
 )
 
 type spySecurityAuditLogger struct {
@@ -903,5 +904,58 @@ func TestAdminSecurity_HITLRespond_RESTAndWS_PropagatesActorAndChannel(t *testin
 	}
 	if !restAudit || !wsAudit {
 		t.Fatalf("missing HITL_RESOLVED security events (rest=%v ws=%v): %+v", restAudit, wsAudit, secSpy.Events())
+	}
+}
+
+func TestAdminAuditLogs_FallbackJSONLReader_RotatedAndLargeLines(t *testing.T) {
+	dir := t.TempDir()
+	activePath := filepath.Join(dir, "faradai_audit.jsonl")
+	rotatedPath := filepath.Join(dir, "faradai_audit.20261123-000001.000001.jsonl")
+
+	// Older rotated file has 1 segment_header + 1 large (> 128 KB) tool_audit line
+	largePayload := strings.Repeat("A", 150*1024)
+	rotatedContent := `{"type":"segment_header","record_type":"segment_header","anchor_hash":"a0"}` + "\n" +
+		`{"record_type":"tool_audit","id":"rot-1","tool_name":"old_tool","decision":"ALLOWED","raw_payload":"` + largePayload + `"}` + "\n"
+	if err := os.WriteFile(rotatedPath, []byte(rotatedContent), 0600); err != nil {
+		t.Fatalf("WriteFile rotated: %v", err)
+	}
+
+	// Active file has 1 segment_header + 1 security_audit + 1 newer tool_audit line
+	activeContent := `{"type":"segment_header","record_type":"segment_header","anchor_hash":"a1"}` + "\n" +
+		`{"record_type":"security_audit","id":"sec-1","security_event":{"id":"sec-1","event_type":"admin_auth_success"}}` + "\n" +
+		`{"record_type":"tool_audit","id":"act-1","tool_name":"new_tool","decision":"BLOCKED"}` + "\n"
+	if err := os.WriteFile(activePath, []byte(activeContent), 0600); err != nil {
+		t.Fatalf("WriteFile active: %v", err)
+	}
+
+	srv := NewAdminServer(AdminDependencies{
+		Config: &config.Config{
+			RuntimeMode: config.RuntimeModeStandalone,
+			AuditLog: config.AuditLogConfig{
+				Enabled: true,
+				Path:    activePath,
+			},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/audit-logs", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/audit-logs = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Enabled bool                     `json:"enabled"`
+		Logs    []map[string]interface{} `json:"logs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(resp.Logs) != 2 {
+		t.Fatalf("expected 2 tool_audit entries across rotated+active (>128KB), skipping segment_header and security_audit, got %d: %s", len(resp.Logs), rec.Body.String())
+	}
+	if resp.Logs[0]["id"] != "act-1" || resp.Logs[1]["id"] != "rot-1" {
+		t.Fatalf("expected reverse chronological [act-1, rot-1], got [%v, %v]", resp.Logs[0]["id"], resp.Logs[1]["id"])
 	}
 }

@@ -241,7 +241,12 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 
 	// 1. Initialize append-only audit trail logger if enabled
 	if cfg.AuditLog.Enabled && cfg.AuditLog.Path != "" {
-		auditLog, err := logger.NewFileAuditLogger(cfg.AuditLog.Path)
+		auditLog, err := logger.NewFileAuditLoggerWithOptions(
+			cfg.AuditLog.Path,
+			logger.WithMaxSizeMB(cfg.AuditLog.MaxSizeMB),
+			logger.WithMaxFiles(cfg.AuditLog.MaxFiles),
+			logger.WithRetentionDays(cfg.Telemetry.RetentionDays),
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize audit logger: %w", err)
 		}
@@ -294,6 +299,9 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		deps.SettingsCache,
 	)
 	deps.DesktopNotifier = desktopNotifier
+	if deps.AuditLog != nil && settingsCache != nil {
+		deps.AuditLog.SetSettingsCache(settingsCache)
+	}
 
 	// 4. Initialize analytical DuckDB telemetry engine if enabled
 	if cfg.IsTelemetryEnabled() && dbMgr != nil {
@@ -507,11 +515,23 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	}
 	deps.GuardManager = guardManager
 
+	var securitySinks []filter.SecurityAuditLogger
+	if deps.TelemetryEngine != nil {
+		securitySinks = append(securitySinks, deps.TelemetryEngine)
+	}
+	if deps.AuditLog != nil {
+		securitySinks = append(securitySinks, deps.AuditLog)
+	}
+	var combinedSecLogger filter.SecurityAuditLogger
+	if len(securitySinks) > 0 {
+		combinedSecLogger = filter.NewMultiSecurityAuditLogger(securitySinks...)
+	}
+
 	// 11. Dual-Channel HITL Safety Dispatcher (GUARD-005)
 	hitlCfg := guard.DefaultHITLDispatcherConfig()
 	hitlCfg.DesktopNotifier = desktopNotifier
-	if deps.TelemetryEngine != nil {
-		hitlCfg.OnResolved = hitlResolutionSecurityCallback(deps.TelemetryEngine)
+	if combinedSecLogger != nil {
+		hitlCfg.OnResolved = hitlResolutionSecurityCallback(combinedSecLogger)
 	}
 	hitlDispatcher := guard.NewHITLDispatcher(hitlCfg)
 	deps.GuardHITL = hitlDispatcher
@@ -542,7 +562,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		GuardHITL:           hitlDispatcher,
 		DesktopNotifier:     desktopNotifier,
 		AgentRepo:           agentRepo,
-		SecurityAuditLogger: deps.TelemetryEngine,
+		SecurityAuditLogger: combinedSecLogger,
 	})
 
 	// 13. AI Guard Model Installer
@@ -579,8 +599,8 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		sseP := proxy.NewSSEProxyWithCoordinator(listenPort, cfg.SSE.TargetURL, coordinator, cfg.UserContext, secCfg)
 		sseP.SetHost(listenHost)
 		sseP.SetKeyValidator(keyStore)
-		if deps.TelemetryEngine != nil {
-			sseP.SetSecurityAuditLogger(deps.TelemetryEngine)
+		if combinedSecLogger != nil {
+			sseP.SetSecurityAuditLogger(combinedSecLogger)
 		}
 		deps.SSEProxy = sseP
 	}
@@ -634,6 +654,9 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		if deps.TelemetryEngine != nil {
 			auditLoggers = append(auditLoggers, deps.TelemetryEngine)
 			securityAuditLoggers = append(securityAuditLoggers, deps.TelemetryEngine)
+		}
+		if deps.AuditLog != nil {
+			securityAuditLoggers = append(securityAuditLoggers, deps.AuditLog)
 		}
 		if deps.EventBroker != nil {
 			auditLoggers = append(auditLoggers, deps.EventBroker)

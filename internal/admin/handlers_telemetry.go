@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/logger"
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
 )
 
@@ -78,10 +79,9 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auditLogPath := cfg.AuditLog.Path
-
-	file, err := os.Open(auditLogPath)
-	if err != nil {
-		slog.WarnContext(r.Context(), "Failed to open fallback audit log file", slog.String("error", err.Error()))
+	segments, segErr := logger.ListAuditSegmentsDesc(auditLogPath)
+	if segErr != nil || len(segments) == 0 {
+		slog.WarnContext(r.Context(), "Failed to open fallback audit log file", slog.String("path", auditLogPath))
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"enabled": true,
 			"error":   "Failed to open audit log file",
@@ -89,31 +89,59 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	defer file.Close()
 
-	var lines []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-		if len(lines) > 100 {
-			lines = lines[1:]
-		}
-	}
-
-	for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
-		lines[i], lines[j] = lines[j], lines[i]
-	}
+	const maxFallbackEntries = 100
+	const fallbackScannerMaxBytes = 2 * 1024 * 1024 // 2 MB > 1 MB minimum
 
 	var parsedLogs []interface{}
-	for _, l := range lines {
-		var obj interface{}
-		if err := json.Unmarshal([]byte(l), &obj); err == nil {
-			parsedLogs = append(parsedLogs, obj)
-		} else {
-			parsedLogs = append(parsedLogs, l)
+	for _, segPath := range segments {
+		if len(parsedLogs) >= maxFallbackEntries {
+			break
+		}
+		file, err := os.Open(segPath)
+		if err != nil {
+			slog.WarnContext(r.Context(), "Failed to open fallback audit log segment", slog.String("path", segPath), slog.String("error", err.Error()))
+			continue
+		}
+
+		var segLines []string
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 64*1024), fallbackScannerMaxBytes)
+		for scanner.Scan() {
+			text := strings.TrimSpace(scanner.Text())
+			if text == "" {
+				continue
+			}
+			segLines = append(segLines, text)
+		}
+		if sErr := scanner.Err(); sErr != nil {
+			slog.WarnContext(r.Context(), "Fallback audit log scanner warning", slog.String("path", segPath), slog.String("error", sErr.Error()))
+		}
+		_ = file.Close()
+
+		for i := len(segLines) - 1; i >= 0 && len(parsedLogs) < maxFallbackEntries; i-- {
+			line := segLines[i]
+			var meta struct {
+				RecordType string `json:"record_type"`
+				Type       string `json:"type"`
+			}
+			if json.Unmarshal([]byte(line), &meta) == nil {
+				if meta.RecordType == "segment_header" || meta.Type == "segment_header" || meta.RecordType == "security_audit" {
+					continue
+				}
+			}
+			var obj interface{}
+			if err := json.Unmarshal([]byte(line), &obj); err == nil {
+				parsedLogs = append(parsedLogs, obj)
+			} else {
+				parsedLogs = append(parsedLogs, line)
+			}
 		}
 	}
 
+	if parsedLogs == nil {
+		parsedLogs = []interface{}{}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"enabled": true,
 		"logs":    parsedLogs,

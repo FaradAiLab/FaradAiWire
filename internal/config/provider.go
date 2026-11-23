@@ -42,7 +42,7 @@ type Provider interface {
 // Config is the top-level configuration structure for FaradAiWire.
 type Config struct {
 	mu                        sync.RWMutex      `yaml:"-" json:"-"`
-	RuntimeMode               string            `yaml:"runtime_mode" json:"runtime_mode"`   // "STANDALONE" or "MANAGED"
+	RuntimeMode               string            `yaml:"runtime_mode" json:"runtime_mode"` // "STANDALONE" or "MANAGED"
 	AllowStdio                *bool             `yaml:"allow_stdio,omitempty" json:"allow_stdio,omitempty"`
 	ListenHost                string            `yaml:"listen_host" json:"listen_host"`     // Interface host to bind HTTP listeners (default 127.0.0.1)
 	ListenPort                int               `yaml:"listen_port"`                        // Multi-agent gateway listen port
@@ -672,10 +672,12 @@ type HITLConfig struct {
 	TimeoutSeconds   int      `yaml:"timeout_seconds"`
 }
 
-// AuditLogConfig configures the immutable audit trail log path.
+// AuditLogConfig configures the immutable audit trail log path, size rotation, and file retention.
 type AuditLogConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Path    string `yaml:"path"`
+	Enabled   bool   `yaml:"enabled"`
+	Path      string `yaml:"path"`
+	MaxSizeMB int    `yaml:"max_size_mb,omitempty"`
+	MaxFiles  int    `yaml:"max_files,omitempty"`
 }
 
 // LoopProtectionConfig configures the loop detection mechanism.
