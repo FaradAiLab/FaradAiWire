@@ -308,6 +308,7 @@ export interface TableIntegrityReport {
   checked: number
   v2_verified: number
   legacy_v1: number
+  tampered_count?: number
   tampered_ids?: string[]
 }
 

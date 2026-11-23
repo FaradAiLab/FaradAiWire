@@ -26,17 +26,26 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
   const [analyticsWindow, setAnalyticsWindow] = useState<AnalyticsWindow>('24h')
   const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null)
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null)
 
   const fetchAnalytics = useCallback(
     async (win: AnalyticsWindow, signal?: AbortSignal) => {
       try {
         setAnalyticsLoading(true)
+        setAnalyticsError(null)
         const res = await api.getAnalyticsSummary(win, signal)
-        setAnalytics(res)
-      } catch {
-        // Silent fallback if telemetry engine unavailable
+        if (!signal?.aborted) {
+          setAnalytics(res)
+        }
+      } catch (err: unknown) {
+        if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+          return
+        }
+        setAnalyticsError(err instanceof Error ? err.message : 'Failed to load traffic analytics')
       } finally {
-        setAnalyticsLoading(false)
+        if (!signal?.aborted) {
+          setAnalyticsLoading(false)
+        }
       }
     },
     []
@@ -331,15 +340,20 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 bg-gray-100 dark:bg-white/5 p-1 rounded-xl border border-gray-200 dark:border-white/10">
+          <div
+            role="group"
+            aria-label="Analytics time window"
+            className="flex items-center gap-1.5 bg-gray-100 dark:bg-white/5 p-1 rounded-xl border border-gray-200 dark:border-white/10"
+          >
             {(['1h', '24h', '7d'] as AnalyticsWindow[]).map((win) => (
               <button
                 key={win}
                 type="button"
+                aria-pressed={analyticsWindow === win}
                 onClick={() => setAnalyticsWindow(win)}
-                className={`px-3 py-1 rounded-lg text-xs font-mono font-semibold transition-all ${
+                className={`px-3 py-1 rounded-lg text-xs font-mono font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
                   analyticsWindow === win
-                    ? 'bg-indigo-600 text-white shadow-xs'
+                    ? 'bg-indigo-600 text-white shadow-sm'
                     : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
                 }`}
               >
@@ -349,7 +363,23 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
           </div>
         </div>
 
-        <div className={`grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4 ${analyticsLoading ? 'opacity-70' : ''}`}>
+        {analyticsError && (
+          <div
+            role="alert"
+            className="mb-4 p-3 rounded-xl border bg-rose-50 text-rose-800 border-rose-200 dark:bg-rose-950/40 dark:border-rose-500/30 dark:text-rose-300 text-xs flex items-center justify-between gap-3"
+          >
+            <span>{analyticsError}</span>
+            <button
+              type="button"
+              onClick={() => void fetchAnalytics(analyticsWindow)}
+              className="px-2.5 py-1 rounded-lg font-semibold bg-rose-100 hover:bg-rose-200 dark:bg-rose-900/50 dark:hover:bg-rose-800/60 transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4 ${analyticsLoading ? 'opacity-70' : ''}`}>
           <div className="p-4 rounded-xl bg-gray-50 dark:bg-dark-bg/50 border border-gray-200 dark:border-white/5">
             <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
               Total Calls ({analyticsWindow})

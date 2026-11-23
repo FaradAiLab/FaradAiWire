@@ -368,10 +368,12 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
   const [detailLoadingIds, setDetailLoadingIds] = useState<Set<string>>(new Set())
   const [loadedDetailIds, setLoadedDetailIds] = useState<Set<string>>(new Set())
 
-  // Integrity Verification & Export state
+  // Integrity Verification, Export & Query Error state
   const [verifying, setVerifying] = useState(false)
   const [verifyResult, setVerifyResult] = useState<AuditVerifyResponse | null>(null)
   const [verifyError, setVerifyError] = useState<string | null>(null)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const [queryError, setQueryError] = useState<string | null>(null)
   const [exportingFormat, setExportingFormat] = useState<'csv' | 'jsonl' | null>(null)
 
   // Security Events sub-tab state
@@ -392,10 +394,11 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
     if (initialSubTab && initialSubTab !== activeSubTab) {
       setActiveSubTab(initialSubTab)
     }
-  }, [initialSubTab])
+  }, [initialSubTab, activeSubTab])
 
   const handleSelectSubTab = (tab: AuditSubTab) => {
     setActiveSubTab(tab)
+    setQueryError(null)
     if (onSubTabChange) {
       onSubTabChange(tab)
     }
@@ -419,49 +422,80 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
   }, [offset, selectedVerdict, matchedRuleFilter, filterText, sinceInput, untilInput])
 
   // Historical logs query from DuckDB
-  const fetchHistoricalLogs = useCallback(() => {
-    setLoadedDetailIds(new Set())
-    api
-      .getAuditLogs(buildServerFilterParams())
-      .then((res) => {
-        const list = res?.events || res?.logs || []
-        if (Array.isArray(list)) {
-          setEvents(list.map(normalizeAuditEvent))
-        }
-        setTotalCount(typeof res?.total === 'number' ? res.total : list.length)
-      })
-      .catch(() => {
-        // Historical log engine (DuckDB) may be empty initially
-      })
-  }, [buildServerFilterParams])
+  const fetchHistoricalLogs = useCallback(
+    (signal?: AbortSignal) => {
+      setLoadedDetailIds(new Set())
+      setQueryError(null)
+      api
+        .getAuditLogs(buildServerFilterParams(), signal)
+        .then((res) => {
+          if (signal?.aborted) return
+          const list = res?.events || res?.logs || []
+          if (Array.isArray(list)) {
+            setEvents(list.map(normalizeAuditEvent))
+          }
+          setTotalCount(typeof res?.total === 'number' ? res.total : list.length)
+        })
+        .catch((err: unknown) => {
+          if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+            return
+          }
+          setQueryError(err instanceof Error ? err.message : 'Failed to query audit logs')
+        })
+    },
+    [buildServerFilterParams]
+  )
 
-  const fetchSecurityEvents = useCallback(() => {
-    setSecurityLoading(true)
-    api
-      .getSecurityAuditLogs({
-        limit: PAGE_SIZE,
-        offset: securityOffset,
-        event_type: secEventType.trim() || undefined,
-        actor_id: secActorID.trim() || undefined,
-        outcome: secOutcome || undefined,
-        since: toRFC3339LocalInput(secSinceInput),
-        until: toRFC3339LocalInput(secUntilInput),
-      })
-      .then((res) => {
-        setSecurityEvents(Array.isArray(res?.events) ? res.events : [])
-        setSecurityTotal(typeof res?.total === 'number' ? res.total : 0)
-      })
-      .catch(() => {
-        setSecurityEvents([])
-      })
-      .finally(() => setSecurityLoading(false))
-  }, [securityOffset, secEventType, secActorID, secOutcome, secSinceInput, secUntilInput])
+  const fetchSecurityEvents = useCallback(
+    (signal?: AbortSignal) => {
+      setSecurityLoading(true)
+      setQueryError(null)
+      api
+        .getSecurityAuditLogs(
+          {
+            limit: PAGE_SIZE,
+            offset: securityOffset,
+            event_type: secEventType.trim() || undefined,
+            actor_id: secActorID.trim() || undefined,
+            outcome: secOutcome || undefined,
+            since: toRFC3339LocalInput(secSinceInput),
+            until: toRFC3339LocalInput(secUntilInput),
+          },
+          signal
+        )
+        .then((res) => {
+          if (signal?.aborted) return
+          setSecurityEvents(Array.isArray(res?.events) ? res.events : [])
+          setSecurityTotal(typeof res?.total === 'number' ? res.total : 0)
+        })
+        .catch((err: unknown) => {
+          if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+            return
+          }
+          setSecurityEvents([])
+          setQueryError(err instanceof Error ? err.message : 'Failed to query security audit events')
+        })
+        .finally(() => {
+          if (!signal?.aborted) {
+            setSecurityLoading(false)
+          }
+        })
+    },
+    [securityOffset, secEventType, secActorID, secOutcome, secSinceInput, secUntilInput]
+  )
 
   useEffect(() => {
-    if (activeSubTab === 'invocations') {
-      fetchHistoricalLogs()
-    } else {
-      fetchSecurityEvents()
+    const abortController = new AbortController()
+    const timer = window.setTimeout(() => {
+      if (activeSubTab === 'invocations') {
+        fetchHistoricalLogs(abortController.signal)
+      } else {
+        fetchSecurityEvents(abortController.signal)
+      }
+    }, 150)
+    return () => {
+      window.clearTimeout(timer)
+      abortController.abort()
     }
   }, [activeSubTab, fetchHistoricalLogs, fetchSecurityEvents])
 
@@ -600,10 +634,10 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
   const handleExport = async (format: 'csv' | 'jsonl') => {
     try {
       setExportingFormat(format)
-      setVerifyError(null)
+      setExportError(null)
       await api.downloadAuditLogsExport(format, buildServerFilterParams())
     } catch (err: unknown) {
-      setVerifyError(err instanceof Error ? err.message : String(err))
+      setExportError(err instanceof Error ? err.message : String(err))
     } finally {
       setExportingFormat(null)
     }
@@ -703,6 +737,7 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
 
   // Filtering
   const filteredEvents = useMemo(() => {
+    const ruleQuery = matchedRuleFilter.trim().toLowerCase()
     return events.filter((ev) => {
       const dec = (ev.decision || '').toUpperCase()
 
@@ -711,6 +746,12 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
         if (selectedVerdict === 'MASKED' && dec !== 'MASKED') return false
         if (selectedVerdict === 'AUDIT' && dec !== 'AUDIT') return false
         if (selectedVerdict === 'BLOCKED' && dec !== 'BLOCKED' && dec !== 'ERROR' && dec !== 'CRITICAL') return false
+      }
+
+      if (ruleQuery) {
+        const matched = (ev.matched_rule || '').toLowerCase().includes(ruleQuery)
+        const audited = Boolean(ev.audited_rules && ev.audited_rules.some((r) => r.toLowerCase().includes(ruleQuery)))
+        if (!matched && !audited) return false
       }
 
       if (!filterText.trim()) return true
@@ -728,7 +769,7 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
         (ev.error && ev.error.toLowerCase().includes(searchLower))
       )
     })
-  }, [events, selectedVerdict, filterText])
+  }, [events, selectedVerdict, matchedRuleFilter, filterText])
 
   const getVerdictStyle = (decision: string) => {
     switch (decision?.toUpperCase()) {
@@ -813,13 +854,15 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
             className="inline-flex items-center p-1 rounded-xl bg-surface border border-subtle shadow-sm"
           >
             <button
+              id="audit-tab-invocations"
               type="button"
               role="tab"
               aria-selected={activeSubTab === 'invocations'}
+              aria-controls="audit-panel-invocations"
               onClick={() => handleSelectSubTab('invocations')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
                 activeSubTab === 'invocations'
-                  ? 'bg-accent/15 text-accent border border-accent/30 shadow-xs'
+                  ? 'bg-accent/15 text-accent border border-accent/30 shadow-sm'
                   : 'text-muted hover:text-primary'
               }`}
             >
@@ -827,13 +870,15 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
               <span>Tool Invocations</span>
             </button>
             <button
+              id="audit-tab-security"
               type="button"
               role="tab"
               aria-selected={activeSubTab === 'security'}
+              aria-controls="audit-panel-security"
               onClick={() => handleSelectSubTab('security')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
                 activeSubTab === 'security'
-                  ? 'bg-accent/15 text-accent border border-accent/30 shadow-xs'
+                  ? 'bg-accent/15 text-accent border border-accent/30 shadow-sm'
                   : 'text-muted hover:text-primary'
               }`}
             >
@@ -847,14 +892,18 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
           {activeSubTab === 'invocations' && (
             <>
               {/* Connection Status indicator */}
-              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono font-semibold bg-surface border border-subtle text-primary shadow-sm">
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono font-semibold bg-surface border border-subtle text-primary shadow-sm"
+              >
                 <Radio
                   className={`w-3.5 h-3.5 ${
                     isHistoricalMode || isPaused
                       ? 'text-amber-500'
                       : isConnected
-                      ? 'text-emerald-500 animate-pulse'
-                      : 'text-amber-500 animate-bounce'
+                      ? 'text-emerald-500 animate-pulse motion-reduce:animate-none'
+                      : 'text-amber-500 animate-bounce motion-reduce:animate-none'
                   }`}
                 />
                 <span>
@@ -872,7 +921,7 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
                     setIsPaused(!isPaused)
                   }
                 }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
               >
                 {isPaused || isHistoricalMode ? (
                   <Play className="w-3.5 h-3.5 text-emerald-500" />
@@ -887,21 +936,21 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
                 type="button"
                 onClick={() => handleExport('csv')}
                 disabled={exportingFormat !== null}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm disabled:opacity-50"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                 title="Download redacted CSV export (respects active filters)"
               >
                 <Download className="w-3.5 h-3.5 text-cyan-500" />
-                <span>{exportingFormat === 'csv' ? 'Exporting...' : 'Export CSV'}</span>
+                <span>{exportingFormat === 'csv' ? 'Exporting…' : 'Export CSV'}</span>
               </button>
               <button
                 type="button"
                 onClick={() => handleExport('jsonl')}
                 disabled={exportingFormat !== null}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm disabled:opacity-50"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                 title="Download redacted JSONL export (respects active filters)"
               >
                 <Download className="w-3.5 h-3.5 text-indigo-500" />
-                <span>{exportingFormat === 'jsonl' ? 'Exporting...' : 'Export JSONL'}</span>
+                <span>{exportingFormat === 'jsonl' ? 'Exporting…' : 'Export JSONL'}</span>
               </button>
             </>
           )}
@@ -911,18 +960,18 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
             type="button"
             onClick={handleVerifyIntegrity}
             disabled={verifying}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-950/50 dark:hover:bg-emerald-900/50 dark:text-emerald-300 dark:border-emerald-500/30 transition-colors shadow-sm disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-950/50 dark:hover:bg-emerald-900/50 dark:text-emerald-300 dark:border-emerald-500/30 transition-colors shadow-sm disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
             title="Verify SHA-256 / HMAC-SHA256 tamper-evidence chains across DuckDB and JSONL"
           >
-            <ShieldCheck className={`w-3.5 h-3.5 ${verifying ? 'animate-spin' : ''}`} />
-            <span>{verifying ? 'Verifying...' : 'Verify Integrity'}</span>
+            <ShieldCheck className={`w-3.5 h-3.5 ${verifying ? 'animate-spin motion-reduce:animate-none' : ''}`} />
+            <span>{verifying ? 'Verifying…' : 'Verify Integrity'}</span>
           </button>
 
           {/* Refresh from DuckDB */}
           <button
             type="button"
             onClick={() => (activeSubTab === 'invocations' ? fetchHistoricalLogs() : fetchSecurityEvents())}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
             title="Refresh logs from DuckDB"
           >
             <RefreshCw className="w-3.5 h-3.5 text-accent" />
@@ -934,8 +983,9 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
               {/* Auto Scroll */}
               <button
                 type="button"
+                aria-pressed={autoScroll}
                 onClick={() => setAutoScroll(!autoScroll)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors shadow-sm ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
                   autoScroll
                     ? 'bg-accent/15 border-accent/40 text-accent font-bold'
                     : 'bg-surface border-subtle text-muted hover:text-primary'
@@ -948,8 +998,9 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
               {/* Clear Logs */}
               <button
                 type="button"
+                aria-label="Clear logs from screen"
                 onClick={() => setEvents([])}
-                className="p-2 rounded-xl text-muted hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/30 border border-subtle transition-colors shadow-sm"
+                className="p-2 rounded-xl text-muted hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/30 border border-subtle transition-colors shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/50"
                 title="Clear logs from screen"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -959,21 +1010,45 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
         </div>
       </div>
 
-      {/* Integrity Verification & Export Error Banners */}
-      {verifyError && (
-        <div className="p-3.5 rounded-xl border bg-rose-50 text-rose-800 border-rose-200 dark:bg-rose-950/40 dark:border-rose-500/30 dark:text-rose-300 text-xs flex items-center justify-between gap-3">
+      {/* Integrity Verification, Export & Query Error Banners */}
+      {(verifyError || exportError || queryError) && (
+        <div
+          role="alert"
+          className="p-3.5 rounded-xl border bg-rose-50 text-rose-800 border-rose-200 dark:bg-rose-950/40 dark:border-rose-500/30 dark:text-rose-300 text-xs flex items-center justify-between gap-3"
+        >
           <div className="flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 shrink-0" />
-            <span>{verifyError}</span>
+            <span>{verifyError || exportError || queryError}</span>
           </div>
-          <button type="button" onClick={() => setVerifyError(null)} className="underline text-[11px]">
-            Dismiss
-          </button>
+          <div className="flex items-center gap-2">
+            {queryError && (
+              <button
+                type="button"
+                onClick={() => (activeSubTab === 'invocations' ? fetchHistoricalLogs() : fetchSecurityEvents())}
+                className="px-2 py-0.5 rounded bg-rose-100 hover:bg-rose-200 dark:bg-rose-900/50 font-semibold text-[11px]"
+              >
+                Retry
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setVerifyError(null)
+                setExportError(null)
+                setQueryError(null)
+              }}
+              className="underline text-[11px]"
+            >
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
 
       {verifyResult && (
         <div
+          role="status"
+          aria-live="polite"
           className={`p-4 rounded-xl border text-xs flex flex-wrap items-center justify-between gap-3 shadow-sm ${
             verifyResult.valid
               ? 'bg-emerald-50 text-emerald-900 border-emerald-200 dark:bg-emerald-950/40 dark:border-emerald-500/30 dark:text-emerald-200'
@@ -1022,36 +1097,39 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
       )}
 
       {activeSubTab === 'security' ? (
-        <div className="space-y-4">
+        <div id="audit-panel-security" role="tabpanel" aria-labelledby="audit-tab-security" className="space-y-4">
           {/* Security Events Filter Bar */}
           <div className="flex flex-wrap items-center gap-3 bg-surface p-3 rounded-xl border border-subtle shadow-sm">
             <input
               type="text"
+              aria-label="Filter security events by event type"
               placeholder="Event type (e.g. admin_auth_failed)"
               value={secEventType}
               onChange={(e) => {
                 setSecurityOffset(0)
                 setSecEventType(e.target.value)
               }}
-              className="flex-1 min-w-[200px] px-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent font-mono"
+              className="flex-1 min-w-[200px] px-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent focus-visible:ring-2 focus-visible:ring-accent/40 font-mono"
             />
             <input
               type="text"
+              aria-label="Filter security events by actor ID"
               placeholder="Actor ID (e.g. local-operator)"
               value={secActorID}
               onChange={(e) => {
                 setSecurityOffset(0)
                 setSecActorID(e.target.value)
               }}
-              className="w-48 px-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent font-mono"
+              className="w-48 px-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent focus-visible:ring-2 focus-visible:ring-accent/40 font-mono"
             />
             <select
+              aria-label="Filter security events by outcome"
               value={secOutcome}
               onChange={(e) => {
                 setSecurityOffset(0)
                 setSecOutcome(e.target.value)
               }}
-              className="px-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary focus:outline-none focus:border-accent font-mono"
+              className="px-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary focus:outline-none focus:border-accent focus-visible:ring-2 focus-visible:ring-accent/40 font-mono"
             >
               <option value="">Outcome: All</option>
               <option value="allowed">allowed</option>
@@ -1169,10 +1247,14 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
           </div>
         </div>
       ) : (
-        <>
+        <div id="audit-panel-invocations" role="tabpanel" aria-labelledby="audit-tab-invocations" className="space-y-4">
           {/* Historical Mode SSE Auto-Pause Banner */}
           {isHistoricalMode && (
-            <div className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:border-amber-500/40 dark:text-amber-200 text-xs flex flex-wrap items-center justify-between gap-3 shadow-sm">
+            <div
+              role="status"
+              aria-live="polite"
+              className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:border-amber-500/40 dark:text-amber-200 text-xs flex flex-wrap items-center justify-between gap-3 shadow-sm"
+            >
               <div className="flex items-center gap-2">
                 <Pause className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
                 <span className="font-semibold">
@@ -1247,25 +1329,27 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
           <input
             type="text"
+            aria-label="Search tool invocation metadata"
             placeholder="Metadata search (tool, agent, rule, error, user, trace ID)..."
             value={filterText}
             onChange={(e) => {
               setOffset(0)
               setFilterText(e.target.value)
             }}
-            className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent font-mono transition-colors"
+            className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent focus-visible:ring-2 focus-visible:ring-accent/40 font-mono transition-colors"
           />
         </div>
 
         <input
           type="text"
+          aria-label="Filter by matched security rule"
           placeholder="Matched rule (e.g. credit_card)"
           value={matchedRuleFilter}
           onChange={(e) => {
             setOffset(0)
             setMatchedRuleFilter(e.target.value)
           }}
-          className="w-44 px-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent font-mono transition-colors"
+          className="w-44 px-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent focus-visible:ring-2 focus-visible:ring-accent/40 font-mono transition-colors"
         />
 
         <input
@@ -1276,7 +1360,7 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
             setOffset(0)
             setSinceInput(e.target.value)
           }}
-          className="px-2.5 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary font-mono"
+          className="px-2.5 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary focus:outline-none focus:border-accent focus-visible:ring-2 focus-visible:ring-accent/40 font-mono"
         />
 
         <input
@@ -1287,11 +1371,11 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
             setOffset(0)
             setUntilInput(e.target.value)
           }}
-          className="px-2.5 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary font-mono"
+          className="px-2.5 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary focus:outline-none focus:border-accent focus-visible:ring-2 focus-visible:ring-accent/40 font-mono"
         />
 
         {/* Verdict Filter Buttons */}
-        <div className="flex items-center gap-1 bg-subtle/50 p-1 rounded-lg border border-subtle">
+        <div role="group" aria-label="Filter by verdict" className="flex items-center gap-1 bg-subtle/50 p-1 rounded-lg border border-subtle">
           {[
             { id: 'ALL', label: 'All' },
             { id: 'ALLOWED', label: 'Allowed' },
@@ -1301,11 +1385,13 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
           ].map((item) => (
             <button
               key={item.id}
+              type="button"
+              aria-pressed={selectedVerdict === item.id}
               onClick={() => {
                 setOffset(0)
                 setSelectedVerdict(item.id)
               }}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
                 selectedVerdict === item.id
                   ? 'bg-accent/15 text-accent border border-accent/30 font-semibold'
                   : 'text-muted hover:text-primary'
@@ -1326,14 +1412,22 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
           <div className="h-full flex flex-col items-center justify-center text-muted gap-2.5">
             <Shield className="w-8 h-8 text-muted" />
             <span className="text-xs">No matching audit records found.</span>
-            {(filterText.trim() || selectedVerdict !== 'ALL') && (
+            {(filterText.trim() ||
+              matchedRuleFilter.trim() ||
+              Boolean(sinceInput) ||
+              Boolean(untilInput) ||
+              selectedVerdict !== 'ALL') && (
               <button
                 type="button"
                 onClick={() => {
+                  setOffset(0)
                   setFilterText('')
+                  setMatchedRuleFilter('')
+                  setSinceInput('')
+                  setUntilInput('')
                   setSelectedVerdict('ALL')
                 }}
-                className="px-3 py-1 rounded-lg text-xs font-medium bg-accent/10 text-accent border border-accent/30 hover:bg-accent/20 transition-colors"
+                className="px-3 py-1 rounded-lg text-xs font-medium bg-accent/10 text-accent border border-accent/30 hover:bg-accent/20 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
               >
                 Clear filters
               </button>
@@ -1863,7 +1957,7 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
           </button>
         </div>
       </div>
-        </>
+        </div>
       )}
     </div>
   )

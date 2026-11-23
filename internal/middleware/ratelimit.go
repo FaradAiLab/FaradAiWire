@@ -71,12 +71,22 @@ func (l *TokenBucketLimiter) Allow(ip string) bool {
 
 	now := time.Now()
 
-	// Periodic eviction of inactive client buckets every 1 minute
-	if now.Sub(l.lastClean) > time.Minute {
+	// Periodic eviction of inactive client buckets every 1 minute or when map reaches capacity cap
+	if now.Sub(l.lastClean) > time.Minute || len(l.buckets) >= maxWarnBuckets {
+		var oldestKey string
+		var oldestTime time.Time
 		for k, b := range l.buckets {
 			if now.Sub(b.lastRefill) > l.ttl {
 				delete(l.buckets, k)
+				continue
 			}
+			if oldestKey == "" || b.lastRefill.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = b.lastRefill
+			}
+		}
+		if len(l.buckets) >= maxWarnBuckets && oldestKey != "" {
+			delete(l.buckets, oldestKey)
 		}
 		l.lastClean = now
 	}

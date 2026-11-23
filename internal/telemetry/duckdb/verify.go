@@ -14,12 +14,22 @@ import (
 // ErrDatabaseLocked indicates the target DuckDB file is currently locked by another process (e.g. running daemon).
 var ErrDatabaseLocked = errors.New("telemetry DuckDB file is locked by another process; query GET /admin/audit/verify or pass --jsonl")
 
+const maxReportedTamperedIDs = 200
+
 // TableIntegrityReport summarizes integrity verification counts and tampered row IDs for one DuckDB table.
 type TableIntegrityReport struct {
-	Checked     int      `json:"checked"`
-	V2Verified  int      `json:"v2_verified"`
-	LegacyV1    int      `json:"legacy_v1"`
-	TamperedIDs []string `json:"tampered_ids"`
+	Checked       int      `json:"checked"`
+	V2Verified    int      `json:"v2_verified"`
+	LegacyV1      int      `json:"legacy_v1"`
+	TamperedCount int      `json:"tampered_count,omitempty"`
+	TamperedIDs   []string `json:"tampered_ids"`
+}
+
+func (r *TableIntegrityReport) recordTampered(id string) {
+	r.TamperedCount++
+	if len(r.TamperedIDs) < maxReportedTamperedIDs {
+		r.TamperedIDs = append(r.TamperedIDs, id)
+	}
 }
 
 // IntegrityReport aggregates cryptographic tamper-evidence verification across all DuckDB audit tables.
@@ -124,7 +134,10 @@ func verifyDBIntegrity(ctx context.Context, db *sql.DB, hmacKey []byte) (*Integr
 		report.SecurityAuditLogs = secRep
 	}
 
-	if len(report.ToolAuditLogs.TamperedIDs) > 0 ||
+	if report.ToolAuditLogs.TamperedCount > 0 ||
+		report.ToolAuditResponses.TamperedCount > 0 ||
+		report.SecurityAuditLogs.TamperedCount > 0 ||
+		len(report.ToolAuditLogs.TamperedIDs) > 0 ||
 		len(report.ToolAuditResponses.TamperedIDs) > 0 ||
 		len(report.SecurityAuditLogs.TamperedIDs) > 0 {
 		report.Valid = false
@@ -193,7 +206,7 @@ func verifyToolAuditLogs(ctx context.Context, db *sql.DB, hmacKey []byte) (Table
 			if subtle.ConstantTimeCompare([]byte(storedHash), []byte(expected)) == 1 {
 				rep.LegacyV1++
 			} else {
-				rep.TamperedIDs = append(rep.TamperedIDs, id)
+				rep.recordTampered(id)
 			}
 			continue
 		}
@@ -206,7 +219,7 @@ func verifyToolAuditLogs(ctx context.Context, db *sql.DB, hmacKey []byte) (Table
 			humanApproved, approvedBy, approvalChannel,
 		)
 		if storedHash == "" || subtle.ConstantTimeCompare([]byte(storedHash), []byte(expected)) != 1 {
-			rep.TamperedIDs = append(rep.TamperedIDs, id)
+			rep.recordTampered(id)
 		} else {
 			rep.V2Verified++
 		}
@@ -264,7 +277,7 @@ func verifyToolAuditResponses(ctx context.Context, db *sql.DB, hmacKey []byte) (
 			preview, origPreview, origResp, resp,
 		)
 		if storedHash == "" || subtle.ConstantTimeCompare([]byte(storedHash), []byte(expected)) != 1 {
-			rep.TamperedIDs = append(rep.TamperedIDs, invID)
+			rep.recordTampered(invID)
 		} else {
 			rep.V2Verified++
 		}
@@ -311,7 +324,7 @@ func verifySecurityAuditLogs(ctx context.Context, db *sql.DB, hmacKey []byte) (T
 			resourceType, resourceID, action, outcome, reason, metaJSON,
 		)
 		if storedHash == "" || subtle.ConstantTimeCompare([]byte(storedHash), []byte(expected)) != 1 {
-			rep.TamperedIDs = append(rep.TamperedIDs, id)
+			rep.recordTampered(id)
 		} else {
 			rep.V2Verified++
 		}
