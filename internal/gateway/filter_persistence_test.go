@@ -46,6 +46,7 @@ func TestFilterPersistence_FreshInstall7LayersAndToggleLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to boot gateway server: %v", err)
 	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
 	adminH := srv.AdminHandler()
 

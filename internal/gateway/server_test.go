@@ -159,6 +159,7 @@ func TestServer_AtomicReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
 	if len(srv.Pipeline().GetFilters()) != 0 {
 		t.Fatalf("expected 0 filters initially, got %d", len(srv.Pipeline().GetFilters()))
@@ -209,6 +210,7 @@ func TestServer_Reload_InvalidConfigPreservesState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
 	// Verify initial state
 	if len(srv.Pipeline().GetFilters()) != 1 {
@@ -252,6 +254,7 @@ func TestServer_AtomicReload_ConcurrentRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -359,6 +362,7 @@ func TestServer_Reload_CompilationError_PreservesState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
 	if len(srv.Pipeline().GetFilters()) != 1 {
 		t.Fatalf("expected 1 filter initially, got %d", len(srv.Pipeline().GetFilters()))
@@ -518,6 +522,7 @@ func TestServer_AdminReload_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
 	// Create admin server with the server's Reload hook
 	adminSrv := admin.NewAdminServer(admin.AdminDependencies{
@@ -1978,6 +1983,7 @@ filters:
 	if err != nil {
 		t.Fatalf("failed to create gateway server: %v", err)
 	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 	adminH := srv.AdminHandler()
 
 	// 1. Toggle DLP off and Rate Limiting on

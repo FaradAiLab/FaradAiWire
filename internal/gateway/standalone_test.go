@@ -44,6 +44,7 @@ func TestStandaloneGateway_Bootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create standalone gateway server: %v", err)
 	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
 	adminHandler := srv.AdminHandler()
 	if adminHandler == nil {
@@ -182,6 +183,7 @@ func TestStandaloneGateway_DefaultConfigResolution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create gateway server with auto-bootstrapped config: %v", err)
 	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
 	rec := httptest.NewRecorder()
 	srv.AdminHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/status", nil))
