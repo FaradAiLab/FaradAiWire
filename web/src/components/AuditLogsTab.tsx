@@ -320,6 +320,31 @@ function toRFC3339LocalInput(localVal: string): string | undefined {
   return parsed.toISOString()
 }
 
+interface DuckDBVerifyTotals {
+  checked: number
+  v2_verified: number
+  legacy_v1: number
+  tampered_ids: string[]
+}
+
+function summarizeDuckDBVerify(duckdb: NonNullable<AuditVerifyResponse['duckdb']>): DuckDBVerifyTotals {
+  const tables = [
+    duckdb.tool_audit_logs,
+    duckdb.tool_audit_responses,
+    duckdb.security_audit_logs,
+  ].filter(Boolean)
+
+  return tables.reduce<DuckDBVerifyTotals>(
+    (acc, tbl) => ({
+      checked: acc.checked + (tbl?.checked ?? 0),
+      v2_verified: acc.v2_verified + (tbl?.v2_verified ?? 0),
+      legacy_v1: acc.legacy_v1 + (tbl?.legacy_v1 ?? 0),
+      tampered_ids: acc.tampered_ids.concat(tbl?.tampered_ids ?? []),
+    }),
+    { checked: 0, v2_verified: 0, legacy_v1: 0, tampered_ids: [] }
+  )
+}
+
 export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
   initialSubTab = 'invocations',
   onSubTabChange,
@@ -966,19 +991,24 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
                 Audit Integrity: {verifyResult.valid ? 'VERIFIED (VALID)' : 'TAMPERING DETECTED'}
               </div>
               <div className="text-[11px] flex flex-wrap gap-3">
-                {verifyResult.duckdb && (
-                  <span>
-                    DuckDB checked={verifyResult.duckdb.checked} · v2_verified={verifyResult.duckdb.v2_verified} · legacy_v1={verifyResult.duckdb.legacy_v1}
-                    {verifyResult.duckdb.tampered_ids && verifyResult.duckdb.tampered_ids.length > 0
-                      ? ` · tampered_ids=[${verifyResult.duckdb.tampered_ids.join(', ')}]`
-                      : ''}
-                  </span>
-                )}
+                {verifyResult.duckdb && (() => {
+                  const dbStats = summarizeDuckDBVerify(verifyResult.duckdb)
+                  return (
+                    <span>
+                      DuckDB checked={dbStats.checked} · v2_verified={dbStats.v2_verified} · legacy_v1={dbStats.legacy_v1}
+                      {dbStats.tampered_ids.length > 0
+                        ? ` · tampered_ids=[${dbStats.tampered_ids.join(', ')}]`
+                        : ''}
+                    </span>
+                  )
+                })()}
                 {verifyResult.jsonl && (
                   <span>
-                    JSONL lines_checked={verifyResult.jsonl.lines_checked} · segments={verifyResult.jsonl.segments?.length ?? 0}
+                    JSONL entries_checked={verifyResult.jsonl.entries_checked ?? 0} · segments={verifyResult.jsonl.segments_checked ?? 0}
                     {verifyResult.jsonl.broken_segments && verifyResult.jsonl.broken_segments.length > 0
-                      ? ` · broken_segments=[${verifyResult.jsonl.broken_segments.join(', ')}]`
+                      ? ` · broken_segments=[${verifyResult.jsonl.broken_segments
+                          .map((b) => `${b.segment}${b.line ? `:${b.line}` : ''} (${b.reason})`)
+                          .join(', ')}]`
                       : ''}
                   </span>
                 )}
@@ -997,7 +1027,7 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
           <div className="flex flex-wrap items-center gap-3 bg-surface p-3 rounded-xl border border-subtle shadow-sm">
             <input
               type="text"
-              placeholder="Filter event_type (e.g. admin_auth_failed, HITL_RESOLVED)..."
+              placeholder="Event type (e.g. admin_auth_failed)"
               value={secEventType}
               onChange={(e) => {
                 setSecurityOffset(0)
@@ -1007,7 +1037,7 @@ export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
             />
             <input
               type="text"
-              placeholder="Actor ID (e.g. local-operator, key_...)"
+              placeholder="Actor ID (e.g. local-operator)"
               value={secActorID}
               onChange={(e) => {
                 setSecurityOffset(0)

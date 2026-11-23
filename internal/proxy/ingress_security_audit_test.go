@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/auth"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
+	"github.com/FaradAiLab/FaradAiWire/internal/logger"
 )
 
 type spyProxyToolAuditLogger struct {
@@ -177,5 +179,54 @@ func TestSSEProxy_Ingress401And403_EmitSecurityAuditWithoutSecretLeak(t *testing
 	}
 	if !saw403 {
 		t.Errorf("missing expected ingress_auth_forbidden event (actor=%q): %+v", scopedRec.ID, secEvents)
+	}
+}
+
+func TestSSEProxy_PropagatesTraceAndAgentToContextLogger(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(logger.NewContextHandler(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))))
+	defer slog.SetDefault(prevDefault)
+
+	repo := agent.NewFSRepository(t.TempDir())
+	_ = repo.SaveAgentConfig("agent-alpha", &agent.RouteConfig{
+		AgentID:   "agent-alpha",
+		AgentName: "agent-alpha",
+	})
+
+	proxy := NewSSEProxy(0, "http://127.0.0.1:1/unreachable", filter.NewPipeline(nil), repo, nil, config.UserContextConfig{
+		FallbackRole: "Customer",
+		FallbackUser: "guest",
+	})
+
+	// Inject custom RoundTripper that records without external dialing; fails fast so Warn/Info logs emit with r.Context()
+	proxy.SetHTTPClient(&http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`)),
+			}, nil
+		}),
+	})
+
+	body := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}},"id":1}`
+	req := httptest.NewRequest(http.MethodPost, "/message", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Trace-ID", "trace-prop-777")
+	req.Header.Set("X-FaradAiWire-Agent-Name", "agent-alpha")
+
+	rec := httptest.NewRecorder()
+	proxy.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, `"trace_id":"trace-prop-777"`) {
+		t.Errorf("expected propagated trace_id in structured logs, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, `"agent_name":"agent-alpha"`) {
+		t.Errorf("expected propagated agent_name in structured logs, got:\n%s", logged)
 	}
 }

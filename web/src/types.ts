@@ -304,38 +304,34 @@ export interface SecurityAuditRecord {
   integrity_hash: string
 }
 
-export interface IntegrityTableSummary {
-  total: number
-  verified_v2: number
+export interface TableIntegrityReport {
+  checked: number
+  v2_verified: number
   legacy_v1: number
   tampered_ids?: string[]
 }
 
-export interface JSONLSegmentStatus {
-  path: string
-  valid: boolean
-  lines: number
-  tampered_lines?: number[]
-  error?: string
+export interface SegmentVerifyError {
+  segment: string
+  line?: number
+  reason: string
 }
 
 export interface AuditVerifyResponse {
   valid: boolean
   duckdb?: {
     valid: boolean
-    checked: number
-    legacy_v1: number
-    v2_verified: number
-    tampered_ids?: string[]
-    tool_logs?: IntegrityTableSummary
-    tool_responses?: IntegrityTableSummary
-    security_logs?: IntegrityTableSummary
+    hmac_enabled: boolean
+    tool_audit_logs: TableIntegrityReport
+    tool_audit_responses: TableIntegrityReport
+    security_audit_logs: TableIntegrityReport
   }
   jsonl?: {
     valid: boolean
-    segments: JSONLSegmentStatus[]
-    broken_segments?: string[]
-    lines_checked: number
+    segments_checked: number
+    entries_checked: number
+    hmac_enabled: boolean
+    broken_segments?: SegmentVerifyError[]
   }
 }
 

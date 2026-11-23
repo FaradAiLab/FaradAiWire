@@ -429,4 +429,85 @@ func TestAdminAnalyticsSecurityLogsAndRedactedExport(t *testing.T) {
 	if !strings.Contains(csvText, "'@formula_tool") || !strings.Contains(csvText, "'+malicious_plus") {
 		t.Fatalf("expected formula-escaped @formula_tool and +malicious_plus in CSV:\n%s", csvText)
 	}
+
+	// 6. Export specifically targeting blocked row (exp-1) verifies ZERO-DLP BLEED redaction
+	reqBlockedJSONL := httptest.NewRequest(http.MethodGet, "/admin/audit-logs/export?format=jsonl&matched_rule=dlp_key", nil)
+	recBlockedJSONL := httptest.NewRecorder()
+	h.ServeHTTP(recBlockedJSONL, reqBlockedJSONL)
+	if recBlockedJSONL.Code != http.StatusOK {
+		t.Fatalf("expected 200 on filtered blocked export, got %d", recBlockedJSONL.Code)
+	}
+	blockedBody := recBlockedJSONL.Body.String()
+	if !strings.Contains(blockedBody, "[REDACTED - Blocked by dlp_key]") {
+		t.Fatalf("expected blocked row raw_payload_preview to be replaced with redacted notice, got %s", blockedBody)
+	}
+	if strings.Contains(blockedBody, "raw_blocked_request_body") || strings.Contains(blockedBody, "UNMASKED_BAD_PREVIEW") {
+		t.Fatalf("blocked row export leaked unredacted request/preview: %s", blockedBody)
+	}
+}
+
+func TestSanitizeCSVCell_AllFormulaPrefixes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty", in: "", want: ""},
+		{name: "equals", in: "=SUM(A1:A2)", want: "'=SUM(A1:A2)"},
+		{name: "plus", in: "+cmd|' /C calc'!A0", want: "'+cmd|' /C calc'!A0"},
+		{name: "minus", in: "-1+1", want: "'-1+1"},
+		{name: "at", in: "@SUM(1,2)", want: "'@SUM(1,2)"},
+		{name: "tab", in: "\tcmd", want: "'\tcmd"},
+		{name: "carriage_return", in: "\rcmd", want: "'\rcmd"},
+		{name: "safe_text", in: "read_file", want: "read_file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeCSVCell(tc.in); got != tc.want {
+				t.Fatalf("sanitizeCSVCell(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAdminAuditLogsExport_InvalidParamsAndEmptyTelemetry(t *testing.T) {
+	srv := newTestAdminServer(func(d *AdminDependencies) {
+		d.Config = &config.Config{
+			RuntimeMode: config.RuntimeModeStandalone,
+			AdminHost:   "127.0.0.1",
+		}
+	})
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+	h := srv.Handler()
+
+	// Unsupported format -> 400
+	reqBadFmt := httptest.NewRequest(http.MethodGet, "/admin/audit-logs/export?format=xml", nil)
+	recBadFmt := httptest.NewRecorder()
+	h.ServeHTTP(recBadFmt, reqBadFmt)
+	if recBadFmt.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on unsupported export format, got %d", recBadFmt.Code)
+	}
+
+	// Malformed since timestamp -> 400
+	reqBadSince := httptest.NewRequest(http.MethodGet, "/admin/audit-logs/export?format=csv&since=not-a-timestamp", nil)
+	recBadSince := httptest.NewRecorder()
+	h.ServeHTTP(recBadSince, reqBadSince)
+	if recBadSince.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on invalid since timestamp, got %d", recBadSince.Code)
+	}
+
+	// Nil telemetry engine still streams valid CSV header cleanly
+	reqEmptyCSV := httptest.NewRequest(http.MethodGet, "/admin/audit-logs/export?format=csv", nil)
+	recEmptyCSV := httptest.NewRecorder()
+	h.ServeHTTP(recEmptyCSV, reqEmptyCSV)
+	if recEmptyCSV.Code != http.StatusOK {
+		t.Fatalf("expected 200 on empty telemetry CSV export, got %d", recEmptyCSV.Code)
+	}
+	rows, err := csv.NewReader(strings.NewReader(recEmptyCSV.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("parse empty CSV: %v", err)
+	}
+	if len(rows) != 1 || rows[0][0] != "id" {
+		t.Fatalf("expected single CSV header row starting with 'id', got %+v", rows)
+	}
 }
