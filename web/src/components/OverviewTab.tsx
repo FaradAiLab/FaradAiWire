@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { ShieldCheck, Sliders, Server, Cpu, Trash2, RefreshCw, CheckCircle2, AlertTriangle, Zap, Settings, Network } from 'lucide-react'
-import { GatewayStatus, ProtocolItem, isGuardActive } from '../types'
+import { ShieldCheck, Sliders, Server, Cpu, Trash2, RefreshCw, CheckCircle2, AlertTriangle, Zap, Settings, Network, Activity } from 'lucide-react'
+import { GatewayStatus, ProtocolItem, AnalyticsWindow, AnalyticsSummary, isGuardActive } from '../types'
 import { api } from '../api'
 import { GuardConnectionModal } from './GuardConnectionModal'
 
@@ -21,6 +21,32 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
   const [protocols, setProtocols] = useState<ProtocolItem[]>([])
   const [probingProtocols, setProbingProtocols] = useState(false)
   const [protocolHealth, setProtocolHealth] = useState<Record<string, { status: 'healthy' | 'unhealthy'; count?: number; error?: string }>>({})
+
+  // Local Traffic Analytics state
+  const [analyticsWindow, setAnalyticsWindow] = useState<AnalyticsWindow>('24h')
+  const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null)
+  const [analyticsLoading, setAnalyticsLoading] = useState(false)
+
+  const fetchAnalytics = useCallback(
+    async (win: AnalyticsWindow, signal?: AbortSignal) => {
+      try {
+        setAnalyticsLoading(true)
+        const res = await api.getAnalyticsSummary(win, signal)
+        setAnalytics(res)
+      } catch {
+        // Silent fallback if telemetry engine unavailable
+      } finally {
+        setAnalyticsLoading(false)
+      }
+    },
+    []
+  )
+
+  useEffect(() => {
+    const abortController = new AbortController()
+    void fetchAnalytics(analyticsWindow, abortController.signal)
+    return () => abortController.abort()
+  }, [analyticsWindow, fetchAnalytics])
 
   const fetchProtocols = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -136,6 +162,29 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
         </div>
       )}
 
+      {/* Dropped Events Saturation Warning Banner */}
+      {analytics && analytics.dropped_events && analytics.dropped_events.total > 0 && (
+        <div
+          role="alert"
+          className="p-4 rounded-xl border bg-amber-50 text-amber-900 border-amber-300 dark:bg-amber-950/40 dark:border-amber-500/40 dark:text-amber-200 flex flex-wrap items-center justify-between gap-3 text-sm shadow-sm"
+        >
+          <div className="flex items-center gap-2.5">
+            <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0" />
+            <div>
+              <span className="font-bold">Telemetry Buffer Saturation Detected: </span>
+              <span>
+                {analytics.dropped_events.total.toLocaleString()} event(s) dropped across local sinks (DuckDB:{' '}
+                {analytics.dropped_events.duckdb}, Broker: {analytics.dropped_events.broker}, JSONL:{' '}
+                {analytics.dropped_events.jsonl}).
+              </span>
+            </div>
+          </div>
+          <span className="text-xs font-mono px-2.5 py-1 rounded-lg bg-amber-200/70 dark:bg-amber-500/20 font-semibold">
+            DEGRADED
+          </span>
+        </div>
+      )}
+
       {/* Top Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {/* Status Card */}
@@ -243,7 +292,15 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
           </div>
           <div>
             <span className="text-gray-500 dark:text-gray-400">Latency: </span>
-            <span className="text-emerald-700 dark:text-emerald-400 font-semibold">{status?.guard_latency_ms ? `${status.guard_latency_ms} ms` : '< 25 ms (Local)'}</span>
+            <span className="text-emerald-700 dark:text-emerald-400 font-semibold">
+              {status?.guard_latency_ms && status.guard_latency_ms > 0
+                ? `${status.guard_latency_ms} ms (EWMA)`
+                : analytics?.guard_latency_ms && analytics.guard_latency_ms > 0
+                ? `${analytics.guard_latency_ms} ms (EWMA)`
+                : guardActive
+                ? 'Measuring...'
+                : `${status?.guard_latency_ms ?? 0.2} ms (L1 Standby)`}
+            </span>
           </div>
         </div>
 
@@ -252,6 +309,135 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
             <pre>{guardProbeResult}</pre>
           </div>
         )}
+      </div>
+
+      {/* Local Traffic Analytics Summary Card */}
+      <div className="glass-card p-6 border-l-4 border-l-indigo-500">
+        <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-200 dark:bg-indigo-500/10 dark:border-indigo-500/30 dark:text-indigo-400 flex items-center justify-center">
+              <Activity className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-base text-gray-900 dark:text-gray-100 flex items-center gap-2">
+                Local Traffic Analytics
+                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-800 border border-indigo-200 dark:bg-indigo-950 dark:text-indigo-300 dark:border-indigo-500/30">
+                  Zero-Egress DuckDB
+                </span>
+              </h3>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Aggregated invocation throughput, enforcement rate, latency percentiles, and triggered security rules.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 bg-gray-100 dark:bg-white/5 p-1 rounded-xl border border-gray-200 dark:border-white/10">
+            {(['1h', '24h', '7d'] as AnalyticsWindow[]).map((win) => (
+              <button
+                key={win}
+                type="button"
+                onClick={() => setAnalyticsWindow(win)}
+                className={`px-3 py-1 rounded-lg text-xs font-mono font-semibold transition-all ${
+                  analyticsWindow === win
+                    ? 'bg-indigo-600 text-white shadow-xs'
+                    : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                }`}
+              >
+                {win}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className={`grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4 ${analyticsLoading ? 'opacity-70' : ''}`}>
+          <div className="p-4 rounded-xl bg-gray-50 dark:bg-dark-bg/50 border border-gray-200 dark:border-white/5">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+              Total Calls ({analyticsWindow})
+            </div>
+            <div className="text-2xl font-extrabold font-mono text-gray-900 dark:text-white mt-1">
+              {(analytics?.total_calls ?? 0).toLocaleString()}
+            </div>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 font-mono">
+              Allowed {(analytics?.allowed_count ?? 0).toLocaleString()} · Masked {(analytics?.masked_count ?? 0).toLocaleString()}
+            </div>
+          </div>
+
+          <div className="p-4 rounded-xl bg-gray-50 dark:bg-dark-bg/50 border border-gray-200 dark:border-white/5">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+              Block Rate
+            </div>
+            <div className="text-2xl font-extrabold font-mono text-rose-600 dark:text-rose-400 mt-1">
+              {((analytics?.block_rate ?? 0) * 100).toFixed(1)}%
+            </div>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 font-mono">
+              {analytics?.blocked_count ?? 0} blocked · {analytics?.audit_count ?? 0} audited
+            </div>
+          </div>
+
+          <div className="p-4 rounded-xl bg-gray-50 dark:bg-dark-bg/50 border border-gray-200 dark:border-white/5">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+              Latency (p50 / p95)
+            </div>
+            <div className="text-2xl font-extrabold font-mono text-cyan-700 dark:text-cyan-300 mt-1">
+              {(analytics?.p50_latency_ms ?? 0).toFixed(1)} / {(analytics?.p95_latency_ms ?? 0).toFixed(1)} ms
+            </div>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 font-mono">
+              p99: {(analytics?.p99_latency_ms ?? 0).toFixed(1)} ms
+            </div>
+          </div>
+
+          <div className="p-4 rounded-xl bg-gray-50 dark:bg-dark-bg/50 border border-gray-200 dark:border-white/5">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+              AI Guard Latency
+            </div>
+            <div className="text-2xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400 mt-1">
+              {(analytics?.guard_latency_ms || status?.guard_latency_ms || 0).toFixed(2)} ms
+            </div>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 font-mono">
+              Drops: {analytics?.dropped_events?.total ?? 0}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-dark-bg/50 border border-gray-200 dark:border-white/5">
+            <div className="font-semibold text-gray-700 dark:text-gray-300 mb-2">Top Triggered Rules</div>
+            {analytics?.top_rules && analytics.top_rules.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {analytics.top_rules.slice(0, 6).map((item) => (
+                  <span
+                    key={item.rule}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded font-mono text-[11px] bg-rose-50 text-rose-800 border border-rose-200 dark:bg-rose-950/60 dark:text-rose-300 dark:border-rose-500/30"
+                  >
+                    <span>{item.rule}</span>
+                    <span className="font-bold">({item.count})</span>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <span className="text-gray-400 dark:text-gray-500 font-mono">No rule triggers in {analyticsWindow}</span>
+            )}
+          </div>
+
+          <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-dark-bg/50 border border-gray-200 dark:border-white/5">
+            <div className="font-semibold text-gray-700 dark:text-gray-300 mb-2">Top Invoked Tools</div>
+            {analytics?.top_tools && analytics.top_tools.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {analytics.top_tools.slice(0, 6).map((item) => (
+                  <span
+                    key={item.tool_name}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded font-mono text-[11px] bg-cyan-50 text-cyan-800 border border-cyan-200 dark:bg-cyan-950/60 dark:text-cyan-300 dark:border-cyan-500/30"
+                  >
+                    <span>{item.tool_name}</span>
+                    <span className="font-bold">({item.count})</span>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <span className="text-gray-400 dark:text-gray-500 font-mono">No tool calls recorded in {analyticsWindow}</span>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Connected Tool Sources (MCP Servers) Live Health */}

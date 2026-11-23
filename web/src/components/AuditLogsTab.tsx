@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react'
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import {
   ScrollText,
   Pause,
@@ -15,6 +15,7 @@ import {
   Copy,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   FileText,
   Columns,
@@ -24,9 +25,25 @@ import {
   Layers,
   Cpu,
   RefreshCw,
+  Download,
+  AlertTriangle,
+  CheckCircle2,
+  KeyRound,
 } from 'lucide-react'
-import { AuditEvent } from '../types'
+import {
+  AuditEvent,
+  AuditLogsQueryParams,
+  AuditVerifyResponse,
+  SecurityAuditRecord,
+} from '../types'
 import { api } from '../api'
+
+export type AuditSubTab = 'invocations' | 'security'
+
+export interface AuditLogsTabProps {
+  initialSubTab?: AuditSubTab
+  onSubTabChange?: (subTab: AuditSubTab) => void
+}
 
 function normalizeAuditEvent(raw: any): AuditEvent {
   if (!raw) {
@@ -150,6 +167,14 @@ function normalizeAuditEvent(raw: any): AuditEvent {
     error_message: raw.error_message,
     details,
     error,
+    user_id: raw.user_id,
+    client_ip: raw.client_ip,
+    api_key_id: raw.api_key_id,
+    human_approved: raw.human_approved,
+    approved_by: raw.approved_by,
+    approval_channel: raw.approval_channel,
+    hash_version: raw.hash_version,
+    integrity_hash: raw.integrity_hash,
   }
 }
 
@@ -286,12 +311,30 @@ function renderHighlightedText(text: string) {
   )
 }
 
-export const AuditLogsTab: React.FC = () => {
+const PAGE_SIZE = 50
+
+function toRFC3339LocalInput(localVal: string): string | undefined {
+  if (!localVal.trim()) return undefined
+  const parsed = new Date(localVal)
+  if (Number.isNaN(parsed.getTime())) return undefined
+  return parsed.toISOString()
+}
+
+export const AuditLogsTab: React.FC<AuditLogsTabProps> = ({
+  initialSubTab = 'invocations',
+  onSubTabChange,
+}) => {
+  const [activeSubTab, setActiveSubTab] = useState<AuditSubTab>(initialSubTab)
   const [events, setEvents] = useState<AuditEvent[]>([])
+  const [totalCount, setTotalCount] = useState(0)
+  const [offset, setOffset] = useState(0)
   const [isConnected, setIsConnected] = useState(false)
   const [isPaused, setIsPaused] = useState(false)
   const [autoScroll, setAutoScroll] = useState(true)
   const [filterText, setFilterText] = useState('')
+  const [matchedRuleFilter, setMatchedRuleFilter] = useState('')
+  const [sinceInput, setSinceInput] = useState('')
+  const [untilInput, setUntilInput] = useState('')
   const [selectedVerdict, setSelectedVerdict] = useState<string>('ALL')
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   const [activeTabs, setActiveTabs] = useState<Record<string, 'text' | 'diff' | 'json' | 'raw'>>({})
@@ -300,32 +343,106 @@ export const AuditLogsTab: React.FC = () => {
   const [detailLoadingIds, setDetailLoadingIds] = useState<Set<string>>(new Set())
   const [loadedDetailIds, setLoadedDetailIds] = useState<Set<string>>(new Set())
 
+  // Integrity Verification & Export state
+  const [verifying, setVerifying] = useState(false)
+  const [verifyResult, setVerifyResult] = useState<AuditVerifyResponse | null>(null)
+  const [verifyError, setVerifyError] = useState<string | null>(null)
+  const [exportingFormat, setExportingFormat] = useState<'csv' | 'jsonl' | null>(null)
+
+  // Security Events sub-tab state
+  const [securityEvents, setSecurityEvents] = useState<SecurityAuditRecord[]>([])
+  const [securityTotal, setSecurityTotal] = useState(0)
+  const [securityOffset, setSecurityOffset] = useState(0)
+  const [secEventType, setSecEventType] = useState('')
+  const [secActorID, setSecActorID] = useState('')
+  const [secOutcome, setSecOutcome] = useState('')
+  const [secSinceInput, setSecSinceInput] = useState('')
+  const [secUntilInput, setSecUntilInput] = useState('')
+  const [securityLoading, setSecurityLoading] = useState(false)
+
   const logContainerRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
 
-  // Initial load of historical logs from DuckDB
-  const fetchHistoricalLogs = () => {
+  useEffect(() => {
+    if (initialSubTab && initialSubTab !== activeSubTab) {
+      setActiveSubTab(initialSubTab)
+    }
+  }, [initialSubTab])
+
+  const handleSelectSubTab = (tab: AuditSubTab) => {
+    setActiveSubTab(tab)
+    if (onSubTabChange) {
+      onSubTabChange(tab)
+    }
+  }
+
+  const isHistoricalMode = useMemo(() => {
+    return offset > 0 || Boolean(sinceInput) || Boolean(untilInput)
+  }, [offset, sinceInput, untilInput])
+
+  const buildServerFilterParams = useCallback((): AuditLogsQueryParams => {
+    return {
+      summary: true,
+      limit: PAGE_SIZE,
+      offset,
+      decision: selectedVerdict !== 'ALL' ? selectedVerdict : undefined,
+      matched_rule: matchedRuleFilter.trim() || undefined,
+      q: filterText.trim() || undefined,
+      since: toRFC3339LocalInput(sinceInput),
+      until: toRFC3339LocalInput(untilInput),
+    }
+  }, [offset, selectedVerdict, matchedRuleFilter, filterText, sinceInput, untilInput])
+
+  // Historical logs query from DuckDB
+  const fetchHistoricalLogs = useCallback(() => {
     setLoadedDetailIds(new Set())
     api
-      .getAuditLogs()
-      .then((res: any) => {
+      .getAuditLogs(buildServerFilterParams())
+      .then((res) => {
         const list = res?.events || res?.logs || []
-        if (Array.isArray(list) && list.length > 0) {
+        if (Array.isArray(list)) {
           setEvents(list.map(normalizeAuditEvent))
         }
+        setTotalCount(typeof res?.total === 'number' ? res.total : list.length)
       })
       .catch(() => {
         // Historical log engine (DuckDB) may be empty initially
       })
-  }
+  }, [buildServerFilterParams])
+
+  const fetchSecurityEvents = useCallback(() => {
+    setSecurityLoading(true)
+    api
+      .getSecurityAuditLogs({
+        limit: PAGE_SIZE,
+        offset: securityOffset,
+        event_type: secEventType.trim() || undefined,
+        actor_id: secActorID.trim() || undefined,
+        outcome: secOutcome || undefined,
+        since: toRFC3339LocalInput(secSinceInput),
+        until: toRFC3339LocalInput(secUntilInput),
+      })
+      .then((res) => {
+        setSecurityEvents(Array.isArray(res?.events) ? res.events : [])
+        setSecurityTotal(typeof res?.total === 'number' ? res.total : 0)
+      })
+      .catch(() => {
+        setSecurityEvents([])
+      })
+      .finally(() => setSecurityLoading(false))
+  }, [securityOffset, secEventType, secActorID, secOutcome, secSinceInput, secUntilInput])
 
   useEffect(() => {
-    fetchHistoricalLogs()
-  }, [])
+    if (activeSubTab === 'invocations') {
+      fetchHistoricalLogs()
+    } else {
+      fetchSecurityEvents()
+    }
+  }, [activeSubTab, fetchHistoricalLogs, fetchSecurityEvents])
 
-  // Setup SSE stream
+  // Setup SSE stream (automatically paused when viewing historical/paginated view or Security Events)
   useEffect(() => {
-    if (isPaused) {
+    if (isPaused || isHistoricalMode || activeSubTab !== 'invocations') {
       if (eventSourceRef.current) {
         eventSourceRef.current.close()
         eventSourceRef.current = null
@@ -432,7 +549,40 @@ export const AuditLogsTab: React.FC = () => {
       es.close()
       eventSourceRef.current = null
     }
-  }, [isPaused])
+  }, [isPaused, isHistoricalMode, activeSubTab])
+
+  const handleResumeLive = () => {
+    setOffset(0)
+    setSinceInput('')
+    setUntilInput('')
+    setMatchedRuleFilter('')
+    setIsPaused(false)
+  }
+
+  const handleVerifyIntegrity = async () => {
+    try {
+      setVerifying(true)
+      setVerifyError(null)
+      const res = await api.verifyAuditIntegrity()
+      setVerifyResult(res)
+    } catch (err: unknown) {
+      setVerifyError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setVerifying(false)
+    }
+  }
+
+  const handleExport = async (format: 'csv' | 'jsonl') => {
+    try {
+      setExportingFormat(format)
+      setVerifyError(null)
+      await api.downloadAuditLogsExport(format, buildServerFilterParams())
+    } catch (err: unknown) {
+      setVerifyError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setExportingFormat(null)
+    }
+  }
 
   // Auto-scroll effect
   useEffect(() => {
@@ -619,77 +769,398 @@ export const AuditLogsTab: React.FC = () => {
 
   return (
     <div className="space-y-4">
-      {/* 1. Header Toolbar */}
+      {/* 1. Header Toolbar + Sub-Tab Switcher */}
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-bold text-primary flex items-center gap-2">
-            <ScrollText className="w-5 h-5 text-accent" />
-            Audit Telemetry Stream
-          </h2>
-          <p className="text-xs text-muted mt-1">
-            Real-time SSE event stream, DLP security audit, semantic redaction, and MCP tool execution telemetry.
-          </p>
+        <div className="space-y-2">
+          <div>
+            <h2 className="text-xl font-bold text-primary flex items-center gap-2">
+              <ScrollText className="w-5 h-5 text-accent" />
+              Audit & Security Console
+            </h2>
+            <p className="text-xs text-muted mt-1">
+              Real-time MCP tool invocation telemetry, control-plane security events, cryptographic chain verification, and redacted export.
+            </p>
+          </div>
+
+          <div
+            role="tablist"
+            aria-label="Audit Log Views"
+            className="inline-flex items-center p-1 rounded-xl bg-surface border border-subtle shadow-sm"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeSubTab === 'invocations'}
+              onClick={() => handleSelectSubTab('invocations')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                activeSubTab === 'invocations'
+                  ? 'bg-accent/15 text-accent border border-accent/30 shadow-xs'
+                  : 'text-muted hover:text-primary'
+              }`}
+            >
+              <ScrollText className="w-3.5 h-3.5" />
+              <span>Tool Invocations</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeSubTab === 'security'}
+              onClick={() => handleSelectSubTab('security')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                activeSubTab === 'security'
+                  ? 'bg-accent/15 text-accent border border-accent/30 shadow-xs'
+                  : 'text-muted hover:text-primary'
+              }`}
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span>Security Events</span>
+            </button>
+          </div>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Connection Status indicator */}
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono font-semibold bg-surface border border-subtle text-primary shadow-sm">
-            <Radio
-              className={`w-3.5 h-3.5 ${
-                isConnected ? 'text-emerald-500 animate-pulse' : 'text-amber-500 animate-bounce'
-              }`}
-            />
-            <span>{isPaused ? 'PAUSED' : isConnected ? 'LIVE STREAM' : 'CONNECTING'}</span>
-          </div>
+          {activeSubTab === 'invocations' && (
+            <>
+              {/* Connection Status indicator */}
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono font-semibold bg-surface border border-subtle text-primary shadow-sm">
+                <Radio
+                  className={`w-3.5 h-3.5 ${
+                    isHistoricalMode || isPaused
+                      ? 'text-amber-500'
+                      : isConnected
+                      ? 'text-emerald-500 animate-pulse'
+                      : 'text-amber-500 animate-bounce'
+                  }`}
+                />
+                <span>
+                  {isHistoricalMode ? 'HISTORICAL' : isPaused ? 'PAUSED' : isConnected ? 'LIVE STREAM' : 'CONNECTING'}
+                </span>
+              </div>
 
-          {/* Pause / Resume */}
+              {/* Pause / Resume */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (isHistoricalMode) {
+                    handleResumeLive()
+                  } else {
+                    setIsPaused(!isPaused)
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm"
+              >
+                {isPaused || isHistoricalMode ? (
+                  <Play className="w-3.5 h-3.5 text-emerald-500" />
+                ) : (
+                  <Pause className="w-3.5 h-3.5 text-amber-500" />
+                )}
+                <span>{isPaused || isHistoricalMode ? 'Resume Live' : 'Pause'}</span>
+              </button>
+
+              {/* Export CSV & JSONL */}
+              <button
+                type="button"
+                onClick={() => handleExport('csv')}
+                disabled={exportingFormat !== null}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm disabled:opacity-50"
+                title="Download redacted CSV export (respects active filters)"
+              >
+                <Download className="w-3.5 h-3.5 text-cyan-500" />
+                <span>{exportingFormat === 'csv' ? 'Exporting...' : 'Export CSV'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleExport('jsonl')}
+                disabled={exportingFormat !== null}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm disabled:opacity-50"
+                title="Download redacted JSONL export (respects active filters)"
+              >
+                <Download className="w-3.5 h-3.5 text-indigo-500" />
+                <span>{exportingFormat === 'jsonl' ? 'Exporting...' : 'Export JSONL'}</span>
+              </button>
+            </>
+          )}
+
+          {/* Verify Integrity */}
           <button
-            onClick={() => setIsPaused(!isPaused)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm"
+            type="button"
+            onClick={handleVerifyIntegrity}
+            disabled={verifying}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-950/50 dark:hover:bg-emerald-900/50 dark:text-emerald-300 dark:border-emerald-500/30 transition-colors shadow-sm disabled:opacity-50"
+            title="Verify SHA-256 / HMAC-SHA256 tamper-evidence chains across DuckDB and JSONL"
           >
-            {isPaused ? (
-              <Play className="w-3.5 h-3.5 text-emerald-500" />
-            ) : (
-              <Pause className="w-3.5 h-3.5 text-amber-500" />
-            )}
-            <span>{isPaused ? 'Resume' : 'Pause'}</span>
+            <ShieldCheck className={`w-3.5 h-3.5 ${verifying ? 'animate-spin' : ''}`} />
+            <span>{verifying ? 'Verifying...' : 'Verify Integrity'}</span>
           </button>
 
           {/* Refresh from DuckDB */}
           <button
-            onClick={fetchHistoricalLogs}
+            type="button"
+            onClick={() => (activeSubTab === 'invocations' ? fetchHistoricalLogs() : fetchSecurityEvents())}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface hover:bg-subtle text-primary border border-subtle transition-colors shadow-sm"
-            title="Refresh historical logs from DuckDB"
+            title="Refresh logs from DuckDB"
           >
             <RefreshCw className="w-3.5 h-3.5 text-accent" />
             <span>Refresh</span>
           </button>
 
-          {/* Auto Scroll */}
-          <button
-            onClick={() => setAutoScroll(!autoScroll)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors shadow-sm ${
-              autoScroll
-                ? 'bg-accent/15 border-accent/40 text-accent font-bold'
-                : 'bg-surface border-subtle text-muted hover:text-primary'
-            }`}
-          >
-            <ArrowDown className="w-3.5 h-3.5" />
-            <span>Auto-Scroll</span>
-          </button>
+          {activeSubTab === 'invocations' && (
+            <>
+              {/* Auto Scroll */}
+              <button
+                type="button"
+                onClick={() => setAutoScroll(!autoScroll)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors shadow-sm ${
+                  autoScroll
+                    ? 'bg-accent/15 border-accent/40 text-accent font-bold'
+                    : 'bg-surface border-subtle text-muted hover:text-primary'
+                }`}
+              >
+                <ArrowDown className="w-3.5 h-3.5" />
+                <span>Auto-Scroll</span>
+              </button>
 
-          {/* Clear Logs */}
-          <button
-            onClick={() => setEvents([])}
-            className="p-2 rounded-xl text-muted hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/30 border border-subtle transition-colors shadow-sm"
-            title="Clear logs from screen"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+              {/* Clear Logs */}
+              <button
+                type="button"
+                onClick={() => setEvents([])}
+                className="p-2 rounded-xl text-muted hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/30 border border-subtle transition-colors shadow-sm"
+                title="Clear logs from screen"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </>
+          )}
         </div>
       </div>
 
-      {/* 2. Live Telemetry KPI Metrics Bar */}
+      {/* Integrity Verification & Export Error Banners */}
+      {verifyError && (
+        <div className="p-3.5 rounded-xl border bg-rose-50 text-rose-800 border-rose-200 dark:bg-rose-950/40 dark:border-rose-500/30 dark:text-rose-300 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{verifyError}</span>
+          </div>
+          <button type="button" onClick={() => setVerifyError(null)} className="underline text-[11px]">
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {verifyResult && (
+        <div
+          className={`p-4 rounded-xl border text-xs flex flex-wrap items-center justify-between gap-3 shadow-sm ${
+            verifyResult.valid
+              ? 'bg-emerald-50 text-emerald-900 border-emerald-200 dark:bg-emerald-950/40 dark:border-emerald-500/30 dark:text-emerald-200'
+              : 'bg-rose-50 text-rose-900 border-rose-200 dark:bg-rose-950/40 dark:border-rose-500/30 dark:text-rose-200'
+          }`}
+        >
+          <div className="flex items-start gap-2.5">
+            {verifyResult.valid ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+            )}
+            <div className="space-y-1 font-mono">
+              <div className="font-bold">
+                Audit Integrity: {verifyResult.valid ? 'VERIFIED (VALID)' : 'TAMPERING DETECTED'}
+              </div>
+              <div className="text-[11px] flex flex-wrap gap-3">
+                {verifyResult.duckdb && (
+                  <span>
+                    DuckDB checked={verifyResult.duckdb.checked} · v2_verified={verifyResult.duckdb.v2_verified} · legacy_v1={verifyResult.duckdb.legacy_v1}
+                    {verifyResult.duckdb.tampered_ids && verifyResult.duckdb.tampered_ids.length > 0
+                      ? ` · tampered_ids=[${verifyResult.duckdb.tampered_ids.join(', ')}]`
+                      : ''}
+                  </span>
+                )}
+                {verifyResult.jsonl && (
+                  <span>
+                    JSONL lines_checked={verifyResult.jsonl.lines_checked} · segments={verifyResult.jsonl.segments?.length ?? 0}
+                    {verifyResult.jsonl.broken_segments && verifyResult.jsonl.broken_segments.length > 0
+                      ? ` · broken_segments=[${verifyResult.jsonl.broken_segments.join(', ')}]`
+                      : ''}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+          <button type="button" onClick={() => setVerifyResult(null)} className="text-[11px] underline">
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {activeSubTab === 'security' ? (
+        <div className="space-y-4">
+          {/* Security Events Filter Bar */}
+          <div className="flex flex-wrap items-center gap-3 bg-surface p-3 rounded-xl border border-subtle shadow-sm">
+            <input
+              type="text"
+              placeholder="Filter event_type (e.g. admin_auth_failed, HITL_RESOLVED)..."
+              value={secEventType}
+              onChange={(e) => {
+                setSecurityOffset(0)
+                setSecEventType(e.target.value)
+              }}
+              className="flex-1 min-w-[200px] px-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent font-mono"
+            />
+            <input
+              type="text"
+              placeholder="Actor ID (e.g. local-operator, key_...)"
+              value={secActorID}
+              onChange={(e) => {
+                setSecurityOffset(0)
+                setSecActorID(e.target.value)
+              }}
+              className="w-48 px-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent font-mono"
+            />
+            <select
+              value={secOutcome}
+              onChange={(e) => {
+                setSecurityOffset(0)
+                setSecOutcome(e.target.value)
+              }}
+              className="px-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary focus:outline-none focus:border-accent font-mono"
+            >
+              <option value="">Outcome: All</option>
+              <option value="allowed">allowed</option>
+              <option value="denied">denied</option>
+              <option value="locked">locked</option>
+            </select>
+            <input
+              type="datetime-local"
+              aria-label="Security events since"
+              value={secSinceInput}
+              onChange={(e) => {
+                setSecurityOffset(0)
+                setSecSinceInput(e.target.value)
+              }}
+              className="px-2.5 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary font-mono"
+            />
+            <input
+              type="datetime-local"
+              aria-label="Security events until"
+              value={secUntilInput}
+              onChange={(e) => {
+                setSecurityOffset(0)
+                setSecUntilInput(e.target.value)
+              }}
+              className="px-2.5 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary font-mono"
+            />
+          </div>
+
+          <div className="bg-surface rounded-2xl p-3 h-[580px] overflow-y-auto space-y-2 border border-subtle shadow-sm">
+            {securityLoading ? (
+              <div className="h-full flex items-center justify-center text-xs text-muted font-mono">
+                Loading security audit events...
+              </div>
+            ) : securityEvents.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center text-muted gap-2">
+                <KeyRound className="w-8 h-8 text-muted" />
+                <span className="text-xs">No control-plane security events found.</span>
+              </div>
+            ) : (
+              securityEvents.map((sev) => {
+                const outcomeLower = (sev.outcome || '').toLowerCase()
+                const outcomeBadge =
+                  outcomeLower === 'allowed'
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-700/40'
+                    : outcomeLower === 'locked'
+                    ? 'bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-700/40'
+                    : 'bg-rose-50 text-rose-800 border-rose-200 dark:bg-rose-950/60 dark:text-rose-300 dark:border-rose-700/40'
+
+                return (
+                  <div
+                    key={sev.id}
+                    className="p-3 rounded-xl border border-subtle bg-canvas/70 hover:bg-subtle/40 transition-colors text-xs space-y-1.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold uppercase border ${outcomeBadge}`}>
+                          {sev.outcome}
+                        </span>
+                        <span className="font-mono font-bold text-primary">{sev.event_type}</span>
+                        <span className="text-muted font-mono">
+                          action={sev.action}
+                        </span>
+                        {sev.resource_type && (
+                          <span className="px-1.5 py-0.5 rounded bg-subtle text-[11px] font-mono text-primary">
+                            {sev.resource_type}
+                            {sev.resource_id ? `:${sev.resource_id}` : ''}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[11px] font-mono text-muted">
+                        {formatSmartDate(sev.timestamp).display}
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-4 text-[11px] font-mono text-muted">
+                      <span>
+                        actor=<strong className="text-primary">{sev.actor_id}</strong> ({sev.actor_role})
+                      </span>
+                      {sev.client_ip && <span>ip={sev.client_ip}</span>}
+                      {sev.reason && <span>reason={sev.reason}</span>}
+                      {sev.trace_id && <span>trace={sev.trace_id}</span>}
+                      {sev.hash_version && <span>hash={sev.hash_version}</span>}
+                    </div>
+                  </div>
+                )
+              })
+            )}
+          </div>
+
+          {/* Security Events Pagination */}
+          <div className="flex items-center justify-between text-xs font-mono text-muted bg-surface px-4 py-2.5 rounded-xl border border-subtle">
+            <span>
+              Showing {securityEvents.length} of {securityTotal} security event(s) (offset {securityOffset})
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={securityOffset === 0}
+                onClick={() => setSecurityOffset((prev) => Math.max(0, prev - PAGE_SIZE))}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-subtle bg-canvas text-primary disabled:opacity-40"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+                Prev
+              </button>
+              <button
+                type="button"
+                disabled={securityOffset + PAGE_SIZE >= securityTotal}
+                onClick={() => setSecurityOffset((prev) => prev + PAGE_SIZE)}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-subtle bg-canvas text-primary disabled:opacity-40"
+              >
+                Next
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* Historical Mode SSE Auto-Pause Banner */}
+          {isHistoricalMode && (
+            <div className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:border-amber-500/40 dark:text-amber-200 text-xs flex flex-wrap items-center justify-between gap-3 shadow-sm">
+              <div className="flex items-center gap-2">
+                <Pause className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                <span className="font-semibold">
+                  Paused while viewing historical page (SSE auto-append disabled so historical rows stay stable).
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleResumeLive}
+                className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold transition-colors"
+              >
+                <Play className="w-3 h-3" />
+                <span>Resume Live</span>
+              </button>
+            </div>
+          )}
+
+          {/* 2. Live Telemetry KPI Metrics Bar */}
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2.5">
         <div className="bg-surface p-3 rounded-xl border border-subtle flex flex-col justify-between shadow-sm">
           <div className="text-[11px] font-medium text-muted flex items-center gap-1">
@@ -741,17 +1212,53 @@ export const AuditLogsTab: React.FC = () => {
       </div>
 
       {/* 3. Search & Filter Bar */}
-      <div className="flex flex-wrap items-center gap-3 bg-surface p-2.5 rounded-xl border border-subtle shadow-sm">
-        <div className="relative flex-1 min-w-[240px]">
+      <div className="flex flex-wrap items-center gap-2.5 bg-surface p-2.5 rounded-xl border border-subtle shadow-sm">
+        <div className="relative flex-1 min-w-[220px]">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
           <input
             type="text"
-            placeholder="Search: tool name, agent, rule (tckn, credit_card), trace ID, or payload..."
+            placeholder="Metadata search (tool, agent, rule, error, user, trace ID)..."
             value={filterText}
-            onChange={(e) => setFilterText(e.target.value)}
+            onChange={(e) => {
+              setOffset(0)
+              setFilterText(e.target.value)
+            }}
             className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent font-mono transition-colors"
           />
         </div>
+
+        <input
+          type="text"
+          placeholder="Matched rule (e.g. credit_card)"
+          value={matchedRuleFilter}
+          onChange={(e) => {
+            setOffset(0)
+            setMatchedRuleFilter(e.target.value)
+          }}
+          className="w-44 px-3 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent font-mono transition-colors"
+        />
+
+        <input
+          type="datetime-local"
+          aria-label="Filter since timestamp"
+          value={sinceInput}
+          onChange={(e) => {
+            setOffset(0)
+            setSinceInput(e.target.value)
+          }}
+          className="px-2.5 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary font-mono"
+        />
+
+        <input
+          type="datetime-local"
+          aria-label="Filter until timestamp"
+          value={untilInput}
+          onChange={(e) => {
+            setOffset(0)
+            setUntilInput(e.target.value)
+          }}
+          className="px-2.5 py-1.5 rounded-lg bg-canvas border border-subtle text-xs text-primary font-mono"
+        />
 
         {/* Verdict Filter Buttons */}
         <div className="flex items-center gap-1 bg-subtle/50 p-1 rounded-lg border border-subtle">
@@ -764,7 +1271,10 @@ export const AuditLogsTab: React.FC = () => {
           ].map((item) => (
             <button
               key={item.id}
-              onClick={() => setSelectedVerdict(item.id)}
+              onClick={() => {
+                setOffset(0)
+                setSelectedVerdict(item.id)
+              }}
               className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
                 selectedVerdict === item.id
                   ? 'bg-accent/15 text-accent border border-accent/30 font-semibold'
@@ -1262,8 +1772,8 @@ export const AuditLogsTab: React.FC = () => {
                         <span className="text-muted/80">Layer:</span> {ev.layer || 'pipeline'}
                       </div>
                       <div>
-                        <span className="text-muted/80">Client:</span>{' '}
-                        {ev.client_session_id || 'localhost'}
+                        <span className="text-muted/80">Client IP:</span>{' '}
+                        {ev.client_ip || ev.client_session_id || 'localhost'}
                       </div>
                       <div>
                         <span className="text-muted/80">Trace ID:</span>{' '}
@@ -1273,6 +1783,21 @@ export const AuditLogsTab: React.FC = () => {
                         <span className="text-muted/80">Latency:</span>{' '}
                         {ev.latency_ms !== undefined ? `${ev.latency_ms}ms` : '0ms'}
                       </div>
+                      {ev.api_key_id && (
+                        <div>
+                          <span className="text-muted/80">API Key:</span> {ev.api_key_id}
+                        </div>
+                      )}
+                      {ev.approved_by && (
+                        <div>
+                          <span className="text-muted/80">Approved By:</span> {ev.approved_by} ({ev.approval_channel || 'hitl'})
+                        </div>
+                      )}
+                      {ev.hash_version && (
+                        <div>
+                          <span className="text-muted/80">Integrity:</span> {ev.hash_version}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1281,6 +1806,35 @@ export const AuditLogsTab: React.FC = () => {
           })
         )}
       </div>
+
+      {/* Tool Invocations Pagination Bar */}
+      <div className="flex items-center justify-between text-xs font-mono text-muted bg-surface px-4 py-2.5 rounded-xl border border-subtle">
+        <span>
+          Page {Math.floor(offset / PAGE_SIZE) + 1} · Showing {filteredEvents.length} rows ({totalCount} total stored)
+        </span>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={offset === 0}
+            onClick={() => setOffset((prev) => Math.max(0, prev - PAGE_SIZE))}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-subtle bg-canvas text-primary disabled:opacity-40"
+          >
+            <ChevronLeft className="w-3.5 h-3.5" />
+            Prev
+          </button>
+          <button
+            type="button"
+            disabled={offset + PAGE_SIZE >= totalCount}
+            onClick={() => setOffset((prev) => prev + PAGE_SIZE)}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-subtle bg-canvas text-primary disabled:opacity-40"
+          >
+            Next
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+        </>
+      )}
     </div>
   )
 }

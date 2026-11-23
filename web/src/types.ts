@@ -247,6 +247,126 @@ export interface AuditEvent {
   error_message?: string
   details?: Record<string, unknown>
   error?: string
+  user_id?: string
+  client_ip?: string
+  api_key_id?: string
+  human_approved?: boolean
+  approved_by?: string
+  approval_channel?: string
+  hash_version?: string
+  integrity_hash?: string
+}
+
+export type AnalyticsWindow = '1h' | '24h' | '7d'
+
+export interface DroppedEventsStats {
+  duckdb: number
+  broker: number
+  jsonl: number
+  total: number
+}
+
+export interface AnalyticsSummary {
+  enabled: boolean
+  window: AnalyticsWindow | string
+  generated_at?: string
+  total_calls: number
+  allowed_count: number
+  blocked_count: number
+  masked_count: number
+  audit_count: number
+  error_count: number
+  block_rate: number
+  p50_latency_ms: number
+  p95_latency_ms: number
+  p99_latency_ms: number
+  top_rules: { rule: string; count: number }[]
+  top_tools: { tool_name: string; count: number }[]
+  dropped_events: DroppedEventsStats
+  guard_latency_ms: number
+}
+
+export interface SecurityAuditRecord {
+  id: string
+  timestamp: string
+  trace_id?: string
+  event_type: string
+  actor_id: string
+  actor_role: string
+  client_ip?: string
+  resource_type?: string
+  resource_id?: string
+  action: string
+  outcome: string
+  reason?: string
+  metadata?: Record<string, unknown>
+  hash_version?: string
+  integrity_hash: string
+}
+
+export interface IntegrityTableSummary {
+  total: number
+  verified_v2: number
+  legacy_v1: number
+  tampered_ids?: string[]
+}
+
+export interface JSONLSegmentStatus {
+  path: string
+  valid: boolean
+  lines: number
+  tampered_lines?: number[]
+  error?: string
+}
+
+export interface AuditVerifyResponse {
+  valid: boolean
+  duckdb?: {
+    valid: boolean
+    checked: number
+    legacy_v1: number
+    v2_verified: number
+    tampered_ids?: string[]
+    tool_logs?: IntegrityTableSummary
+    tool_responses?: IntegrityTableSummary
+    security_logs?: IntegrityTableSummary
+  }
+  jsonl?: {
+    valid: boolean
+    segments: JSONLSegmentStatus[]
+    broken_segments?: string[]
+    lines_checked: number
+  }
+}
+
+export interface ReadyzResponse {
+  status: string
+  draining: boolean
+  components: Record<string, unknown>
+}
+
+export interface AuditLogsQueryParams {
+  limit?: number
+  offset?: number
+  decision?: string
+  agent_name?: string
+  tool_name?: string
+  trace_id?: string
+  matched_rule?: string
+  q?: string
+  since?: string
+  until?: string
+  summary?: boolean
+}
+
+export interface SecurityAuditQueryParams {
+  limit?: number
+  offset?: number
+  event_type?: string
+  actor_id?: string
+  outcome?: string
+  since?: string
+  until?: string
 }
 
 export interface HITLApprovalRequest {

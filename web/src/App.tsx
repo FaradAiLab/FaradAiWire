@@ -6,6 +6,7 @@ import { GatewayStatus, ThemeMode } from './types'
 import { api, ADMIN_UNAUTHORIZED_EVENT } from './api'
 import { getAdminConsoleHost } from './constants'
 import type { GuardrailSubTab } from './components/SecurityGuardrailsTab'
+import type { AuditSubTab } from './components/AuditLogsTab'
 import { AuthGateModal } from './components/AuthGateModal'
 
 // Lazy-loaded domain tabs for code-splitting and faster initial page paint
@@ -40,8 +41,15 @@ const resolveCanonicalTab = (rawHash: string): TabId => {
   const clean = rawHash.replace('#', '')
   if (clean === 'tools') return 'protocols'
   if (clean === 'policy-packs' || clean === 'guards') return 'guardrails'
+  if (clean === 'audit' || clean.startsWith('audit/')) return 'audit'
   if (VALID_TABS.includes(clean as TabId)) return clean as TabId
   return 'overview'
+}
+
+const resolveAuditSubTab = (rawHash: string): AuditSubTab => {
+  const clean = rawHash.replace('#', '')
+  if (clean === 'audit/security') return 'security'
+  return 'invocations'
 }
 
 const resolveGuardrailSubTab = (rawHash: string): GuardrailSubTab | null => {
@@ -65,9 +73,17 @@ const getInitialGuardrailSubTab = (): GuardrailSubTab => {
   return 'dlp'
 }
 
+const getInitialAuditSubTab = (): AuditSubTab => {
+  if (typeof window !== 'undefined') {
+    return resolveAuditSubTab(window.location.hash)
+  }
+  return 'invocations'
+}
+
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabId>(getInitialTab)
   const [guardrailSubTab, setGuardrailSubTab] = useState<GuardrailSubTab>(getInitialGuardrailSubTab)
+  const [auditSubTab, setAuditSubTab] = useState<AuditSubTab>(getInitialAuditSubTab)
   const [status, setStatus] = useState<GatewayStatus | null>(null)
   const [isReloading, setIsReloading] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
@@ -143,6 +159,13 @@ export const App: React.FC = () => {
     }
   }, [])
 
+  const handleAuditSubTabChange = useCallback((subTab: AuditSubTab) => {
+    setAuditSubTab(subTab)
+    if (typeof window !== 'undefined') {
+      window.location.hash = subTab === 'security' ? 'audit/security' : 'audit'
+    }
+  }, [])
+
   useEffect(() => {
     const onHashChange = () => {
       const raw = window.location.hash.replace('#', '')
@@ -164,6 +187,9 @@ export const App: React.FC = () => {
       const nextSubTab = resolveGuardrailSubTab(raw)
       if (nextSubTab !== null) {
         setGuardrailSubTab(nextSubTab)
+      }
+      if (raw === 'audit' || raw.startsWith('audit/')) {
+        setAuditSubTab(resolveAuditSubTab(raw))
       }
       const canonical = resolveCanonicalTab(raw)
       setActiveTab(canonical)
@@ -264,7 +290,12 @@ export const App: React.FC = () => {
           />
         )
       case 'audit':
-        return <AuditLogsTab />
+        return (
+          <AuditLogsTab
+            initialSubTab={auditSubTab}
+            onSubTabChange={handleAuditSubTabChange}
+          />
+        )
       default:
         return <OverviewTab status={status} onRefresh={fetchStatus} />
     }

@@ -21,6 +21,13 @@ import {
   ToolSchemaRecord,
   HostResources,
   SettingsResponse,
+  AnalyticsWindow,
+  AnalyticsSummary,
+  AuditLogsQueryParams,
+  SecurityAuditQueryParams,
+  SecurityAuditRecord,
+  AuditVerifyResponse,
+  ReadyzResponse,
 } from './types'
 
 // ProbeError extends Error with structured diagnostic fields from the server.
@@ -116,6 +123,20 @@ async function request<T>(url: string, options?: RequestOptions): Promise<T> {
   }
 
   return res.json()
+}
+
+function buildQueryParams(params?: Record<string, string | number | boolean | undefined>): URLSearchParams {
+  const sp = new URLSearchParams()
+  if (!params) return sp
+  for (const [key, val] of Object.entries(params)) {
+    if (val === undefined || val === null || val === '') continue
+    if (typeof val === 'boolean') {
+      if (val) sp.set(key, '1')
+    } else {
+      sp.set(key, String(val))
+    }
+  }
+  return sp
 }
 
 export const api = {
@@ -340,11 +361,80 @@ export const api = {
   // MCP Tools
   getMCPTools: (signal?: AbortSignal) => request<{ tools: ToolMetadata[] }>('/admin/mcp/tools', { signal }),
 
-  // Audit Logs
-  getAuditLogs: (signal?: AbortSignal) =>
-    request<{ events?: AuditEvent[]; logs?: any[] }>('/admin/audit-logs?summary=1', { signal }),
+  // Audit Logs, Analytics, Security Events & Integrity Verification
+  getAuditLogs: (params?: AuditLogsQueryParams, signal?: AbortSignal) => {
+    const qs = buildQueryParams({
+      summary: params?.summary ?? true,
+      limit: params?.limit,
+      offset: params?.offset,
+      decision: params?.decision,
+      agent_name: params?.agent_name,
+      tool_name: params?.tool_name,
+      trace_id: params?.trace_id,
+      matched_rule: params?.matched_rule,
+      q: params?.q,
+      since: params?.since,
+      until: params?.until,
+    }).toString()
+    return request<{ enabled?: boolean; total?: number; limit?: number; offset?: number; events?: AuditEvent[]; logs?: AuditEvent[] }>(
+      `/admin/audit-logs${qs ? `?${qs}` : ''}`,
+      { signal }
+    )
+  },
+  getAuditLogsExportUrl: (format: 'csv' | 'jsonl', params?: AuditLogsQueryParams) => {
+    const qs = buildQueryParams({
+      format,
+      decision: params?.decision,
+      agent_name: params?.agent_name,
+      tool_name: params?.tool_name,
+      trace_id: params?.trace_id,
+      matched_rule: params?.matched_rule,
+      q: params?.q,
+      since: params?.since,
+      until: params?.until,
+    }).toString()
+    return `/admin/audit-logs/export?${qs}`
+  },
+  downloadAuditLogsExport: async (format: 'csv' | 'jsonl', params?: AuditLogsQueryParams) => {
+    const url = api.getAuditLogsExportUrl(format, params)
+    const res = await fetch(url, { credentials: 'include' })
+    if (!res.ok) {
+      dispatchUnauthorizedIfNeeded(res.status)
+      throw new ProbeError(`Export failed: ${res.status} ${res.statusText}`, undefined, res.status)
+    }
+    const blob = await res.blob()
+    const blobUrl = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = blobUrl
+    anchor.download = format === 'csv' ? 'faradaiwire-audit.csv' : 'faradaiwire-audit.jsonl'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(blobUrl)
+  },
   getAuditLogDetail: (id: string, signal?: AbortSignal) =>
     request<{ status: string; record: AuditEvent }>(`/admin/audit-logs/${encodeURIComponent(id)}`, { signal }),
+  getSecurityAuditLogs: (params?: SecurityAuditQueryParams, signal?: AbortSignal) => {
+    const qs = buildQueryParams({
+      limit: params?.limit,
+      offset: params?.offset,
+      event_type: params?.event_type,
+      actor_id: params?.actor_id,
+      outcome: params?.outcome,
+      since: params?.since,
+      until: params?.until,
+    }).toString()
+    return request<{ enabled?: boolean; total: number; limit: number; offset: number; events: SecurityAuditRecord[] }>(
+      `/admin/security-audit-logs${qs ? `?${qs}` : ''}`,
+      { signal }
+    )
+  },
+  getAnalyticsSummary: (window: AnalyticsWindow = '24h', signal?: AbortSignal) =>
+    request<AnalyticsSummary>(`/admin/analytics/summary?window=${encodeURIComponent(window)}`, { signal }),
+  verifyAuditIntegrity: (signal?: AbortSignal) =>
+    request<AuditVerifyResponse>('/admin/audit/verify', { signal }),
+  getReadyz: (signal?: AbortSignal) =>
+    request<ReadyzResponse>('/admin/readyz', { signal }),
 
   // Human-in-the-Loop Safety
   respondHITL: (callId: string, approved: boolean) =>
