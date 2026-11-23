@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -446,5 +447,36 @@ func TestResolveLockFilePath_UsesUnifiedDataDir(t *testing.T) {
 	want := filepath.Join(tempHome, ".faradaiwire.lock")
 	if got != want {
 		t.Fatalf("resolveLockFilePath() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildRuntimeLogger_StdioIsolatesStdoutAndHonorsLevel(t *testing.T) {
+	t.Setenv("FARADAI_WIRE_LOG_LEVEL", "debug")
+	var stdoutBuf, stderrBuf bytes.Buffer
+
+	stdioCfg := &config.Config{Mode: "stdio"}
+	stdioLog := buildRuntimeLogger(stdioCfg, &stdoutBuf, &stderrBuf)
+	stdioLog.Debug("stdio debug msg")
+
+	if stdoutBuf.Len() != 0 {
+		t.Fatalf("expected 0 slog bytes on stdout in stdio mode, got %s", stdoutBuf.String())
+	}
+	if !strings.Contains(stderrBuf.String(), "stdio debug msg") {
+		t.Fatalf("expected debug log on stderr in stdio mode, got %q", stderrBuf.String())
+	}
+
+	// Non-stdio mode honors info threshold (suppresses debug when level=info)
+	t.Setenv("FARADAI_WIRE_LOG_LEVEL", "info")
+	stdoutBuf.Reset()
+	stderrBuf.Reset()
+	sseLog := buildRuntimeLogger(&config.Config{Mode: "sse"}, &stdoutBuf, &stderrBuf)
+	sseLog.Debug("should be suppressed")
+	sseLog.Info("sse info msg")
+
+	if strings.Contains(stdoutBuf.String(), "should be suppressed") {
+		t.Fatalf("did not expect debug msg at info level: %s", stdoutBuf.String())
+	}
+	if !strings.Contains(stdoutBuf.String(), "sse info msg") {
+		t.Fatalf("expected info log on stdout in sse mode, got %q", stdoutBuf.String())
 	}
 }

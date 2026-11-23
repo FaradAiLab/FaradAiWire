@@ -158,6 +158,7 @@ func (s *SSEProxy) Handler() http.Handler {
 		AllowedOrigins: s.secCfg.CORSAllowedOrigins,
 	})
 	h = secMiddleware(h)
+	h = middleware.AccessLog("proxy")(h)
 
 	s.mu.RLock()
 	drainMW := s.drainingMiddleware
@@ -203,11 +204,17 @@ func (s *SSEProxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if uCtx != nil {
 		r = r.WithContext(context.WithValue(r.Context(), filter.UserContextKey, uCtx))
 	}
+	if traceID := extractTraceIDFromHeader(r); traceID != "" {
+		r = r.WithContext(context.WithValue(r.Context(), filter.TraceIDContextKey, traceID))
+	}
 
 	if agentName, isAgg, err := s.checkAggregatedAgent(r); err != nil {
 		s.writeRoutingError(w, r, err)
 		return
 	} else if isAgg {
+		if agentName != "" {
+			r = r.WithContext(context.WithValue(r.Context(), filter.AgentNameContextKey, agentName))
+		}
 		s.handleAggregatedSSE(w, r, agentName)
 		return
 	}
@@ -317,6 +324,7 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 	if traceID != "" {
 		userCtx = context.WithValue(userCtx, filter.TraceIDContextKey, traceID)
 	}
+	r = r.WithContext(userCtx)
 
 	keyAgent := ""
 	if uCtx != nil && uCtx.AgentName != "" && uCtx.AgentName != "*" {
@@ -368,6 +376,7 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 	if agentName != "" {
 		userCtx = context.WithValue(userCtx, filter.AgentNameContextKey, agentName)
+		r = r.WithContext(userCtx)
 	}
 
 	mgr := coord.SessionManager()

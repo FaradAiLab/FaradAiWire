@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -54,6 +55,7 @@ type Config struct {
 	Filters                   FiltersConfig     `yaml:"filters"`
 	AuditLog                  AuditLogConfig    `yaml:"audit_log"`
 	Telemetry                 TelemetryConfig   `yaml:"telemetry" json:"telemetry"`
+	Logging                   LoggingConfig     `yaml:"logging" json:"logging"`
 	HotReload                 bool              `yaml:"hot_reload"`
 	PrivateKeyPath            string            `yaml:"private_key_path"`
 	AdminHost                 string            `yaml:"admin_host" json:"admin_host"` // Interface host to bind Admin HTTP server (defaults to 127.0.0.1 per ADR-0028)
@@ -136,6 +138,7 @@ func (c *Config) Clone() *Config {
 		Filters:                   c.Filters,
 		AuditLog:                  c.AuditLog,
 		Telemetry:                 c.Telemetry,
+		Logging:                   c.Logging,
 		HotReload:                 c.HotReload,
 		PrivateKeyPath:            c.PrivateKeyPath,
 		AdminHost:                 c.AdminHost,
@@ -777,6 +780,40 @@ func (c *Config) GetHTTPRateLimitConfig() HTTPRateLimitConfig {
 		cfg.LoginLockoutSec = 900 // 15 minutes lockout
 	}
 	return cfg
+}
+
+// LoggingConfig configures structured runtime logging verbosity.
+type LoggingConfig struct {
+	Level string `yaml:"level" json:"level"` // debug, info, warn, error (default: info)
+}
+
+// ParseLogLevel converts a configured level string into a slog.Level, defaulting to slog.LevelInfo.
+func ParseLogLevel(raw string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// GetLogLevel returns the effective runtime slog.Level.
+// Precedence: FARADAI_WIRE_LOG_LEVEL > config.logging.level > slog.LevelInfo.
+func (c *Config) GetLogLevel() slog.Level {
+	if env := strings.TrimSpace(os.Getenv("FARADAI_WIRE_LOG_LEVEL")); env != "" {
+		return ParseLogLevel(env)
+	}
+	if c == nil {
+		return slog.LevelInfo
+	}
+	c.mu.RLock()
+	raw := c.Logging.Level
+	c.mu.RUnlock()
+	return ParseLogLevel(raw)
 }
 
 // DefaultHTTPRateLimitConfig returns production defaults for HTTP rate limiting.

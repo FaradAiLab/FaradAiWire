@@ -554,7 +554,7 @@ func (a *AdminServer) Handler() http.Handler {
 		ContentSecurityPolicy: adminCSP,
 	})
 
-	return secMiddleware(h)
+	return middleware.AccessLog("admin")(secMiddleware(h))
 }
 
 func isLoopbackHost(host string) bool {

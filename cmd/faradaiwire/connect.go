@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -96,6 +97,7 @@ func resolveDefaultConnectPort() int {
 // executeConnect establishes a thin stdio-to-HTTP/SSE bridge to the FaradAiWire gateway daemon.
 // It binds no ports, acquires no locks, and auto-spawns the daemon detachedly if offline.
 func executeConnect(profile string, host string, port int, token string, noSpawn bool, in io.Reader, out io.Writer) int {
+	slog.SetDefault(buildRuntimeLogger(&config.Config{Mode: "stdio"}, os.Stderr, os.Stderr))
 	if profile == "" {
 		profile = "default"
 	}

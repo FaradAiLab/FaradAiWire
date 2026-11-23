@@ -18,6 +18,7 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/gateway"
+	"github.com/FaradAiLab/FaradAiWire/internal/logger"
 	"github.com/FaradAiLab/FaradAiWire/internal/processguard"
 )
 
@@ -388,8 +389,24 @@ func executeRun(opts runOptions) {
 	}
 }
 
+func buildRuntimeLogger(cfg *config.Config, stdout, stderr io.Writer) *slog.Logger {
+	out := stdout
+	if cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.Mode), "stdio") {
+		out = stderr
+	}
+	if out == nil {
+		out = os.Stderr
+	}
+	level := config.ParseLogLevel(os.Getenv("FARADAI_WIRE_LOG_LEVEL"))
+	if cfg != nil {
+		level = cfg.GetLogLevel()
+	}
+	return slog.New(logger.NewContextHandler(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: level})))
+}
+
 func runGatewayDaemon(opts runOptions) int {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	// Start on stderr until config is loaded so stdio mode never leaks pre-init logs onto stdout.
+	slog.SetDefault(buildRuntimeLogger(nil, os.Stderr, os.Stderr))
 	// Buffer capacity 1 ensures signals received during initialization trigger graceful
 	// DuckDB CHECKPOINT and lock cleanup rather than queuing a premature forced exit.
 	sigCh := make(chan os.Signal, 1)
@@ -404,8 +421,9 @@ func runGatewayDaemon(opts runOptions) int {
 	}
 
 	applyRunOverrides(cfg, opts)
+	slog.SetDefault(buildRuntimeLogger(cfg, os.Stdout, os.Stderr))
 
-	if isInteractiveTerminal() {
+	if isInteractiveTerminal() && !strings.EqualFold(strings.TrimSpace(cfg.Mode), "stdio") {
 		printStartupBanner(cfg, os.Stdout)
 	}
 

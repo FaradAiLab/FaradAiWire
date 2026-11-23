@@ -105,6 +105,10 @@ audit_log:
 # Hot-reload YAML configuration dynamically using fsnotify
 hot_reload: true
 
+# Structured runtime logging configuration
+logging:
+  level: "info"                  # debug | info | warn | error (overridable via FARADAI_WIRE_LOG_LEVEL)
+
 # Admin Server configuration (for inspection, settings, and Web Console)
 admin_port: 19415
 admin_tls:

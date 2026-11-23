@@ -206,6 +206,7 @@ func (c *InboundCoordinator) ExecuteMessage(
 		if agentName == "" && bridge.AgentName != "" {
 			agentName = bridge.AgentName
 			userCtx = context.WithValue(userCtx, filter.AgentNameContextKey, agentName)
+			r = r.WithContext(userCtx)
 		}
 	}
 
@@ -234,6 +235,7 @@ func (c *InboundCoordinator) ExecuteMessage(
 				toolName = callParams.Name
 			}
 		}
+		r = r.WithContext(userCtx)
 
 		if req.ID != nil && cStore != nil {
 			reqIDStr := fmt.Sprintf("%v", req.ID)
