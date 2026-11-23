@@ -25,9 +25,11 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/schema"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
+	"github.com/FaradAiLab/FaradAiWire/internal/logger"
 	"github.com/FaradAiLab/FaradAiWire/internal/policy"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
 	"github.com/FaradAiLab/FaradAiWire/internal/settings"
+	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
 	"os"
 )
 
@@ -957,5 +959,78 @@ func TestAdminAuditLogs_FallbackJSONLReader_RotatedAndLargeLines(t *testing.T) {
 	}
 	if resp.Logs[0]["id"] != "act-1" || resp.Logs[1]["id"] != "rot-1" {
 		t.Fatalf("expected reverse chronological [act-1, rot-1], got [%v, %v]", resp.Logs[0]["id"], resp.Logs[1]["id"])
+	}
+}
+
+func TestAdminAuditVerify_Endpoint(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "audit.duckdb")
+	jsonlPath := filepath.Join(dir, "audit.jsonl")
+
+	eng, err := duckdb.New(duckdb.Config{DBPath: dbPath, BufferSize: 50, BatchFlushMs: 10})
+	if err != nil {
+		t.Fatalf("duckdb.New: %v", err)
+	}
+	defer eng.Close()
+
+	fl, err := logger.NewFileAuditLogger(jsonlPath)
+	if err != nil {
+		t.Fatalf("NewFileAuditLogger: %v", err)
+	}
+	ev := &filter.AuditEvent{
+		ID:        "verify-api-1",
+		Timestamp: time.Now().UTC(),
+		AgentName: "alpha",
+		ToolName:  "read",
+		Decision:  filter.DecisionAllowed,
+	}
+	eng.LogEvent(ev)
+	fl.LogEvent(ev)
+	_ = eng.Flush(context.Background())
+	_ = fl.Close()
+
+	srv := NewAdminServer(AdminDependencies{
+		Config: &config.Config{
+			RuntimeMode: config.RuntimeModeStandalone,
+			AuditLog:    config.AuditLogConfig{Enabled: true, Path: jsonlPath},
+		},
+		TelemetryEngine: eng,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/audit/verify", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/audit/verify = %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Valid  bool                      `json:"valid"`
+		DuckDB *duckdb.IntegrityReport   `json:"duckdb"`
+		JSONL  *logger.JSONLVerifyReport `json:"jsonl"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !payload.Valid || payload.DuckDB == nil || !payload.DuckDB.Valid || payload.JSONL == nil || !payload.JSONL.Valid {
+		t.Fatalf("expected valid DuckDB and JSONL verification, got %s", rec.Body.String())
+	}
+
+	// Mutate DuckDB row and confirm GET /admin/audit/verify flags tampered_ids
+	if _, err := eng.DB().Exec(`
+		CREATE TEMP TABLE _t_adm AS SELECT * FROM tool_audit_logs WHERE id = 'verify-api-1';
+		UPDATE _t_adm SET decision = 'BLOCKED';
+		DELETE FROM tool_audit_logs WHERE id = 'verify-api-1';
+		INSERT INTO tool_audit_logs SELECT * FROM _t_adm;
+		DROP TABLE _t_adm;
+	`); err != nil {
+		t.Fatalf("tamper SQL: %v", err)
+	}
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/admin/audit/verify", nil))
+	if err := json.Unmarshal(rec2.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal tampered: %v", err)
+	}
+	if payload.Valid || payload.DuckDB.Valid || len(payload.DuckDB.ToolAuditLogs.TamperedIDs) == 0 {
+		t.Fatalf("expected invalid DuckDB report after tampering, got %s", rec2.Body.String())
 	}
 }

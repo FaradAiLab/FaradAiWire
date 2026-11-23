@@ -26,6 +26,7 @@ func printRootUsage(out io.Writer) {
 	w = tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(w, "  guard\tManage neural guardrail models (list, status, install, uninstall)")
 	fmt.Fprintln(w, "  skill-audit\tScan protocols, tools, or repositories for security threats")
+	fmt.Fprintln(w, "  audit\tVerify cryptographic integrity of DuckDB and JSONL audit trails")
 	w.Flush()
 	fmt.Fprintln(out)
 
@@ -159,6 +160,26 @@ func printSkillAuditUsage(out io.Writer) {
 	fmt.Fprintln(w, "  0\tPASSED — No threat signatures detected")
 	fmt.Fprintln(w, "  1\tERROR — Scan aborted, missing path, or invalid arguments")
 	fmt.Fprintln(w, "  2\tFAILED — Security threat signatures detected")
+	w.Flush()
+}
+
+// printAuditUsage prints usage documentation for 'faradaiwire audit'.
+func printAuditUsage(out io.Writer) {
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  faradaiwire audit <command> [flags]")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Available Commands:")
+	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "  verify\tVerify tamper-evident integrity across DuckDB audit tables and rotated JSONL segments")
+	w.Flush()
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Flags for \"audit verify\":")
+	w = tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "  --config <path>\tPath to YAML configuration file")
+	fmt.Fprintln(w, "  --db <path>\tPath to DuckDB telemetry file")
+	fmt.Fprintln(w, "  --jsonl <path>\tPath to active audit JSONL log file")
+	fmt.Fprintln(w, "  --json\tOutput structured JSON verification report")
+	fmt.Fprintln(w, "  -h, --help\tShow help for audit command")
 	w.Flush()
 }
 

@@ -543,6 +543,7 @@ func (e *Engine) normalizeEvent(ev *filter.AuditEvent, maxBytes int) normalizedE
 	if ts.IsZero() {
 		ts = time.Now()
 	}
+	ts = ts.UTC().Truncate(time.Microsecond)
 	agentName := ev.AgentName
 	if agentName == "" {
 		agentName = "default"
@@ -588,7 +589,7 @@ func (e *Engine) normalizeEvent(ev *filter.AuditEvent, maxBytes int) normalizedE
 	}
 	hashVersion := ev.HashVersion
 	if hashVersion == "" {
-		hashVersion = "v1"
+		hashVersion = "v2"
 	}
 
 	return normalizedEventFields{
@@ -676,6 +677,7 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 	defer insertRespStmt.Close()
 
 	maxBytes := e.effectiveMaxPayloadBytes()
+	hmacKey := ResolveAuditHMACKey()
 	seenIDs := make(map[string]struct{}, len(batch))
 	seenTraces := make(map[string]string, len(batch))
 
@@ -706,11 +708,14 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 					respDec = nf.decision
 				}
 				respHash := ev.IntegrityHash
+				respHashVer := nf.hashVersion
 				if respHash == "" {
-					respHash = ComputeInvocationIntegrityHash(
-						invID, nf.ts, nf.agentName, nf.toolName, nf.callerRole,
-						respDec, ev.LatencyMs,
-						nf.preview, "", "", nf.origResp, nf.resp,
+					respHash, respHashVer = ComputeToolResponseHashV2(
+						hmacKey,
+						invID, nf.traceID, nf.ts,
+						respDec, nf.matchedRule, ev.ErrorCode,
+						nf.auditedRules, nf.errorMsg, ev.LatencyMs, ev.OutputBytes,
+						nf.preview, nf.origPreview, nf.origResp, nf.resp,
 					)
 				}
 				if _, rErr := insertRespStmt.ExecContext(ctx,
@@ -729,7 +734,7 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 					nullableText(nf.origResp),
 					nullableText(nf.resp),
 					nullableText(respHash),
-					nf.hashVersion,
+					respHashVer,
 				); rErr != nil {
 					slog.WarnContext(ctx, "Failed to insert response completion record", slog.String("error", rErr.Error()))
 				} else {
@@ -739,11 +744,15 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 		}
 
 		hash := ev.IntegrityHash
+		hashVer := nf.hashVersion
 		if hash == "" {
-			hash = ComputeInvocationIntegrityHash(
-				nf.id, nf.ts, nf.agentName, nf.toolName, nf.callerRole,
-				nf.decision, ev.LatencyMs,
+			hash, hashVer = ComputeToolLogHashV2(
+				hmacKey,
+				nf.id, nf.ts, nf.traceID, nf.agentName, nf.releaseVer, nf.toolName, nf.callerRole,
+				nf.userID, nf.clientIP, nf.apiKeyID, nf.pathType,
+				nf.decision, nf.matchedRule, ev.ErrorCode, nf.errorMsg, ev.LatencyMs,
 				nf.preview, nf.origReq, nf.req, nf.origResp, nf.resp,
+				nf.humanApproved, nf.approvedBy, nf.approvalChannel,
 			)
 		}
 
@@ -778,7 +787,7 @@ func (e *Engine) flushBatch(batch []*filter.AuditEvent) error {
 			nullableText(nf.req),
 			nullableText(nf.origResp),
 			nullableText(nf.resp),
-			nf.hashVersion,
+			hashVer,
 			hash,
 		)
 		if err != nil {
@@ -979,13 +988,6 @@ func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResul
 		if scanErr != nil {
 			return nil, fmt.Errorf("failed to scan audit log row: %w", scanErr)
 		}
-		if !f.SummaryOnly && r.ResponseDecision != "" {
-			r.IntegrityHash = ComputeInvocationIntegrityHash(
-				r.ID, r.Timestamp, r.AgentName, r.ToolName, r.CallerRole,
-				r.Decision, r.LatencyMs, r.RawPayloadPreview,
-				r.OriginalRequest, r.Request, r.OriginalResponse, r.Response,
-			)
-		}
 		records = append(records, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -1029,13 +1031,6 @@ func (e *Engine) GetAuditLogByID(ctx context.Context, id string) (*AuditRecord, 
 	rec, err := scanAuditRecord(row)
 	if err != nil {
 		return nil, err
-	}
-	if rec.ResponseDecision != "" {
-		rec.IntegrityHash = ComputeInvocationIntegrityHash(
-			rec.ID, rec.Timestamp, rec.AgentName, rec.ToolName, rec.CallerRole,
-			rec.Decision, rec.LatencyMs, rec.RawPayloadPreview,
-			rec.OriginalRequest, rec.Request, rec.OriginalResponse, rec.Response,
-		)
 	}
 	return &rec, nil
 }

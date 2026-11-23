@@ -2,9 +2,7 @@ package duckdb
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -65,17 +63,6 @@ func (e *Engine) LogSecurityEvent(event *filter.SecurityAuditEvent) {
 	}
 }
 
-func computeQuickSecurityHash(id string, ts time.Time, eventType, actorID, actorRole, clientIP, resourceType, resourceID, action, outcome, reason, metaJSON string) string {
-	h := sha256.New()
-	for _, field := range []string{
-		id, ts.UTC().Format(time.RFC3339Nano), eventType, actorID, actorRole,
-		clientIP, resourceType, resourceID, action, outcome, reason, metaJSON,
-	} {
-		h.Write([]byte(fmt.Sprintf("%d:%s\n", len(field), field)))
-	}
-	return "v2:sha256:" + hex.EncodeToString(h.Sum(nil))
-}
-
 func (e *Engine) flushSecurityBatch(batch []*filter.SecurityAuditEvent) error {
 	if len(batch) == 0 {
 		return nil
@@ -102,6 +89,7 @@ func (e *Engine) flushSecurityBatch(batch []*filter.SecurityAuditEvent) error {
 	}
 	defer stmt.Close()
 
+	hmacKey := ResolveAuditHMACKey()
 	for _, ev := range batch {
 		if ev == nil {
 			continue
@@ -114,6 +102,7 @@ func (e *Engine) flushSecurityBatch(batch []*filter.SecurityAuditEvent) error {
 		if ts.IsZero() {
 			ts = time.Now().UTC()
 		}
+		ts = ts.UTC().Truncate(time.Microsecond)
 		actorID := strings.TrimSpace(ev.ActorID)
 		if actorID == "" {
 			actorID = "local-operator"
@@ -131,11 +120,11 @@ func (e *Engine) flushSecurityBatch(batch []*filter.SecurityAuditEvent) error {
 		hashVer := ev.HashVersion
 		hash := ev.IntegrityHash
 		if hash == "" {
-			hash = computeQuickSecurityHash(
+			hash, hashVer = ComputeSecurityHashV2(
+				hmacKey,
 				id, ts, ev.EventType, actorID, actorRole, ev.ClientIP,
 				ev.ResourceType, ev.ResourceID, ev.Action, ev.Outcome, ev.Reason, metaJSON,
 			)
-			hashVer = "v2"
 		} else if hashVer == "" {
 			hashVer = "v2"
 		}

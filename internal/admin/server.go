@@ -391,6 +391,7 @@ func (a *AdminServer) Handler() http.Handler {
 	registerExactMethods(apiMux, "/admin/audit-logs", a.handleAuditLogs, http.MethodGet)
 	registerExactMethods(apiMux, "/admin/audit-logs/events", a.handleLogEventsStream, http.MethodGet)
 	registerExactMethods(apiMux, "/admin/audit-logs/{id}", a.handleAuditLogDetail, http.MethodGet)
+	registerExactMethods(apiMux, "/admin/audit/verify", a.handleAuditVerify, http.MethodGet)
 	registerExactMethods(apiMux, "/api/v1/logs/events", a.handleLogEventsStream, http.MethodGet)
 	registerExactMethods(apiMux, "/admin/mcp/tools", a.handleMCPTools, http.MethodGet)
 

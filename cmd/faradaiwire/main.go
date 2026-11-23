@@ -206,6 +206,9 @@ func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return executeToken(args[1:], stdout, stderr)
 
+	case "audit":
+		return executeAuditCommand(args[1:], stdout, stderr)
+
 	case "skill-audit":
 		target, jsonOutput, showHelp, err := parseAuditArgs(args[1:])
 		if showHelp {
