@@ -840,18 +840,43 @@ func TestServer_Shutdown_ActiveSSEStreamEviction(t *testing.T) {
 	}
 }
 
+var (
+	allocatedPortsMu     sync.Mutex
+	recentAllocatedPorts []int
+)
+
 func getFreePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		if strings.Contains(err.Error(), "operation not permitted") || strings.Contains(err.Error(), "permission denied") {
-			t.Skipf("skipping test requiring local TCP listener: socket listening not permitted in environment (%v)", err)
+	allocatedPortsMu.Lock()
+	defer allocatedPortsMu.Unlock()
+
+	var held []net.Listener
+	defer func() {
+		for _, ln := range held {
+			_ = ln.Close()
 		}
-		t.Fatalf("failed to listen on free port: %v", err)
+	}()
+
+	for attempt := 0; attempt < 32; attempt++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			if strings.Contains(err.Error(), "operation not permitted") || strings.Contains(err.Error(), "permission denied") {
+				t.Skipf("skipping test requiring local TCP listener: socket listening not permitted in environment (%v)", err)
+			}
+			t.Fatalf("failed to listen on free port: %v", err)
+		}
+		held = append(held, l)
+		port := l.Addr().(*net.TCPAddr).Port
+		if !slices.Contains(recentAllocatedPorts, port) {
+			recentAllocatedPorts = append(recentAllocatedPorts, port)
+			if len(recentAllocatedPorts) > 16 {
+				recentAllocatedPorts = recentAllocatedPorts[len(recentAllocatedPorts)-16:]
+			}
+			return port
+		}
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	_ = l.Close()
-	return port
+	t.Fatalf("failed to allocate distinct free TCP port after 32 attempts")
+	return 0
 }
 
 func setupTestAgentDir(t *testing.T, agentName string) string {

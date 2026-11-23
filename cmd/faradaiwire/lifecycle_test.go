@@ -21,25 +21,24 @@ import (
 func getDistinctLifecyclePorts(t *testing.T) (int, int) {
 	t.Helper()
 
-	allocPort := func() int {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("failed to allocate free TCP port: %v", err)
-		}
-		defer ln.Close()
-		addr, ok := ln.Addr().(*net.TCPAddr)
-		if !ok {
-			t.Fatalf("unexpected listener address type %T", ln.Addr())
-		}
-		return addr.Port
+	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate first free TCP port: %v", err)
 	}
+	defer ln1.Close()
 
-	p1 := allocPort()
-	p2 := allocPort()
-	for p2 == p1 {
-		p2 = allocPort()
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate second free TCP port: %v", err)
 	}
-	return p1, p2
+	defer ln2.Close()
+
+	addr1, ok1 := ln1.Addr().(*net.TCPAddr)
+	addr2, ok2 := ln2.Addr().(*net.TCPAddr)
+	if !ok1 || !ok2 {
+		t.Fatalf("unexpected listener address types %T / %T", ln1.Addr(), ln2.Addr())
+	}
+	return addr1.Port, addr2.Port
 }
 
 func writeLifecycleTestConfig(t *testing.T, tempHome string, withAuditAndDB bool) (cfgPath, auditPath, dbPath string) {
