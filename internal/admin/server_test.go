@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/auth"
@@ -562,6 +563,14 @@ func TestAdminServer_AuditLogs_DuckDB(t *testing.T) {
 			Total:  10,
 			Limit:  25,
 			Offset: 5,
+			Summary: &duckdb.AuditQuerySummary{
+				Total:        10,
+				Allowed:      6,
+				Masked:       2,
+				Audit:        1,
+				Blocked:      1,
+				AvgLatencyMs: 3.5,
+			},
 			Logs: []duckdb.AuditRecord{
 				{
 					ID:         "rec-1",
@@ -605,11 +614,12 @@ func TestAdminServer_AuditLogs_DuckDB(t *testing.T) {
 	}
 
 	var resp struct {
-		Enabled bool                 `json:"enabled"`
-		Total   int64                `json:"total"`
-		Limit   int                  `json:"limit"`
-		Offset  int                  `json:"offset"`
-		Logs    []duckdb.AuditRecord `json:"logs"`
+		Enabled bool                      `json:"enabled"`
+		Total   int64                     `json:"total"`
+		Limit   int                       `json:"limit"`
+		Offset  int                       `json:"offset"`
+		Summary *duckdb.AuditQuerySummary `json:"summary"`
+		Logs    []duckdb.AuditRecord      `json:"logs"`
 	}
 
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
@@ -621,6 +631,9 @@ func TestAdminServer_AuditLogs_DuckDB(t *testing.T) {
 	}
 	if resp.Total != 10 {
 		t.Errorf("expected total 10, got %d", resp.Total)
+	}
+	if resp.Summary == nil || resp.Summary.Total != 10 || resp.Summary.Allowed != 6 || resp.Summary.Blocked != 1 {
+		t.Errorf("expected summary counts in response, got %+v", resp.Summary)
 	}
 	if len(resp.Logs) != 1 || resp.Logs[0].ToolName != "web_search" {
 		t.Errorf("unexpected logs in response: %+v", resp.Logs)
@@ -1931,5 +1944,217 @@ func TestAdminServer_MagicLink_BruteForceLockout(t *testing.T) {
 	h.ServeHTTP(okRec, okReq)
 	if okRec.Code != http.StatusSeeOther {
 		t.Fatalf("unblocked IP Magic Link = %d, want 303", okRec.Code)
+	}
+}
+
+func TestAdminServer_AuditLogs_RealDuckDB_EndToEnd(t *testing.T) {
+	tempDir := t.TempDir()
+	engine, err := duckdb.New(duckdb.Config{
+		DBPath:       filepath.Join(tempDir, "admin_e2e.duckdb"),
+		BufferSize:   100,
+		BatchFlushMs: 10,
+	})
+	if err != nil {
+		t.Fatalf("duckdb.New failed: %v", err)
+	}
+	defer engine.Close()
+
+	base := time.Now().UTC().Add(-5 * time.Minute)
+
+	// 1. Correlated ALLOWED tools/list invocation
+	engine.LogEvent(&filter.AuditEvent{
+		ID:              "inv-tl",
+		TraceID:         "tr-tl",
+		Timestamp:       base.Add(1 * time.Second),
+		AgentName:       "antigravity",
+		Method:          "tools/list",
+		Phase:           filter.AuditPhaseRequest,
+		Decision:        filter.DecisionPending,
+		RequestDecision: filter.DecisionAllowed,
+		LatencyMs:       1.0,
+		RawPayload:      `{"method":"tools/list","params":{}}`,
+		OriginalRequest: `{"method":"tools/list","params":{}}`,
+	})
+	engine.LogEvent(&filter.AuditEvent{
+		ID:               "inv-tl",
+		TraceID:          "tr-tl",
+		Timestamp:        base.Add(2 * time.Second),
+		AgentName:        "antigravity",
+		Method:           "response",
+		Phase:            filter.AuditPhaseResponse,
+		Decision:         filter.DecisionAllowed,
+		ResponseDecision: filter.DecisionAllowed,
+		LatencyMs:        2.0,
+		RawPayload:       `{"tools":[{"name":"demo"}]}`,
+		OriginalResponse: `{"tools":[{"name":"demo"}]}`,
+	})
+
+	// 2. MASKED invocation with all 4 payload snapshots
+	engine.LogEvent(&filter.AuditEvent{
+		ID:              "inv-mask",
+		TraceID:         "tr-mask",
+		Timestamp:       base.Add(3 * time.Second),
+		AgentName:       "antigravity",
+		Method:          "tools/call",
+		ToolName:        "save_user",
+		Phase:           filter.AuditPhaseRequest,
+		Decision:        filter.DecisionMasked,
+		RequestDecision: filter.DecisionMasked,
+		MatchedRule:     "tckn",
+		LatencyMs:       3.0,
+		RawPayload:      `{"tckn":"[REDACTED:TCKN]"}`,
+		OriginalRequest: `{"tckn":"12345678901"}`,
+		Request:         `{"tckn":"[REDACTED:TCKN]"}`,
+	})
+	engine.LogEvent(&filter.AuditEvent{
+		ID:               "inv-mask",
+		TraceID:          "tr-mask",
+		Timestamp:        base.Add(4 * time.Second),
+		AgentName:        "antigravity",
+		Method:           "response",
+		ToolName:         "save_user",
+		Phase:            filter.AuditPhaseResponse,
+		Decision:         filter.DecisionAllowed,
+		ResponseDecision: filter.DecisionAllowed,
+		LatencyMs:        1.0,
+		RawPayload:       `{"saved":true}`,
+		OriginalResponse: `{"saved":true}`,
+	})
+
+	// 3. BLOCKED, ERROR, CRITICAL rows for filter parity
+	engine.LogEvent(&filter.AuditEvent{
+		ID:              "inv-blk",
+		TraceID:         "tr-blk",
+		Timestamp:       base.Add(5 * time.Second),
+		AgentName:       "antigravity",
+		Method:          "tools/call",
+		ToolName:        "exec",
+		Phase:           filter.AuditPhaseComplete,
+		Decision:        filter.DecisionBlocked,
+		RequestDecision: filter.DecisionBlocked,
+		MatchedRule:     "secret_token",
+		ErrorMessage:    "Blocked by dlp",
+		LatencyMs:       2.0,
+		OriginalRequest: `{"token":"tok_secret"}`,
+		Response:        `{"error":{"message":"Blocked by dlp"}}`,
+	})
+	engine.LogEvent(&filter.AuditEvent{
+		ID:               "inv-err",
+		TraceID:          "tr-err",
+		Timestamp:        base.Add(6 * time.Second),
+		AgentName:        "antigravity",
+		Method:           "tools/call",
+		ToolName:         "fetch",
+		Phase:            filter.AuditPhaseComplete,
+		Decision:         filter.DecisionError,
+		ResponseDecision: filter.DecisionError,
+		ErrorMessage:     "upstream timeout",
+		LatencyMs:        4.0,
+		OriginalRequest:  `{"url":"https://x"}`,
+		OriginalResponse: `{"error":"upstream timeout"}`,
+	})
+	engine.LogEvent(&filter.AuditEvent{
+		ID:              "inv-crit",
+		TraceID:         "tr-crit",
+		Timestamp:       base.Add(7 * time.Second),
+		AgentName:       "antigravity",
+		Method:          "tools/call",
+		ToolName:        "shell",
+		Phase:           filter.AuditPhaseComplete,
+		Decision:        filter.DecisionCritical,
+		RequestDecision: filter.DecisionCritical,
+		MatchedRule:     "guard",
+		ErrorMessage:    "Prompt injection detected",
+		LatencyMs:       5.0,
+		OriginalRequest: `{"cmd":"rm -rf"}`,
+		Response:        `{"error":{"message":"Prompt injection detected"}}`,
+	})
+
+	if err := engine.Flush(); err != nil {
+		t.Fatalf("engine.Flush failed: %v", err)
+	}
+
+	srv := NewAdminServer(AdminDependencies{
+		Config:          &config.Config{RuntimeMode: config.RuntimeModeStandalone},
+		TelemetryEngine: engine,
+	})
+	h := srv.Handler()
+
+	// Page 1 DESC list with summary=1
+	reqList := httptest.NewRequest(http.MethodGet, "/admin/audit-logs?summary=1&limit=2&offset=0", nil)
+	recList := httptest.NewRecorder()
+	h.ServeHTTP(recList, reqList)
+	if recList.Code != http.StatusOK {
+		t.Fatalf("GET /admin/audit-logs = %d, want 200 (%s)", recList.Code, recList.Body.String())
+	}
+
+	var listBody struct {
+		Enabled bool                      `json:"enabled"`
+		Total   int64                     `json:"total"`
+		Summary *duckdb.AuditQuerySummary `json:"summary"`
+		Logs    []duckdb.AuditRecord      `json:"logs"`
+	}
+	if err := json.NewDecoder(recList.Body).Decode(&listBody); err != nil {
+		t.Fatalf("decode listBody failed: %v", err)
+	}
+	if listBody.Total != 5 || len(listBody.Logs) != 2 {
+		t.Fatalf("expected Total=5 and page len=2, got Total=%d len=%d", listBody.Total, len(listBody.Logs))
+	}
+	if listBody.Logs[0].ID != "inv-crit" || listBody.Logs[1].ID != "inv-err" {
+		t.Fatalf("expected DESC newest-first order [inv-crit, inv-err], got [%s, %s]", listBody.Logs[0].ID, listBody.Logs[1].ID)
+	}
+	if listBody.Logs[0].OriginalRequest != "" {
+		t.Fatalf("expected SummaryOnly=1 list rows to omit heavy OriginalRequest, got %q", listBody.Logs[0].OriginalRequest)
+	}
+	if listBody.Summary == nil || listBody.Summary.Total != 5 || listBody.Summary.Allowed != 1 || listBody.Summary.Masked != 1 || listBody.Summary.Blocked != 3 {
+		t.Fatalf("unexpected Summary totals: %+v", listBody.Summary)
+	}
+
+	// Verdict filter decision=BLOCKED matches BLOCKED + ERROR + CRITICAL while preserving global Summary counts
+	reqBlocked := httptest.NewRequest(http.MethodGet, "/admin/audit-logs?summary=1&decision=BLOCKED&limit=10&offset=0", nil)
+	recBlocked := httptest.NewRecorder()
+	h.ServeHTTP(recBlocked, reqBlocked)
+	if recBlocked.Code != http.StatusOK {
+		t.Fatalf("GET /admin/audit-logs?decision=BLOCKED = %d, want 200", recBlocked.Code)
+	}
+	var blockedBody struct {
+		Total   int64                     `json:"total"`
+		Summary *duckdb.AuditQuerySummary `json:"summary"`
+		Logs    []duckdb.AuditRecord      `json:"logs"`
+	}
+	if err := json.NewDecoder(recBlocked.Body).Decode(&blockedBody); err != nil {
+		t.Fatalf("decode blockedBody failed: %v", err)
+	}
+	if blockedBody.Total != 3 || len(blockedBody.Logs) != 3 {
+		t.Fatalf("expected BLOCKED parity Total=3 len=3, got Total=%d len=%d", blockedBody.Total, len(blockedBody.Logs))
+	}
+	if blockedBody.Summary == nil || blockedBody.Summary.Total != 5 || blockedBody.Summary.Allowed != 1 {
+		t.Fatalf("expected non-decision Summary preserved under BLOCKED filter, got %+v", blockedBody.Summary)
+	}
+
+	// Detail hydration for inv-tl and inv-mask
+	for _, id := range []string{"inv-tl", "inv-mask"} {
+		reqDet := httptest.NewRequest(http.MethodGet, "/admin/audit-logs/"+id, nil)
+		recDet := httptest.NewRecorder()
+		h.ServeHTTP(recDet, reqDet)
+		if recDet.Code != http.StatusOK {
+			t.Fatalf("GET /admin/audit-logs/%s = %d, want 200 (%s)", id, recDet.Code, recDet.Body.String())
+		}
+		var detBody struct {
+			Status string             `json:"status"`
+			Record duckdb.AuditRecord `json:"record"`
+		}
+		if err := json.NewDecoder(recDet.Body).Decode(&detBody); err != nil {
+			t.Fatalf("decode detBody (%s) failed: %v", id, err)
+		}
+		if id == "inv-tl" {
+			if detBody.Record.ToolName != "tools/list" || !strings.Contains(detBody.Record.OriginalRequest, "tools/list") || !strings.Contains(detBody.Record.OriginalResponse, "demo") {
+				t.Fatalf("unexpected tools/list hydrated detail: %+v", detBody.Record)
+			}
+		} else {
+			if !strings.Contains(detBody.Record.OriginalRequest, "12345678901") || !strings.Contains(detBody.Record.Request, "[REDACTED:TCKN]") {
+				t.Fatalf("unexpected MASKED hydrated detail: %+v", detBody.Record)
+			}
+		}
 	}
 }

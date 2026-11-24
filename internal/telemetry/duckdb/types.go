@@ -86,12 +86,24 @@ type QueryFilter struct {
 	Until       *time.Time
 }
 
+// AuditQuerySummary contains server-computed aggregate counts across all audit records
+// matching the active non-verdict query filters (independent of pagination LIMIT/OFFSET).
+type AuditQuerySummary struct {
+	Total        int64   `json:"total"`
+	Allowed      int64   `json:"allowed"`
+	Masked       int64   `json:"masked"`
+	Audit        int64   `json:"audit"`
+	Blocked      int64   `json:"blocked"` // Includes BLOCKED, ERROR, and CRITICAL
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+}
+
 // QueryResult represents the paginated result of an audit query.
 type QueryResult struct {
-	Logs   []AuditRecord `json:"logs"`
-	Total  int64         `json:"total"`
-	Limit  int           `json:"limit"`
-	Offset int           `json:"offset"`
+	Logs    []AuditRecord      `json:"logs"`
+	Total   int64              `json:"total"`
+	Limit   int                `json:"limit"`
+	Offset  int                `json:"offset"`
+	Summary *AuditQuerySummary `json:"summary,omitempty"`
 }
 
 // SecurityAuditRecord represents a persisted control-plane security audit record in DuckDB.

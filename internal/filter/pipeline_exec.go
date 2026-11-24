@@ -272,15 +272,22 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 	ctx = context.WithValue(ctx, types.AuditMetadataKey, auditMeta)
 
 	needBlockAudit := logger != nil
-	needAllowAudit := logger != nil && reqMethod == "tools/call"
+	needAllowAudit := logger != nil && (reqMethod == "tools/call" || reqMethod == "tools/list")
+
+	var telemetryReqBytes []byte
+	if len(rawReqBytes) > 0 {
+		telemetryReqBytes = rawReqBytes
+	} else if reqMethod == "tools/list" {
+		telemetryReqBytes = []byte(`{"method":"tools/list","params":{}}`)
+	}
 
 	var initialPayloadPreview string
-	if needAllowAudit && debugRetainUnmaskedDiff && len(rawReqBytes) > 0 {
-		initialPayloadPreview = MakeBoundedPreview(rawReqBytes, previewLimit)
+	if needAllowAudit && debugRetainUnmaskedDiff && len(telemetryReqBytes) > 0 {
+		initialPayloadPreview = MakeBoundedPreview(telemetryReqBytes, previewLimit)
 	}
 	var origReqCaptured string
-	if retainLocalPayloads && len(rawReqBytes) > 0 {
-		origReqCaptured = MakeBoundedPreview(rawReqBytes, previewLimit)
+	if retainLocalPayloads && len(telemetryReqBytes) > 0 {
+		origReqCaptured = MakeBoundedPreview(telemetryReqBytes, previewLimit)
 	}
 
 	current := req
@@ -404,6 +411,8 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 					sentReqCaptured = rawPayload
 				}
 			}
+		} else if retainLocalPayloads && len(telemetryReqBytes) > 0 {
+			rawPayload = MakeBoundedPreview(telemetryReqBytes, previewLimit)
 		}
 
 		filterName := metricFilter
@@ -416,9 +425,9 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, req *mcp.Request) (finalR
 			auditedRules = auditMeta.AuditedRules
 		}
 
-		// Emit PENDING on orchestrated two-phase tools/call ingress when allowed (SPEC §1.2, SEC-022).
+		// Emit PENDING on orchestrated two-phase tools/call or tools/list ingress when allowed (SPEC §1.2, SEC-022).
 		decision := reqDecision
-		if hasExplicitInvocation && reqMethod == "tools/call" && reqDecision == DecisionAllowed {
+		if hasExplicitInvocation && (reqMethod == "tools/call" || reqMethod == "tools/list") && reqDecision == DecisionAllowed {
 			decision = DecisionPending
 		}
 
@@ -493,8 +502,12 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 		callerRole = user.Role
 	}
 
-	rawRespBytes := extractResponseRawBytes(resp)
-	outputBytes := len(rawRespBytes)
+	extractedResp := extractResponseRawBytes(resp)
+	outputBytes := len(extractedResp)
+	var rawRespBytes []byte
+	if logger != nil && len(extractedResp) > 0 {
+		rawRespBytes = bytes.Clone(extractedResp)
+	}
 	hadUpstreamError := resp != nil && resp.Error != nil
 
 	toolName := types.GetToolName(ctx)
@@ -578,8 +591,13 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, resp *mcp.Response) (fin
 	var mcpErr *mcp.Error
 	var modifiedFilter string
 	var lastSeenResult []byte
-	if current != nil && len(current.Result) > 0 {
-		lastSeenResult = bytes.Clone(current.Result)
+	if needAudit && current != nil && len(current.Result) > 0 {
+		// Reuse rawRespBytes when it already holds an independent clone of resp.Result.
+		if len(rawRespBytes) > 0 && resp != nil && len(resp.Result) > 0 {
+			lastSeenResult = rawRespBytes
+		} else {
+			lastSeenResult = bytes.Clone(current.Result)
+		}
 	}
 
 	for _, f := range filters {

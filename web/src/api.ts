@@ -7,6 +7,7 @@ import {
   PresetMetadata,
   ToolMetadata,
   AuditEvent,
+  AuditQuerySummary,
   HITLApprovalRequest,
   GuardModel,
   GuardProcessStatus,
@@ -376,7 +377,15 @@ export const api = {
       since: params?.since,
       until: params?.until,
     }).toString()
-    return request<{ enabled?: boolean; total?: number; limit?: number; offset?: number; events?: AuditEvent[]; logs?: AuditEvent[] }>(
+    return request<{
+      enabled?: boolean
+      total?: number
+      limit?: number
+      offset?: number
+      summary?: AuditQuerySummary
+      events?: AuditEvent[]
+      logs?: AuditEvent[]
+    }>(
       `/admin/audit-logs${qs ? `?${qs}` : ''}`,
       { signal }
     )

@@ -225,14 +225,16 @@ func (c *InboundCoordinator) ExecuteMessage(
 			userCtx = context.WithValue(userCtx, filter.TraceIDContextKey, traceID)
 		}
 		var toolName string
-		if req.Method == "tools/call" {
+		if req.Method == "tools/call" || req.Method == "tools/list" {
 			invocationID = filter.GenerateTraceID()
 			userCtx = context.WithValue(userCtx, filter.InvocationIDContextKey, invocationID)
-			var callParams struct {
-				Name string `json:"name"`
-			}
-			if err := json.Unmarshal(req.Params, &callParams); err == nil {
-				toolName = callParams.Name
+			if req.Method == "tools/call" {
+				var callParams struct {
+					Name string `json:"name"`
+				}
+				if err := json.Unmarshal(req.Params, &callParams); err == nil {
+					toolName = callParams.Name
+				}
 			}
 		}
 		r = r.WithContext(userCtx)
@@ -370,12 +372,18 @@ func (c *InboundCoordinator) ExecuteMessage(
 					var mcpErr *mcp.Error
 					filteredResp, mcpErr = pipeline.ProcessResponse(respCtx, jsonResp)
 					if mcpErr != nil {
+						if req.ID != nil && cStore != nil {
+							cStore.Remove(NewCorrelationKey(clientSessionID, fmt.Sprintf("%v", req.ID)))
+						}
 						errResp := mcp.NewErrorResponse(req.ID, mcpErr.Code, mcpErr.Message, mcpErr.Data)
 						respBytes, _ := json.Marshal(errResp)
 						w.Header().Set("Content-Type", "application/json")
 						_, _ = w.Write(respBytes)
 						return
 					}
+				}
+				if req.ID != nil && cStore != nil {
+					cStore.Remove(NewCorrelationKey(clientSessionID, fmt.Sprintf("%v", req.ID)))
 				}
 				respBytes, _ := json.Marshal(filteredResp)
 				w.Header().Set("Content-Type", "application/json")
@@ -493,6 +501,9 @@ func (c *InboundCoordinator) ExecuteMessage(
 					var mcpErr *mcp.Error
 					filteredResp, mcpErr = pipeline.ProcessResponse(respCtx, resp)
 					if mcpErr != nil {
+						if req != nil && req.ID != nil && cStore != nil {
+							cStore.Remove(NewCorrelationKey(clientSessionID, fmt.Sprintf("%v", req.ID)))
+						}
 						var reqID interface{}
 						if req != nil {
 							reqID = req.ID

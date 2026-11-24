@@ -834,3 +834,202 @@ func TestRetentionCleaner_StopIdempotent_And_ErrorDecisionPrecedence(t *testing.
 		t.Fatalf("expected composite/response decision ERROR, got decision=%q resp=%q", rec.Decision, rec.ResponseDecision)
 	}
 }
+
+func TestEngine_QueryAuditLogs_SummaryAndBlockedParity(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "summary_parity.duckdb")
+
+	engine, err := New(Config{DBPath: dbPath, BufferSize: 50, BatchFlushMs: 10})
+	if err != nil {
+		t.Fatalf("New engine failed: %v", err)
+	}
+	defer engine.Close()
+
+	base := time.Now().UTC().Add(-10 * time.Minute)
+	samples := []struct {
+		id       string
+		decision string
+		latency  float64
+	}{
+		{"s-1", filter.DecisionAllowed, 2.0},
+		{"s-2", filter.DecisionAllowed, 4.0},
+		{"s-3", filter.DecisionMasked, 6.0},
+		{"s-4", filter.DecisionAudit, 8.0},
+		{"s-5", filter.DecisionBlocked, 10.0},
+		{"s-6", filter.DecisionError, 12.0},
+		{"s-7", filter.DecisionCritical, 14.0},
+	}
+
+	for i, s := range samples {
+		engine.LogEvent(&filter.AuditEvent{
+			ID:         s.id,
+			TraceID:    s.id,
+			Timestamp:  base.Add(time.Duration(i) * time.Second),
+			AgentName:  "antigravity",
+			Method:     "tools/call",
+			ToolName:   "demo_tool",
+			Decision:   s.decision,
+			LatencyMs:  s.latency,
+			RawPayload: `{}`,
+		})
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	ctx := context.Background()
+	res, err := engine.QueryAuditLogs(ctx, QueryFilter{SummaryOnly: true, Limit: 2, Offset: 0})
+	if err != nil {
+		t.Fatalf("QueryAuditLogs failed: %v", err)
+	}
+	if res.Total != 7 || len(res.Logs) != 2 {
+		t.Fatalf("expected Total=7 and page len=2, got Total=%d len=%d", res.Total, len(res.Logs))
+	}
+	if res.Summary == nil {
+		t.Fatalf("expected non-nil QueryResult.Summary")
+	}
+	if res.Summary.Total != 7 || res.Summary.Allowed != 2 || res.Summary.Masked != 1 || res.Summary.Audit != 1 || res.Summary.Blocked != 3 {
+		t.Fatalf("unexpected Summary totals: %+v", res.Summary)
+	}
+	if res.Summary.AvgLatencyMs < 7.9 || res.Summary.AvgLatencyMs > 8.1 {
+		t.Fatalf("expected AvgLatencyMs ~8.0, got %v", res.Summary.AvgLatencyMs)
+	}
+
+	// Filtering by Decision=BLOCKED must return BLOCKED + ERROR + CRITICAL while preserving facet summary counts
+	blockedRes, err := engine.QueryAuditLogs(ctx, QueryFilter{SummaryOnly: true, Decision: "BLOCKED", Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryAuditLogs BLOCKED failed: %v", err)
+	}
+	if blockedRes.Total != 3 || len(blockedRes.Logs) != 3 {
+		t.Fatalf("expected BLOCKED filter to match 3 rows (BLOCKED/ERROR/CRITICAL), got Total=%d len=%d", blockedRes.Total, len(blockedRes.Logs))
+	}
+	if blockedRes.Summary == nil || blockedRes.Summary.Total != 7 || blockedRes.Summary.Allowed != 2 || blockedRes.Summary.Blocked != 3 {
+		t.Fatalf("expected non-decision Summary preserved when filtering by verdict, got %+v", blockedRes.Summary)
+	}
+}
+
+func TestEngine_QueryAuditLogs_SummaryEdgeCases(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "summary_edges.duckdb")
+
+	engine, err := New(Config{DBPath: dbPath, BufferSize: 50, BatchFlushMs: 10})
+	if err != nil {
+		t.Fatalf("New engine failed: %v", err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	// 1. Empty DB query must return zeroed Summary without SQL NULL scan error
+	emptyRes, err := engine.QueryAuditLogs(ctx, QueryFilter{SummaryOnly: true, Limit: 50, Offset: 0})
+	if err != nil {
+		t.Fatalf("QueryAuditLogs on empty table failed: %v", err)
+	}
+	if emptyRes.Total != 0 || emptyRes.Summary == nil || emptyRes.Summary.Total != 0 || emptyRes.Summary.AvgLatencyMs != 0 {
+		t.Fatalf("unexpected empty summary result: total=%d summary=%+v", emptyRes.Total, emptyRes.Summary)
+	}
+
+	// 2. Insert records exercising ALLOW alias, PENDING, negative latency guard, since/until, matched_rule, search, and offset > 0
+	t0 := time.Now().UTC().Add(-2 * time.Hour)
+	records := []*filter.AuditEvent{
+		{ID: "e-old", TraceID: "tr-old", Timestamp: t0.Add(-1 * time.Hour), AgentName: "alpha", Method: "tools/call", ToolName: "fetch_docs", Decision: "ALLOW", MatchedRule: "rule_a", LatencyMs: 100},
+		{ID: "e-1", TraceID: "tr-1", Timestamp: t0.Add(1 * time.Minute), AgentName: "alpha", Method: "tools/call", ToolName: "fetch_docs", Decision: "ALLOW", MatchedRule: "rule_a", LatencyMs: 4},
+		{ID: "e-2", TraceID: "tr-2", Timestamp: t0.Add(2 * time.Minute), AgentName: "alpha", Method: "tools/call", ToolName: "fetch_docs", Decision: filter.DecisionMasked, MatchedRule: "rule_a,rule_b", LatencyMs: 8},
+		{ID: "e-3", TraceID: "tr-3", Timestamp: t0.Add(3 * time.Minute), AgentName: "alpha", Method: "tools/call", ToolName: "fetch_docs", Decision: filter.DecisionPending, MatchedRule: "rule_a", LatencyMs: -1},
+		{ID: "e-other", TraceID: "tr-other", Timestamp: t0.Add(4 * time.Minute), AgentName: "beta", Method: "tools/call", ToolName: "other_tool", Decision: filter.DecisionBlocked, MatchedRule: "rule_c", LatencyMs: 20},
+	}
+	for _, r := range records {
+		engine.LogEvent(r)
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	since := t0
+	until := t0.Add(3*time.Minute + 30*time.Second)
+
+	// Filter by since+until + MatchedRule + Search + Offset=1 while Decision="ALLOW"
+	resAllow, err := engine.QueryAuditLogs(ctx, QueryFilter{
+		SummaryOnly: true,
+		Since:       &since,
+		Until:       &until,
+		MatchedRule: "rule_a",
+		Search:      "fetch_docs",
+		Decision:    "ALLOW",
+		Limit:       1,
+		Offset:      0,
+	})
+	if err != nil {
+		t.Fatalf("QueryAuditLogs ALLOW filtered failed: %v", err)
+	}
+	if resAllow.Total != 1 || len(resAllow.Logs) != 1 || resAllow.Logs[0].ID != "e-1" {
+		t.Fatalf("expected ALLOW alias to match e-1, got total=%d logs=%+v", resAllow.Total, resAllow.Logs)
+	}
+	if resAllow.Summary == nil || resAllow.Summary.Total != 3 || resAllow.Summary.Allowed != 1 || resAllow.Summary.Masked != 1 {
+		t.Fatalf("expected filtered Summary (e-1, e-2, e-3), got %+v", resAllow.Summary)
+	}
+	// AvgLatencyMs should ignore -1 on e-3 and average (4 + 8) / 2 = 6.0
+	if resAllow.Summary.AvgLatencyMs < 5.9 || resAllow.Summary.AvgLatencyMs > 6.1 {
+		t.Fatalf("expected AvgLatencyMs ~6.0 ignoring negative latency, got %v", resAllow.Summary.AvgLatencyMs)
+	}
+
+	// Decision="PENDING" uses fallback total count query rather than summary facet buckets
+	resPending, err := engine.QueryAuditLogs(ctx, QueryFilter{
+		SummaryOnly: true,
+		Since:       &since,
+		Until:       &until,
+		Decision:    filter.DecisionPending,
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("QueryAuditLogs PENDING failed: %v", err)
+	}
+	if resPending.Total != 1 || len(resPending.Logs) != 1 || resPending.Logs[0].ID != "e-3" {
+		t.Fatalf("expected PENDING query to return e-3, got total=%d logs=%+v", resPending.Total, resPending.Logs)
+	}
+}
+
+func BenchmarkQueryAuditLogs(b *testing.B) {
+	tempDir := b.TempDir()
+	dbPath := filepath.Join(tempDir, "bench_audit.duckdb")
+
+	engine, err := New(Config{DBPath: dbPath, BufferSize: 2048, BatchFlushMs: 10})
+	if err != nil {
+		b.Fatalf("New engine failed: %v", err)
+	}
+	defer engine.Close()
+
+	base := time.Now().UTC().Add(-1 * time.Hour)
+	for i := 0; i < 1000; i++ {
+		dec := filter.DecisionAllowed
+		if i%20 == 0 {
+			dec = filter.DecisionBlocked
+		} else if i%15 == 0 {
+			dec = filter.DecisionMasked
+		}
+		engine.LogEvent(&filter.AuditEvent{
+			ID:         fmt.Sprintf("bench-%d", i),
+			TraceID:    fmt.Sprintf("tr-%d", i),
+			Timestamp:  base.Add(time.Duration(i) * time.Millisecond),
+			AgentName:  "antigravity",
+			Method:     "tools/call",
+			ToolName:   "codegraph_explore",
+			Decision:   dec,
+			LatencyMs:  float64(i%10) + 0.5,
+			RawPayload: `{"ok":true}`,
+		})
+	}
+	if err := engine.Flush(); err != nil {
+		b.Fatalf("Flush failed: %v", err)
+	}
+
+	ctx := context.Background()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		res, qErr := engine.QueryAuditLogs(ctx, QueryFilter{SummaryOnly: true, Limit: 50, Offset: 0})
+		if qErr != nil || res == nil || res.Total != 1000 {
+			b.Fatalf("unexpected benchmark query result: res=%+v err=%v", res, qErr)
+		}
+	}
+}

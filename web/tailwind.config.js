@@ -18,10 +18,10 @@ export default {
         secondary: 'var(--text-secondary)',
         muted: 'var(--text-muted)',
         accent: {
-          DEFAULT: 'var(--accent-primary)',
-          hover: 'var(--accent-primary-hover)',
-          primary: 'var(--accent-primary)',
-          'primary-hover': 'var(--accent-primary-hover)',
+          DEFAULT: 'rgb(var(--accent-primary-rgb) / <alpha-value>)',
+          hover: 'rgb(var(--accent-primary-hover-rgb) / <alpha-value>)',
+          primary: 'rgb(var(--accent-primary-rgb) / <alpha-value>)',
+          'primary-hover': 'rgb(var(--accent-primary-hover-rgb) / <alpha-value>)',
         },
         dark: {
           bg: '#0b0f17',

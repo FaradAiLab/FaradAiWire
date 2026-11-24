@@ -29,35 +29,40 @@ export const Header: React.FC<HeaderProps> = ({
     ? `${status.version.startsWith('v') ? status.version : `v${status.version}`} Core`
     : 'Core'
 
+  const runtimeLabel = isManaged ? 'Enterprise Managed' : 'Standalone Core (Zero-Egress)'
+
   return (
-    <header className="border-b border-gray-200 dark:border-white/10 bg-white/90 dark:bg-dark-bg/80 backdrop-blur-md sticky top-0 z-50 px-6 py-3.5 flex flex-wrap items-center justify-between gap-4 transition-colors">
-      <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-cyan-50 dark:bg-gradient-to-br dark:from-cyan-500/20 dark:to-indigo-500/20 border border-cyan-500/30 flex items-center justify-center text-cyan-600 dark:text-cyan-400 shadow-sm dark:shadow-[0_0_15px_rgba(6,182,212,0.15)]">
+    <header className="border-b border-gray-200 dark:border-white/10 bg-white/90 dark:bg-dark-bg/80 backdrop-blur-md sticky top-0 z-50 px-4 sm:px-6 py-3.5 flex flex-wrap items-center justify-between gap-3 transition-colors">
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="w-10 h-10 shrink-0 rounded-xl bg-cyan-50 dark:bg-gradient-to-br dark:from-cyan-500/20 dark:to-indigo-500/20 border border-cyan-500/30 flex items-center justify-center text-cyan-600 dark:text-cyan-400 shadow-sm dark:shadow-[0_0_15px_rgba(6,182,212,0.15)]">
           <Shield className="w-5 h-5 text-cyan-600 dark:text-cyan-400" />
         </div>
-        <div>
-          <div className="flex items-center gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
             <h1 className="font-extrabold text-lg tracking-tight text-gray-900 dark:text-white">
               FaradAiWire
             </h1>
-            <span className="text-xs px-2 py-0.5 rounded font-mono font-medium bg-cyan-100 text-cyan-800 dark:bg-cyan-950 dark:text-cyan-400 border border-cyan-300 dark:border-cyan-800/40">
+            <span className="text-xs px-2 py-0.5 rounded font-mono font-medium bg-cyan-100 text-cyan-800 dark:bg-cyan-950 dark:text-cyan-400 border border-cyan-300 dark:border-cyan-800/40 whitespace-nowrap">
               {versionBadge}
             </span>
           </div>
-          <p className="text-xs text-gray-500 dark:text-gray-400">Standalone AI Gateway & Agent Studio</p>
+          <p className="text-xs text-gray-500 dark:text-gray-400 truncate">Standalone AI Gateway & Agent Studio</p>
         </div>
       </div>
 
-      <div className="flex items-center gap-2.5 flex-wrap">
+      <div className="flex items-center gap-2 flex-wrap min-w-0">
         {/* Gateway Ingress Status */}
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:border-emerald-500/30 dark:text-emerald-400">
-          <Radio className={`w-3.5 h-3.5 ${isOnline ? 'animate-pulse text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`} />
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:border-emerald-500/30 dark:text-emerald-400 whitespace-nowrap">
+          <Radio className={`w-3.5 h-3.5 shrink-0 ${isOnline ? 'animate-pulse text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`} />
           <span>{isOnline ? 'Gateway Active' : 'Gateway Offline'}</span>
         </div>
 
         {/* Runtime Architecture */}
-        <div className="px-3 py-1.5 rounded-full text-xs font-semibold font-mono bg-indigo-50 text-indigo-700 border border-indigo-200 dark:bg-indigo-950/60 dark:border-indigo-500/30 dark:text-indigo-300">
-          {isManaged ? 'Enterprise Managed' : 'Standalone Core (Zero-Egress)'}
+        <div
+          className="px-3 py-1.5 rounded-full text-xs font-semibold font-mono bg-indigo-50 text-indigo-700 border border-indigo-200 dark:bg-indigo-950/60 dark:border-indigo-500/30 dark:text-indigo-300 max-w-[185px] xl:max-w-none truncate"
+          title={runtimeLabel}
+        >
+          {runtimeLabel}
         </div>
 
         {/* AI Guard Badge */}

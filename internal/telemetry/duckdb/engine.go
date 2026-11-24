@@ -937,21 +937,18 @@ func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResul
 	}
 
 	// Post-merge predicates (values that can be refined by tool_audit_responses).
-	var consClauses []string
-	var consArgs []interface{}
-	if v := strings.TrimSpace(f.Decision); v != "" {
-		consClauses = append(consClauses, "LOWER(decision) = LOWER(?)")
-		consArgs = append(consArgs, v)
-	}
+	// Keep non-decision predicates separate so aggregate summary counts stay accurate across all verdicts.
+	var baseConsClauses []string
+	var baseConsArgs []interface{}
 	if v := strings.TrimSpace(f.MatchedRule); v != "" {
 		escaped := escapeSQLLike(strings.ToLower(v))
-		consClauses = append(consClauses, `(LOWER(matched_rule) = LOWER(?) OR (',' || LOWER(matched_rule) || ',') LIKE ? ESCAPE '\')`)
-		consArgs = append(consArgs, v, "%,"+escaped+",%")
+		baseConsClauses = append(baseConsClauses, `(LOWER(matched_rule) = LOWER(?) OR (',' || LOWER(matched_rule) || ',') LIKE ? ESCAPE '\')`)
+		baseConsArgs = append(baseConsArgs, v, "%,"+escaped+",%")
 	}
 	if v := strings.TrimSpace(f.Search); v != "" {
 		// Metadata-only search: never scan 512KB-4MB payload columns.
 		pattern := "%" + escapeSQLLike(v) + "%"
-		consClauses = append(consClauses, `(
+		baseConsClauses = append(baseConsClauses, `(
 			tool_name ILIKE ? ESCAPE '\' OR
 			agent_name ILIKE ? ESCAPE '\' OR
 			matched_rule ILIKE ? ESCAPE '\' OR
@@ -959,24 +956,86 @@ func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResul
 			user_id ILIKE ? ESCAPE '\' OR
 			trace_id ILIKE ? ESCAPE '\'
 		)`)
-		consArgs = append(consArgs, pattern, pattern, pattern, pattern, pattern, pattern)
+		baseConsArgs = append(baseConsArgs, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 
+	consClauses := append([]string(nil), baseConsClauses...)
+	consArgs := append([]interface{}(nil), baseConsArgs...)
+	normDecision := strings.ToUpper(strings.TrimSpace(f.Decision))
+	if normDecision != "" {
+		switch normDecision {
+		case "BLOCKED":
+			consClauses = append(consClauses, "UPPER(decision) IN ('BLOCKED', 'ERROR', 'CRITICAL')")
+		case "ALLOWED", "ALLOW":
+			consClauses = append(consClauses, "UPPER(decision) IN ('ALLOWED', 'ALLOW')")
+		default:
+			consClauses = append(consClauses, "LOWER(decision) = LOWER(?)")
+			consArgs = append(consArgs, strings.TrimSpace(f.Decision))
+		}
+	}
+
+	baseConsWhereSQL := ""
+	if len(baseConsClauses) > 0 {
+		baseConsWhereSQL = "WHERE " + strings.Join(baseConsClauses, " AND ")
+	}
 	consWhereSQL := ""
 	if len(consClauses) > 0 {
 		consWhereSQL = "WHERE " + strings.Join(consClauses, " AND ")
 	}
 
 	cteSQL := buildConsolidatedAuditCTE(logsWhereSQL)
+	baseAllArgs := make([]interface{}, 0, len(logArgs)+len(baseConsArgs))
+	baseAllArgs = append(baseAllArgs, logArgs...)
+	baseAllArgs = append(baseAllArgs, baseConsArgs...)
+
 	allArgs := make([]interface{}, 0, len(logArgs)+len(consArgs))
 	allArgs = append(allArgs, logArgs...)
 	allArgs = append(allArgs, consArgs...)
 
-	// 1. Query total count
-	countQuery := cteSQL + "SELECT COUNT(*) FROM consolidated " + consWhereSQL
+	// 1. Single-pass summary aggregate across all non-decision-filtered rows
+	var summary AuditQuerySummary
+	var pendingCount int64
+	summaryQuery := cteSQL + `
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN UPPER(decision) IN ('ALLOWED', 'ALLOW') THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN UPPER(decision) = 'MASKED' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN UPPER(decision) = 'AUDIT' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN UPPER(decision) IN ('BLOCKED', 'ERROR', 'CRITICAL') THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN UPPER(decision) = 'PENDING' THEN 1 ELSE 0 END), 0),
+			COALESCE(AVG(CASE WHEN latency_ms >= 0 THEN latency_ms END), 0)
+		FROM consolidated ` + baseConsWhereSQL
+	if err := e.db.QueryRowContext(ctx, summaryQuery, baseAllArgs...).Scan(
+		&summary.Total,
+		&summary.Allowed,
+		&summary.Masked,
+		&summary.Audit,
+		&summary.Blocked,
+		&pendingCount,
+		&summary.AvgLatencyMs,
+	); err != nil {
+		return nil, fmt.Errorf("failed to aggregate audit logs summary: %w", err)
+	}
+
 	var total int64
-	if err := e.db.QueryRowContext(ctx, countQuery, allArgs...).Scan(&total); err != nil {
-		return nil, fmt.Errorf("failed to count audit logs: %w", err)
+	switch normDecision {
+	case "":
+		total = summary.Total
+	case "ALLOWED", "ALLOW":
+		total = summary.Allowed
+	case "MASKED":
+		total = summary.Masked
+	case "AUDIT":
+		total = summary.Audit
+	case "BLOCKED":
+		total = summary.Blocked
+	case "PENDING":
+		total = pendingCount
+	default:
+		countQuery := cteSQL + "SELECT COUNT(*) FROM consolidated " + consWhereSQL
+		if err := e.db.QueryRowContext(ctx, countQuery, allArgs...).Scan(&total); err != nil {
+			return nil, fmt.Errorf("failed to count audit logs: %w", err)
+		}
 	}
 
 	// 2. Query paginated records
@@ -1044,10 +1103,11 @@ func (e *Engine) QueryAuditLogs(ctx context.Context, f QueryFilter) (*QueryResul
 	}
 
 	return &QueryResult{
-		Logs:   records,
-		Total:  total,
-		Limit:  limit,
-		Offset: offset,
+		Logs:    records,
+		Total:   total,
+		Limit:   limit,
+		Offset:  offset,
+		Summary: &summary,
 	}, nil
 }
 

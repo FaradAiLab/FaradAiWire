@@ -220,6 +220,7 @@ export interface AuditEvent {
   id?: string
   timestamp: string
   trace_id?: string
+  method?: string
   event_type: string
   severity: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'CRITICAL' | 'AUDIT'
   decision?: string
@@ -340,6 +341,15 @@ export interface ReadyzResponse {
   status: string
   draining: boolean
   components: Record<string, unknown>
+}
+
+export interface AuditQuerySummary {
+  total: number
+  allowed: number
+  masked: number
+  audit: number
+  blocked: number
+  avg_latency_ms: number
 }
 
 export interface AuditLogsQueryParams {

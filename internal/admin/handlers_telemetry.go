@@ -96,6 +96,7 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 			"total":   result.Total,
 			"limit":   result.Limit,
 			"offset":  result.Offset,
+			"summary": result.Summary,
 			"logs":    result.Logs,
 			"events":  result.Logs,
 		})

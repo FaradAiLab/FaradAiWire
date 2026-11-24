@@ -401,3 +401,117 @@ func TestInboundCoordinator_ExecuteMessage_RejectsCrossAgentBridge(t *testing.T)
 		t.Fatalf("expected 403 AGENT_ACCESS_DENIED for cross-agent bridge access, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+type mockManifestAggregator struct {
+	tools []map[string]interface{}
+}
+
+func (m *mockManifestAggregator) CompileToolsList(ctx context.Context, agentName string) ([]map[string]interface{}, error) {
+	return m.tools, nil
+}
+
+type recordingAuditLogger struct {
+	events []*filter.AuditEvent
+}
+
+func (l *recordingAuditLogger) LogEvent(ev *filter.AuditEvent) {
+	if ev != nil {
+		l.events = append(l.events, ev)
+	}
+}
+
+func TestInboundCoordinator_ToolsListCorrelation(t *testing.T) {
+	auditLog := &recordingAuditLogger{}
+	p := filter.NewPipeline(auditLog)
+	cStore := NewMemoryCorrelationStore()
+	agg := &mockManifestAggregator{
+		tools: []map[string]interface{}{
+			{"name": "demo_tool", "description": "safe description"},
+		},
+	}
+
+	coord := NewInboundCoordinator(p, nil, nil, agg, nil, cStore, nil, "http://default-target")
+
+	reqBody := []byte(`{"jsonrpc":"2.0","method":"tools/list","id":"list-corr-1"}`)
+	r := httptest.NewRequest(http.MethodPost, "/message?sessionId=cl-list-1", bytes.NewBuffer(reqBody))
+	parsedReq, _, _, err := mcp.ParseMessage(reqBody)
+	if err != nil {
+		t.Fatalf("ParseMessage: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	coord.ExecuteMessage(rec, r, context.Background(), "cl-list-1", "antigravity", reqBody, parsedReq, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if len(auditLog.events) != 2 {
+		t.Fatalf("expected 2 correlated audit events (request + response) for tools/list, got %d: %+v", len(auditLog.events), auditLog.events)
+	}
+	reqEv := auditLog.events[0]
+	respEv := auditLog.events[1]
+	if reqEv.ID == "" || reqEv.ID != respEv.ID {
+		t.Fatalf("expected shared invocation ID between request and response, got req=%q resp=%q", reqEv.ID, respEv.ID)
+	}
+	if reqEv.Method != "tools/list" || reqEv.OriginalRequest == "" {
+		t.Fatalf("expected tools/list request metadata captured, got method=%q orig=%q", reqEv.Method, reqEv.OriginalRequest)
+	}
+	if _, stillPending := cStore.GetAndRemove(NewCorrelationKey("cl-list-1", "list-corr-1")); stillPending {
+		t.Fatalf("expected correlation entry cleaned up after aggregated tools/list response")
+	}
+}
+
+type blockingResponseFilter struct {
+	filter.BaseSecurityFilter
+}
+
+func (f *blockingResponseFilter) Name() string { return "resp_blocker" }
+func (f *blockingResponseFilter) Order() int   { return 10 }
+func (f *blockingResponseFilter) ExecuteResponse(ctx context.Context, resp *mcp.Response) (*mcp.Response, error) {
+	return nil, mcp.NewError(-32005, "blocked local response", nil)
+}
+
+func TestInboundCoordinator_ExecutedLocallyBlock_CleansCorrelationStore(t *testing.T) {
+	cStore := NewMemoryCorrelationStore()
+	p := filter.NewPipeline(nil)
+	p.RegisterFilter(&blockingResponseFilter{})
+
+	dispatcher := &mockDispatcher{
+		result: &ToolExecutionResult{
+			ExecutedLocally: true,
+			Response: &mcp.Response{
+				JSONRPC: "2.0",
+				ID:      "local-blk-1",
+				Result:  json.RawMessage(`{"content":[{"type":"text","text":"malicious output"}]}`),
+			},
+		},
+	}
+
+	mgr := NewManager(nil, nil)
+	mgr.bridgesMu.Lock()
+	mgr.bridges["cl-local-blk"] = &AgentSessionBridge{
+		ClientSessionID: "cl-local-blk",
+		AgentName:       "agent-a",
+		Upstreams:       make(map[string]*UpstreamSession),
+	}
+	mgr.bridgesMu.Unlock()
+
+	coord := NewInboundCoordinator(p, nil, nil, nil, dispatcher, cStore, nil, "http://default-target")
+	coord.SetSessionManager(mgr)
+
+	reqBody := []byte(`{"jsonrpc":"2.0","method":"tools/call","id":"local-blk-1","params":{"name":"local_tool"}}`)
+	r := httptest.NewRequest(http.MethodPost, "/message?sessionId=cl-local-blk", bytes.NewBuffer(reqBody))
+	parsedReq, _, _, err := mcp.ParseMessage(reqBody)
+	if err != nil {
+		t.Fatalf("ParseMessage: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	coord.ExecuteMessage(rec, r, context.Background(), "cl-local-blk", "agent-a", reqBody, parsedReq, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "blocked local response") {
+		t.Fatalf("expected JSON-RPC block response, got code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, stillPending := cStore.GetAndRemove(NewCorrelationKey("cl-local-blk", "local-blk-1")); stillPending {
+		t.Fatalf("expected correlation entry removed when local execution response is blocked")
+	}
+}

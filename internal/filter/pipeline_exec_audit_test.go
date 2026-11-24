@@ -1,6 +1,7 @@
 package filter_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -225,5 +226,244 @@ func TestPipeline_RetainLocalPayloadsDisabled_SuppressesVaultAndFailurePayloads(
 	}
 	if finalRec.OriginalResponse != "" || finalRec.RawPayloadPreview != "" {
 		t.Fatalf("expected empty response payload when retain_local_payloads=false, got origResp=%q raw=%q", finalRec.OriginalResponse, finalRec.RawPayloadPreview)
+	}
+}
+
+type inPlaceMutatingResponseFilter struct{}
+
+func (f *inPlaceMutatingResponseFilter) Name() string { return "inplace_mutator" }
+func (f *inPlaceMutatingResponseFilter) Order() int   { return 100 }
+func (f *inPlaceMutatingResponseFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (*mcp.Response, *mcp.Error) {
+	if resp == nil || len(resp.Result) == 0 {
+		return resp, nil
+	}
+	// Overwrite existing backing bytes in-place with equal-length token
+	copy(resp.Result, bytes.ReplaceAll(resp.Result, []byte("secret-value"), []byte("REDACTED-VAL")))
+	return resp, nil
+}
+
+func TestPipeline_ToolsListCorrelation_And_AllowedRetention(t *testing.T) {
+	tempDir := t.TempDir()
+	engine, err := duckdb.New(duckdb.Config{
+		DBPath:       filepath.Join(tempDir, "tools_list.duckdb"),
+		BufferSize:   100,
+		BatchFlushMs: 10,
+	})
+	if err != nil {
+		t.Fatalf("duckdb.New failed: %v", err)
+	}
+	defer engine.Close()
+
+	p := filter.NewPipeline(engine)
+	ctx := context.WithValue(context.Background(), filter.AgentNameContextKey, "antigravity")
+	ctx = context.WithValue(ctx, filter.InvocationIDContextKey, "inv-tools-list-1")
+	ctx = context.WithValue(ctx, filter.TraceIDContextKey, "trace-tools-list-1")
+
+	req := &mcp.Request{
+		JSONRPC: "2.0",
+		Method:  "tools/list",
+		ID:      10,
+	}
+	if _, mcpErr := p.ProcessRequest(ctx, req); mcpErr != nil {
+		t.Fatalf("ProcessRequest failed: %v", mcpErr)
+	}
+	resp := &mcp.Response{
+		JSONRPC: "2.0",
+		Result:  json.RawMessage(`{"tools":[{"name":"demo_tool","description":"hello"}]}`),
+		ID:      10,
+	}
+	if _, mcpErr := p.ProcessResponse(ctx, resp); mcpErr != nil {
+		t.Fatalf("ProcessResponse failed: %v", mcpErr)
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatalf("engine.Flush failed: %v", err)
+	}
+
+	rec, err := engine.GetAuditLogByID(ctx, "inv-tools-list-1")
+	if err != nil {
+		t.Fatalf("GetAuditLogByID failed: %v", err)
+	}
+	if rec.ToolName != "tools/list" {
+		t.Fatalf("expected ToolName 'tools/list', got %q", rec.ToolName)
+	}
+	if rec.Decision != filter.DecisionAllowed || rec.RequestDecision != filter.DecisionAllowed || rec.ResponseDecision != filter.DecisionAllowed {
+		t.Fatalf("expected ALLOWED lifecycle decisions, got composite=%q req=%q resp=%q", rec.Decision, rec.RequestDecision, rec.ResponseDecision)
+	}
+	if !strings.Contains(rec.OriginalRequest, "tools/list") {
+		t.Fatalf("expected OriginalRequest to retain tools/list metadata, got %q", rec.OriginalRequest)
+	}
+	if !strings.Contains(rec.OriginalResponse, "demo_tool") {
+		t.Fatalf("expected OriginalResponse to retain tool list payload, got %q", rec.OriginalResponse)
+	}
+}
+
+func TestPipeline_ProcessResponse_InPlaceMutationDetected(t *testing.T) {
+	tempDir := t.TempDir()
+	engine, err := duckdb.New(duckdb.Config{
+		DBPath:       filepath.Join(tempDir, "inplace_resp.duckdb"),
+		BufferSize:   100,
+		BatchFlushMs: 10,
+	})
+	if err != nil {
+		t.Fatalf("duckdb.New failed: %v", err)
+	}
+	defer engine.Close()
+
+	p := filter.NewPipeline(engine)
+	p.SetFilters([]filter.NamedFilter{&inPlaceMutatingResponseFilter{}})
+
+	ctx := context.WithValue(context.Background(), filter.InvocationIDContextKey, "inv-inplace-1")
+	ctx = context.WithValue(ctx, filter.TraceIDContextKey, "trace-inplace-1")
+	ctx = context.WithValue(ctx, types.ToolNameContextKey, "echo")
+
+	req := &mcp.Request{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name":"echo","arguments":{}}`),
+		ID:      11,
+	}
+	if _, mcpErr := p.ProcessRequest(ctx, req); mcpErr != nil {
+		t.Fatalf("ProcessRequest failed: %v", mcpErr)
+	}
+	resp := &mcp.Response{
+		JSONRPC: "2.0",
+		Result:  json.RawMessage(`{"val":"secret-value"}`),
+		ID:      11,
+	}
+	if _, mcpErr := p.ProcessResponse(ctx, resp); mcpErr != nil {
+		t.Fatalf("ProcessResponse failed: %v", mcpErr)
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatalf("engine.Flush failed: %v", err)
+	}
+
+	rec, err := engine.GetAuditLogByID(ctx, "inv-inplace-1")
+	if err != nil {
+		t.Fatalf("GetAuditLogByID failed: %v", err)
+	}
+	if rec.Decision != filter.DecisionMasked || rec.ResponseDecision != filter.DecisionMasked {
+		t.Fatalf("expected MASKED decision on in-place response mutation, got decision=%q resp=%q", rec.Decision, rec.ResponseDecision)
+	}
+	if !strings.Contains(rec.OriginalResponse, "secret-value") || !strings.Contains(rec.Response, "REDACTED-VAL") {
+		t.Fatalf("expected OriginalResponse vs mutated Response preserved, got orig=%q resp=%q", rec.OriginalResponse, rec.Response)
+	}
+}
+
+func TestPipeline_ToolsList_RetainLocalPayloadsDisabled(t *testing.T) {
+	tempDir := t.TempDir()
+	engine, err := duckdb.New(duckdb.Config{
+		DBPath:       filepath.Join(tempDir, "tools_list_noretain.duckdb"),
+		BufferSize:   100,
+		BatchFlushMs: 10,
+	})
+	if err != nil {
+		t.Fatalf("duckdb.New failed: %v", err)
+	}
+	defer engine.Close()
+
+	op := settings.DefaultOperationalSettings()
+	op.Maintenance.RetainLocalPayloads = false
+	sCache := settings.NewCache(op)
+	engine.SetSettingsCache(sCache)
+
+	p := filter.NewPipeline(engine)
+	p.SetSettingsCache(sCache)
+
+	ctx := context.WithValue(context.Background(), filter.AgentNameContextKey, "antigravity")
+	ctx = context.WithValue(ctx, filter.InvocationIDContextKey, "inv-tl-noretain")
+	ctx = context.WithValue(ctx, filter.TraceIDContextKey, "trace-tl-noretain")
+
+	req := &mcp.Request{
+		JSONRPC: "2.0",
+		Method:  "tools/list",
+		ID:      20,
+	}
+	if _, mcpErr := p.ProcessRequest(ctx, req); mcpErr != nil {
+		t.Fatalf("ProcessRequest failed: %v", mcpErr)
+	}
+	resp := &mcp.Response{
+		JSONRPC: "2.0",
+		Result:  json.RawMessage(`{"tools":[{"name":"secret_tool","description":"classified"}]}`),
+		ID:      20,
+	}
+	if _, mcpErr := p.ProcessResponse(ctx, resp); mcpErr != nil {
+		t.Fatalf("ProcessResponse failed: %v", mcpErr)
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatalf("engine.Flush failed: %v", err)
+	}
+
+	rec, err := engine.GetAuditLogByID(ctx, "inv-tl-noretain")
+	if err != nil {
+		t.Fatalf("GetAuditLogByID failed: %v", err)
+	}
+	if rec.ToolName != "tools/list" || rec.Decision != filter.DecisionAllowed {
+		t.Fatalf("expected ALLOWED tools/list record, got tool=%q decision=%q", rec.ToolName, rec.Decision)
+	}
+	if rec.OriginalRequest != "" || rec.RawPayloadPreview != "" || rec.OriginalResponse != "" {
+		t.Fatalf("expected zero retained payloads when retain_local_payloads=false, got origReq=%q raw=%q origResp=%q",
+			rec.OriginalRequest, rec.RawPayloadPreview, rec.OriginalResponse)
+	}
+}
+
+func TestPipeline_ToolsList_WithParams_And_ResponseMasked(t *testing.T) {
+	tempDir := t.TempDir()
+	engine, err := duckdb.New(duckdb.Config{
+		DBPath:       filepath.Join(tempDir, "tools_list_masked.duckdb"),
+		BufferSize:   100,
+		BatchFlushMs: 10,
+	})
+	if err != nil {
+		t.Fatalf("duckdb.New failed: %v", err)
+	}
+	defer engine.Close()
+
+	dlpFilter, err := dlp.NewDLPFilter(true, nil, []config.DLPPattern{
+		{Name: "email", Regex: `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`, Action: "mask"},
+	})
+	if err != nil {
+		t.Fatalf("NewDLPFilter failed: %v", err)
+	}
+
+	p := filter.NewPipeline(engine)
+	p.SetFilters([]filter.NamedFilter{dlpFilter})
+
+	ctx := context.WithValue(context.Background(), filter.AgentNameContextKey, "antigravity")
+	ctx = context.WithValue(ctx, filter.InvocationIDContextKey, "inv-tl-masked")
+	ctx = context.WithValue(ctx, filter.TraceIDContextKey, "trace-tl-masked")
+
+	req := &mcp.Request{
+		JSONRPC: "2.0",
+		Method:  "tools/list",
+		Params:  json.RawMessage(`{"cursor":"page-2"}`),
+		ID:      21,
+	}
+	if _, mcpErr := p.ProcessRequest(ctx, req); mcpErr != nil {
+		t.Fatalf("ProcessRequest failed: %v", mcpErr)
+	}
+	resp := &mcp.Response{
+		JSONRPC: "2.0",
+		Result:  json.RawMessage(`{"tools":[{"name":"mailer","description":"owner admin@farad.local"}]}`),
+		ID:      21,
+	}
+	if _, mcpErr := p.ProcessResponse(ctx, resp); mcpErr != nil {
+		t.Fatalf("ProcessResponse failed: %v", mcpErr)
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatalf("engine.Flush failed: %v", err)
+	}
+
+	rec, err := engine.GetAuditLogByID(ctx, "inv-tl-masked")
+	if err != nil {
+		t.Fatalf("GetAuditLogByID failed: %v", err)
+	}
+	if rec.ToolName != "tools/list" || rec.Decision != filter.DecisionMasked {
+		t.Fatalf("expected MASKED tools/list record, got tool=%q decision=%q", rec.ToolName, rec.Decision)
+	}
+	if !strings.Contains(rec.OriginalRequest, `"cursor":"page-2"`) {
+		t.Fatalf("expected explicit tools/list params preserved, got %q", rec.OriginalRequest)
+	}
+	if !strings.Contains(rec.OriginalResponse, "admin@farad.local") || !strings.Contains(rec.Response, "[REDACTED:EMAIL]") {
+		t.Fatalf("expected masked response diff preserved, got orig=%q resp=%q", rec.OriginalResponse, rec.Response)
 	}
 }

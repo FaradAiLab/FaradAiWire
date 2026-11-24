@@ -46,7 +46,7 @@ export const Navigation: React.FC<NavigationProps> = ({
             aria-current={isActive ? 'page' : undefined}
             className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-medium transition-all whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 ${
               isActive
-                ? 'bg-cyan-50 text-cyan-800 border border-cyan-300 shadow-sm dark:bg-gradient-to-r dark:from-cyan-500/15 dark:to-indigo-500/15 dark:border-cyan-500/40 dark:text-cyan-300 dark:shadow-[0_0_15px_rgba(6,182,212,0.15)] font-semibold'
+                ? 'bg-cyan-50 text-cyan-800 border border-cyan-300 shadow-sm dark:bg-slate-900/70 dark:bg-gradient-to-r dark:from-cyan-500/15 dark:to-indigo-500/15 dark:border-cyan-500/40 dark:text-cyan-300 dark:shadow-[0_0_15px_rgba(6,182,212,0.15)] font-semibold'
                 : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100 dark:text-gray-400 dark:hover:text-gray-200 dark:hover:bg-white/5 border border-transparent'
             }`}
           >
