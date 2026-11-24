@@ -30,7 +30,7 @@ curl -s http://127.0.0.1:19415/admin/status
 ```json
 {
   "status": "Ready",
-  "version": "v0.1.5",
+  "version": "v0.1.7",
   "runtime_mode": "STANDALONE",
   "ingress_port": 19410,
   "ingress_host": "127.0.0.1",
@@ -171,3 +171,47 @@ Supported optional fields: `classifier_url`, `enabled`, `mode`, `ollama_url`, `d
 - `POST /admin/guards/models/{id}/policy`: Configure `default_action` (`hitl` / `block`) and `critical_tools`.
 - `GET /admin/guards/hitl/pending` & `POST /admin/guards/hitl/respond`: Inspect and resolve pending HITL approvals.
 
+
+---
+
+## 7. Observability, Audit & Analytics
+
+All routes below are served on the Admin port and follow the same authentication rules as above.
+
+### `GET /admin/metrics`
+Zero-dependency OpenMetrics / Prometheus text exposition (`text/plain; version=0.0.4`). Series include `faradaiwire_requests_total`, `faradaiwire_filter_duration_seconds`, `faradaiwire_upstream_duration_seconds`, `faradaiwire_guard_duration_seconds`, `faradaiwire_guard_fallback_total`, `faradaiwire_guard_load_shed_total`, `faradaiwire_telemetry_dropped_events_total`, `faradaiwire_http_responses_total`, `faradaiwire_rate_limit_rejections_total`, `faradaiwire_auth_failures_total`, `faradaiwire_active_sessions`, `faradaiwire_correlation_entries`, and `faradaiwire_process_uptime_seconds`.
+
+### `GET /admin/readyz`
+Readiness probe. Returns `200` with `"status": "healthy"`, or `503` when `draining` (graceful shutdown) or `degraded` (DuckDB unhealthy or any dropped telemetry events).
+
+```json
+{
+  "status": "healthy",
+  "draining": false,
+  "components": {
+    "duckdb": {"status": "healthy"},
+    "jsonl_writer": {"status": "healthy", "dropped": 0},
+    "event_broker": {"status": "healthy", "dropped": 0},
+    "dropped_events": {"status": "healthy", "duckdb": 0, "broker": 0, "jsonl": 0, "total": 0},
+    "guard": {"status": "healthy", "guard_latency_ms": 16.4}
+  }
+}
+```
+
+### `GET /admin/audit-logs`, `GET /admin/audit-logs/{id}`
+Paginated tool-call audit records. Query parameters: `limit`, `offset`, `since`, `until` (RFC 3339), `decision`, `agent_name`, `tool_name`, `trace_id`, `matched_rule`, `q` (free text), `summary=1`.
+
+### `GET /admin/audit-logs/export`
+Streams a redacted export with the same filters. `format=jsonl` (default) or `format=csv`. Row count is capped by `maintenance.audit_export_max_rows` (default 50000).
+
+### `GET /admin/security-audit-logs`
+Control-plane security events (admin sessions, key lifecycle, lockouts). Query parameters: `limit`, `offset`, `since`, `until`, `event_type`, `actor_id`, `outcome`.
+
+### `GET /admin/analytics/summary`
+Aggregated analytics for the Overview tab. `window=1h|24h|7d` (default `24h`). Returns total/allowed/blocked/masked/audit/error counts, `block_rate`, p50/p95/p99 latency, `top_rules`, `top_tools`, guard latency, and `dropped_events`.
+
+### `GET /admin/audit/verify`
+In-process integrity verification of DuckDB audit tables and the JSONL hash chain. Returns `{"valid": bool, "duckdb": {...}, "jsonl": {...}}`. See also `faradaiwire audit verify`.
+
+### `GET /admin/audit-logs/events` · `GET /api/v1/logs/events`
+SSE live stream of audit verdicts (the Web Console auto-pauses it when the tab is hidden).

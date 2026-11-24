@@ -20,6 +20,8 @@ Commands:
   adopt     Discover and securely wrap local MCP clients to route through FaradAiWire
   doctor       Diagnose system health, port bindings, and discover local AI Guard inference engines
   skill-audit  Perform static security analysis on agent skill directories or MCP packages
+  audit        Audit log tooling (`audit verify` checks tamper-evident integrity of DuckDB and JSONL audit stores)
+  token        Display or rotate (`--rotate`) the Bootstrap Master Key and one-click Admin Magic Link
   guard        Inspect and manage local AI Guard models (list, status, install, uninstall)
   version   Display version, git commit hash, and build architecture
 ```

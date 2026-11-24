@@ -110,6 +110,57 @@ make run
 
 ---
 
+### 6. Docker (HTTP/SSE-only)
+
+Run FaradAiWire as a hardened containerized gateway. There is no pre-built registry image yet; Docker Compose builds it from source (`faradaiwire:local`).
+
+> [!IMPORTANT]
+> The image sets `FARADAI_WIRE_ALLOW_STDIO=false`. Containers can only front **Remote SSE** and **Streamable HTTP** MCP servers; local `stdio` tools (`npx`, `python`, `git`) are not supported and no Node.js/Python/Git toolchain is shipped. Use a native install (channels 1–5) for stdio tools.
+
+**Requirements:** Docker Engine with Compose v2 and a clone of the repository.
+
+```bash
+git clone https://github.com/FaradAiLab/FaradAiWire.git && cd FaradAiWire
+
+# Build and start the gateway
+docker compose -f deploy/docker/docker-compose.yml up -d --build
+```
+
+1. **Get the admin key and Magic Link.** On first start a `faw_live_...` Admin Bootstrap Key is generated (only its masked prefix appears in logs):
+
+   ```bash
+   docker exec -it faradaiwire faradaiwire token
+   ```
+
+   Open the printed Magic Link (`http://127.0.0.1:19415/admin/dashboard?token=...`) or paste the key into the Web Console unlock dialog. If you mapped a different host port (e.g. `-p 19425:19415`), add `--port 19425`. Rotate with `faradaiwire token --rotate`.
+
+2. **Register upstreams and connect agents.** In the Web Console (**Tool Sources → Custom Tool Source**) add Remote SSE (`http://mcp-service:8080/sse`) or Streamable HTTP (`http://mcp-service:8080/mcp`) servers. Point agents at `http://127.0.0.1:19410/sse/<profile>` (or `http://faradaiwire:19410/sse/<profile>` from other containers) with `Authorization: Bearer <agent-key>`.
+
+3. **Optional AI Guard.** By default the gateway reaches Ollama on the host (`FARADAI_WIRE_GUARD_OLLAMA_URL=http://host.docker.internal:11434`). To also start the bundled FaradAiGuard sidecar:
+
+   ```bash
+   docker compose -f deploy/docker/docker-compose.yml --profile guard up -d --build
+   ```
+
+**Details**
+
+| Item | Value |
+| :--- | :--- |
+| Ports | `19410` (ingress), `19415` (admin); published on `127.0.0.1` only by default |
+| Persistent data | Named volume `faradaiwire_data` mounted at `/data` (`FARADAI_WIRE_HOME=/data`: config, keys, agents, DuckDB, logs) |
+| User | Non-root UID `10001` |
+| Health check | `GET /health` on the ingress port |
+
+**Upgrade:** `git pull && docker compose -f deploy/docker/docker-compose.yml up -d --build` (data persists in the volume).
+**Stop:** `docker compose -f deploy/docker/docker-compose.yml down` (add `-v` to also delete the data volume).
+
+> [!WARNING]
+> For remote or multi-user exposure, change the port bindings in `docker-compose.yml` only behind TLS termination (Caddy, Nginx, or a cloud load balancer) in front of `:19410` and `:19415`.
+
+For the full reference, see [`deploy/docker/README.md`](https://github.com/FaradAiLab/FaradAiWire/blob/main/deploy/docker/README.md).
+
+---
+
 ## Verifying the Installation
 
 Verify the installed binary and environment health:

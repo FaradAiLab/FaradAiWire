@@ -120,6 +120,12 @@ filters:
 audit_log:
   enabled: true
   path: "./logs/faradai_audit.jsonl"
+                                   # Rotates into hash-chained segments (default 10 MB x 10 files, 30 days);
+                                   # tune live via maintenance.* runtime settings
+
+# Structured Runtime Logging
+logging:
+  level: "info"                    # debug | info | warn | error (override: FARADAI_WIRE_LOG_LEVEL)
 
 # Runtime Configuration Hot-Reload
 hot_reload: true                   # Enable zero-downtime config reloading via fsnotify

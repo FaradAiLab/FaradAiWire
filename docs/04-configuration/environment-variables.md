@@ -35,6 +35,13 @@ Settings are resolved in the following order (highest precedence first):
 | **`FARADAI_WIRE_ENV`** | `production` | Set to `development` for verbose debug logs and relaxed local SSRF checks. |
 | **`FARADAI_WIRE_DISABLE_PROCESS_LOCK`**| `false` | Set to `true` in CI/test environments to bypass the single-instance flock guard. |
 | **`FARADAI_WIRE_HMAC_SECRET`** | *(None)* | 32-byte cryptographic secret used for verifying signed context headers. |
+| **`FARADAI_WIRE_LOG_LEVEL`** | `info` | Runtime log level (`debug`, `info`, `warn`, `error`). Overrides `logging.level` in `config.yaml`. |
+| **`FARADAI_WIRE_AUDIT_HMAC_KEY`** | *(None)* | Optional key that signs the audit hash chain with HMAC-SHA256 (`v2-hmac`). Must match when running `faradaiwire audit verify` / `GET /admin/audit/verify`. |
+| **`FARADAI_WIRE_ALLOW_STDIO`** | `true` | Highest-precedence switch for local stdio MCP subprocesses; `false` disables stdio upstreams (and local-target SSRF relaxation). The official Docker image sets `false`, so containers support **only Remote SSE and Streamable HTTP** upstreams; use a native install for local stdio MCP servers (`npx`, `python`, `git`). |
+| **`FARADAI_WIRE_ALLOW_INSECURE_HTTP`** | `false` | Allows `faradaiwire connect` to send a Bearer token over plain `http://` to untrusted non-loopback hosts (not recommended). |
+| **`FARADAI_WIRE_GUARDS_DIR`** | *(built-in default)* | Base directory for installed AI Guard model artifacts used by `faradaiwire guard`. |
+| **`FARADAI_WIRE_GUARD_OLLAMA_URL`** / **`FARADAI_WIRE_GUARD_DOCKER_URL`** | *(auto-discovery)* | Override AI Guard discovery endpoints for Ollama and the FaradAiGuard Docker sidecar. |
+| **`FARADAI_WIRE_NO_BANNER`** | `false` | Set `true` to suppress the terminal startup banner (also suppressed when `CI=true`). |
 | **`LISTEN_PORT`** | `19410` | Ingress proxy port for agent traffic. |
 | **`ADMIN_PORT`** | `19415` | Admin Console and REST API port. |
 
