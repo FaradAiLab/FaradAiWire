@@ -18,6 +18,17 @@ func (a *AdminServer) requireKeyStore(w http.ResponseWriter) auth.KeyStore {
 	return ks
 }
 
+func redactAdminKeyMetadata(meta *auth.KeyMetadata) *auth.KeyMetadata {
+	if meta == nil {
+		return nil
+	}
+	cp := *meta
+	if auth.IsAdminRole(cp.Role) {
+		cp.RawKey = ""
+	}
+	return &cp
+}
+
 // handleListAPIKeys returns metadata for all registered API keys (GET /admin/api-keys).
 func (a *AdminServer) handleListAPIKeys(w http.ResponseWriter, _ *http.Request) {
 	ks := a.requireKeyStore(w)
@@ -25,9 +36,12 @@ func (a *AdminServer) handleListAPIKeys(w http.ResponseWriter, _ *http.Request) 
 		return
 	}
 
-	keys := ks.ListKeys()
-	if keys == nil {
-		keys = make([]*auth.KeyMetadata, 0)
+	rawKeys := ks.ListKeys()
+	keys := make([]*auth.KeyMetadata, 0, len(rawKeys))
+	for _, k := range rawKeys {
+		if k != nil {
+			keys = append(keys, redactAdminKeyMetadata(k))
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"keys": keys})
 }
@@ -44,10 +58,10 @@ func (a *AdminServer) handleGetAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "API key not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, keyMeta)
+	writeJSON(w, http.StatusOK, redactAdminKeyMetadata(keyMeta))
 }
 
-// handleCreateAPIKey generates a new scoped API key (POST /admin/api-keys).
+// handleCreateAPIKey generates a new scoped Agent ingress API key (POST /admin/api-keys).
 func (a *AdminServer) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	ks := a.requireKeyStore(w)
 	if ks == nil {
@@ -70,10 +84,8 @@ func (a *AdminServer) handleCreateAPIKey(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	req.Role = strings.TrimSpace(req.Role)
-	if req.Role == "" || strings.EqualFold(req.Role, "Admin") {
-		req.Role = "Developer"
-	}
+	// All API keys minted over HTTP are strictly scoped to the Agent ingress role.
+	req.Role = auth.DefaultIngressRole
 
 	rawToken, record, err := ks.GenerateKey(req.Name, req.Role, req.AgentName)
 	if err != nil {
@@ -101,7 +113,7 @@ func (a *AdminServer) handleCreateAPIKey(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// handleRevokeAPIKey revokes an existing API key immediately (DELETE /admin/api-keys/{id} or ?id=...).
+// handleRevokeAPIKey revokes an existing non-Admin API key immediately (DELETE /admin/api-keys/{id} or ?id=...).
 func (a *AdminServer) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	ks := a.requireKeyStore(w)
 	if ks == nil {
@@ -111,6 +123,21 @@ func (a *AdminServer) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request)
 	keyID := cmp.Or(strings.TrimSpace(r.PathValue("id")), strings.TrimSpace(r.URL.Query().Get("id")))
 	if keyID == "" {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Missing required API key ID parameter")
+		return
+	}
+
+	keyMeta, err := ks.GetKey(keyID)
+	if err != nil {
+		if errors.Is(err, auth.ErrKeyNotFound) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "API key not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "REVOKE_FAILED", err.Error())
+		return
+	}
+	if auth.IsAdminRole(keyMeta.Role) {
+		a.logSecurityAudit(r, "api_key_revoke_denied", "revoke", "api_key", keyID, "denied", "admin_key_cli_only", nil)
+		writeError(w, http.StatusForbidden, "ADMIN_KEY_CLI_ONLY", "Admin keys can only be rotated via CLI: faradaiwire token --rotate")
 		return
 	}
 

@@ -30,6 +30,7 @@ func executeToken(args []string, out, errOut io.Writer) int {
 	fs.Usage = func() { printTokenUsage(errOut) }
 	cfgPath := fs.String("config", "", "Path to YAML configuration file")
 	jsonOutput := fs.Bool("json", false, "Emit JSON formatted token metadata and Magic Link")
+	rotate := fs.Bool("rotate", false, "Atomically revoke existing Admin keys and generate a fresh Bootstrap Master Key")
 	hostOverride := fs.String("host", "", "Host name for Magic Link URL (defaults to localhost when bound to 0.0.0.0)")
 	portOverride := fs.Int("port", 0, "Admin port override for Magic Link URL")
 
@@ -52,7 +53,17 @@ func executeToken(args []string, out, errOut io.Writer) int {
 		return 1
 	}
 
-	adminMeta := findActiveAdminKey(ks)
+	var adminMeta *auth.KeyMetadata
+	if *rotate {
+		_, rec, rotErr := ks.RotateAdminKey("bootstrap-admin")
+		if rotErr != nil {
+			fmt.Fprintf(errOut, "Error: Failed to rotate Bootstrap Master Key in %s: %v\n", keysPath, rotErr)
+			return 1
+		}
+		adminMeta = rec.ToMetadata()
+	} else {
+		adminMeta = findActiveAdminKey(ks)
+	}
 	if adminMeta == nil || strings.TrimSpace(adminMeta.RawKey) == "" {
 		fmt.Fprintf(errOut, "No active Bootstrap Master Key found in %s. Start FaradAiWire ('faradaiwire run') first.\n", keysPath)
 		return 1
@@ -91,8 +102,13 @@ func executeToken(args []string, out, errOut io.Writer) int {
 		return 0
 	}
 
-	fmt.Fprintln(out, "\nFaradAiWire Bootstrap Master Key (Admin)")
-	fmt.Fprintln(out, "========================================")
+	if *rotate {
+		fmt.Fprintln(out, "\nFaradAiWire Bootstrap Master Key (Admin) — Rotated")
+		fmt.Fprintln(out, "==================================================")
+	} else {
+		fmt.Fprintln(out, "\nFaradAiWire Bootstrap Master Key (Admin)")
+		fmt.Fprintln(out, "========================================")
+	}
 	fmt.Fprintf(out, "  Key ID      : %s\n", adminMeta.ID)
 	fmt.Fprintf(out, "  Role / Scope: %s (%s)\n", adminMeta.Role, adminMeta.AgentName)
 	fmt.Fprintf(out, "  API Key     : %s\n", adminMeta.RawKey)
@@ -130,7 +146,7 @@ func findActiveAdminKey(ks auth.KeyStore) *auth.KeyMetadata {
 	}
 	var candidates []*auth.KeyMetadata
 	for _, k := range ks.ListKeys() {
-		if k != nil && !k.Revoked && strings.EqualFold(k.Role, "Admin") && strings.TrimSpace(k.RawKey) != "" {
+		if k != nil && !k.Revoked && auth.IsAdminRole(k.Role) && strings.TrimSpace(k.RawKey) != "" {
 			candidates = append(candidates, k)
 		}
 	}

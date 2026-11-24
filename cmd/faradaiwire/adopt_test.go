@@ -724,15 +724,28 @@ func TestAttachAdminBearerAuth(t *testing.T) {
 	tests := []struct {
 		name        string
 		adminAPIKey string
-		adminToken  string
+		legacyToken string
+		seedLocal   bool
 		rawURL      string
 		wantHeader  string
 	}{
 		{
-			name:       "fallback token attached on loopback HTTP",
-			adminToken: "fallback-token",
+			name:        "ignores legacy FARADAI_WIRE_ADMIN_TOKEN",
+			legacyToken: "legacy-token-should-be-ignored",
+			rawURL:      "http://127.0.0.1:8095/admin/settings",
+			wantHeader:  "",
+		},
+		{
+			name:        "attaches ADMIN_API_KEY on loopback HTTP",
+			adminAPIKey: "primary-key",
+			rawURL:      "http://127.0.0.1:8095/admin/settings",
+			wantHeader:  "Bearer primary-key",
+		},
+		{
+			name:       "falls back to local api_keys.json Admin key on loopback HTTP",
+			seedLocal:  true,
 			rawURL:     "http://127.0.0.1:8095/admin/settings",
-			wantHeader: "Bearer fallback-token",
+			wantHeader: "Bearer __LOCAL_ADMIN__",
 		},
 		{
 			name:        "refuses cleartext token over remote HTTP even if token set",
@@ -741,9 +754,8 @@ func TestAttachAdminBearerAuth(t *testing.T) {
 			wantHeader:  "",
 		},
 		{
-			name:        "allows token over remote HTTPS and prefers ADMIN_API_KEY",
+			name:        "allows ADMIN_API_KEY over remote HTTPS",
 			adminAPIKey: "primary-key",
-			adminToken:  "fallback-token",
 			rawURL:      "https://10.0.0.5:8095/admin/settings",
 			wantHeader:  "Bearer primary-key",
 		},
@@ -751,13 +763,28 @@ func TestAttachAdminBearerAuth(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			t.Setenv("FARADAI_WIRE_HOME", tmpHome)
 			t.Setenv("ADMIN_API_KEY", tc.adminAPIKey)
-			t.Setenv("FARADAI_WIRE_ADMIN_TOKEN", tc.adminToken)
+			t.Setenv("FARADAI_WIRE_ADMIN_TOKEN", tc.legacyToken)
+
+			wantHeader := tc.wantHeader
+			if tc.seedLocal {
+				ks, err := auth.NewFileKeyStore(filepath.Join(tmpHome, "keys", "api_keys.json"))
+				if err != nil {
+					t.Fatalf("NewFileKeyStore: %v", err)
+				}
+				rawAdmin, _, err := ks.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*")
+				if err != nil {
+					t.Fatalf("GenerateKey(Admin): %v", err)
+				}
+				wantHeader = "Bearer " + rawAdmin
+			}
 
 			req := httptest.NewRequest(http.MethodGet, tc.rawURL, nil)
 			attachAdminBearerAuth(req)
-			if got := req.Header.Get("Authorization"); got != tc.wantHeader {
-				t.Fatalf("Authorization = %q, want %q", got, tc.wantHeader)
+			if got := req.Header.Get("Authorization"); got != wantHeader {
+				t.Fatalf("Authorization = %q, want %q", got, wantHeader)
 			}
 		})
 	}

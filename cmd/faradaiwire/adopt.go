@@ -149,11 +149,27 @@ func adminScheme(cfg *config.Config) string {
 	return "http"
 }
 
-func resolveAdminBearerToken() string {
-	for _, envVar := range []string{"ADMIN_API_KEY", "FARADAI_WIRE_ADMIN_TOKEN"} {
-		if tok := strings.TrimSpace(os.Getenv(envVar)); tok != "" {
-			return tok
-		}
+func resolveAdminBearerToken(allowLocalKeystore bool) string {
+	if tok := strings.TrimSpace(os.Getenv("ADMIN_API_KEY")); tok != "" {
+		return tok
+	}
+	if !allowLocalKeystore {
+		return ""
+	}
+	cfg := loadConfigWithoutCreating("")
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	keysPath := cfg.GetAPIKeysPath()
+	if _, err := os.Stat(keysPath); err != nil {
+		return ""
+	}
+	ks, err := auth.NewFileKeyStore(keysPath)
+	if err != nil {
+		return ""
+	}
+	if adminMeta := findActiveAdminKey(ks); adminMeta != nil {
+		return strings.TrimSpace(adminMeta.RawKey)
 	}
 	return ""
 }
@@ -165,8 +181,11 @@ func attachAdminBearerAuth(req *http.Request) {
 		return
 	}
 	useTLS := strings.EqualFold(req.URL.Scheme, "https")
-	host := req.URL.Hostname()
-	if adminKey := resolveAdminBearerToken(); adminKey != "" && (isLoopbackHost(host) || useTLS) {
+	isLoopback := isLoopbackHost(req.URL.Hostname())
+	if !isLoopback && !useTLS {
+		return
+	}
+	if adminKey := resolveAdminBearerToken(isLoopback); adminKey != "" {
 		req.Header.Set("Authorization", "Bearer "+adminKey)
 	}
 }

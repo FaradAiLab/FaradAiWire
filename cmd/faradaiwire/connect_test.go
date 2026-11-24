@@ -329,34 +329,109 @@ func TestConnect_TrustedInternalContainerHostsAllowed(t *testing.T) {
 
 func TestResolveActiveToken_DeterministicPrecedence(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("FARADAI_WIRE_HOME", tmpHome)
+	t.Setenv("AGENT_API_KEY", "")
 	t.Setenv("FARADAI_WIRE_API_KEY", "")
 
-	keysPath := filepath.Join(tmpHome, ".faradaiwire", "keys", "api_keys.json")
+	keysPath := filepath.Join(tmpHome, "keys", "api_keys.json")
 	ks, err := auth.NewFileKeyStore(keysPath)
 	if err != nil {
 		t.Fatalf("new file key store: %v", err)
 	}
-	wildcardTok, _, err := ks.GenerateKey("global", "Agent", "*")
+	if _, _, err := ks.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*"); err != nil {
+		t.Fatalf("gen admin key: %v", err)
+	}
+	wildcardTok, _, err := ks.GenerateKey("global", auth.DefaultIngressRole, "*")
 	if err != nil {
 		t.Fatalf("gen wildcard key: %v", err)
 	}
-	cursorTok, _, err := ks.GenerateKey("adopt-cursor", "Agent", "cursor")
+	cursorTok, _, err := ks.GenerateKey("adopt-cursor", auth.DefaultIngressRole, "cursor")
 	if err != nil {
 		t.Fatalf("gen cursor key: %v", err)
 	}
 
-	if got := resolveActiveToken("cursor"); got != cursorTok {
-		t.Fatalf("expected exact profile token %q, got %q", cursorTok, got)
+	got, err := resolveActiveToken("cursor", "127.0.0.1")
+	if err != nil || got != cursorTok {
+		t.Fatalf("expected exact profile token %q, got %q (err=%v)", cursorTok, got, err)
 	}
-	if got := resolveActiveToken("windsurf"); got != wildcardTok {
-		t.Fatalf("expected wildcard fallback token %q, got %q", wildcardTok, got)
+	got, err = resolveActiveToken("windsurf", "127.0.0.1")
+	if err != nil || got != wildcardTok {
+		t.Fatalf("expected wildcard fallback token %q, got %q (err=%v)", wildcardTok, got, err)
 	}
 
-	t.Setenv("FARADAI_WIRE_API_KEY", "faw_live_env_override")
-	if got := resolveActiveToken("cursor"); got != "faw_live_env_override" {
-		t.Fatalf("expected env var override token, got %q", got)
+	t.Setenv("AGENT_API_KEY", "faw_live_env_override")
+	got, err = resolveActiveToken("cursor", "127.0.0.1")
+	if err != nil || got != "faw_live_env_override" {
+		t.Fatalf("expected AGENT_API_KEY env var override token, got %q (err=%v)", got, err)
+	}
+}
+
+func TestResolveActiveToken_SkipsAdminAndAutoProvisionsLocally(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tmpHome)
+	t.Setenv("AGENT_API_KEY", "")
+
+	keysPath := filepath.Join(tmpHome, "keys", "api_keys.json")
+	ks, err := auth.NewFileKeyStore(keysPath)
+	if err != nil {
+		t.Fatalf("new file key store: %v", err)
+	}
+	adminTok, _, err := ks.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("gen admin key: %v", err)
+	}
+
+	// Remote non-loopback target with no non-Admin key must fail with guidance instead of writing a local key.
+	if _, err := resolveActiveToken("cursor", "gateway.example.com"); err == nil || !strings.Contains(err.Error(), "AGENT_API_KEY") {
+		t.Fatalf("expected remote host error mentioning AGENT_API_KEY, got %v", err)
+	}
+
+	// AGENT_API_KEY accidentally set to local Admin key must be skipped, triggering local Agent key auto-provisioning.
+	t.Setenv("AGENT_API_KEY", adminTok)
+	got, err := resolveActiveToken("cursor", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("resolveActiveToken local auto-provision failed: %v", err)
+	}
+	if got == "" || got == adminTok {
+		t.Fatalf("expected freshly provisioned Agent token distinct from admin key, got %q", got)
+	}
+
+	reloaded, err := auth.NewFileKeyStore(keysPath)
+	if err != nil {
+		t.Fatalf("reload keystore: %v", err)
+	}
+	rec, ok := reloaded.ValidateKeyWithoutUsage(got)
+	if !ok || rec == nil {
+		t.Fatalf("auto-provisioned token not found in keystore")
+	}
+	if rec.Role != auth.DefaultIngressRole || rec.AgentName != "cursor" {
+		t.Fatalf("auto-provisioned key role=%q agent=%q, want Agent/cursor", rec.Role, rec.AgentName)
+	}
+}
+
+func TestResolveActiveToken_HonorsConfigAPIKeysPath(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tmpHome)
+	t.Setenv("AGENT_API_KEY", "")
+
+	customKeysPath := filepath.Join(t.TempDir(), "custom_keys.json")
+	ks, err := auth.NewFileKeyStore(customKeysPath)
+	if err != nil {
+		t.Fatalf("new custom key store: %v", err)
+	}
+	customTok, _, err := ks.GenerateKey("custom-agent", auth.DefaultIngressRole, "cursor")
+	if err != nil {
+		t.Fatalf("gen custom key: %v", err)
+	}
+
+	cfgContent := fmt.Sprintf("security:\n  api_keys_path: %q\n", customKeysPath)
+	if err := os.WriteFile(filepath.Join(tmpHome, "config.yaml"), []byte(cfgContent), 0600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	got, err := resolveActiveToken("cursor", "127.0.0.1")
+	if err != nil || got != customTok {
+		t.Fatalf("expected custom api_keys_path token %q, got %q (err=%v)", customTok, got, err)
 	}
 }
 

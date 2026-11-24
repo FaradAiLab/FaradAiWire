@@ -23,7 +23,25 @@ import (
 var (
 	// ErrUnauthorized is returned when an ingress request lacks valid credentials or has an invalid/revoked API key.
 	ErrUnauthorized = errors.New("unauthorized: missing, invalid, or revoked API key")
+	// ErrForbiddenAdminKeyOnIngress is returned when an Admin-scoped API key is presented to MCP ingress (:19410).
+	ErrForbiddenAdminKeyOnIngress = errors.New("forbidden: admin key cannot be used on ingress")
 )
+
+type forbiddenAdminKeyError struct {
+	keyID string
+}
+
+func (e *forbiddenAdminKeyError) Error() string {
+	return ErrForbiddenAdminKeyOnIngress.Error()
+}
+
+func (e *forbiddenAdminKeyError) Unwrap() error {
+	return ErrForbiddenAdminKeyOnIngress
+}
+
+func isNonAdminKey(k *auth.StoredAPIKey) bool {
+	return k != nil && !auth.IsAdminRole(k.Role)
+}
 
 const (
 	defaultFallbackRole = "Customer"
@@ -148,11 +166,12 @@ func (c *ContextExtractor) Authenticate(r *http.Request) (*filter.UserContext, e
 		clientIPStr = clientIP.String()
 	}
 
-	// 1. Check for client API key / Bearer token
+	// 1. Check for client API key / Bearer token (RFC 9110 case-insensitive scheme)
 	var rawToken string
 	authHeader := r.Header.Get("Authorization")
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		rawToken = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	const bearerPrefix = "Bearer "
+	if len(authHeader) > len(bearerPrefix) && strings.EqualFold(authHeader[:len(bearerPrefix)], bearerPrefix) {
+		rawToken = strings.TrimSpace(authHeader[len(bearerPrefix):])
 	}
 	if rawToken == "" {
 		rawToken = strings.TrimSpace(r.Header.Get("X-API-Key"))
@@ -160,8 +179,32 @@ func (c *ContextExtractor) Authenticate(r *http.Request) (*filter.UserContext, e
 
 	if rawToken != "" {
 		if c.keyValidator != nil {
-			keyRecord, ok := c.keyValidator.ValidateKey(rawToken)
+			var (
+				keyRecord *auth.StoredAPIKey
+				ok        bool
+			)
+			if singlePass, hasSinglePass := c.keyValidator.(interface {
+				ValidateKeyWithUsage(rawToken string, shouldRecordUsage func(*auth.StoredAPIKey) bool) (*auth.StoredAPIKey, bool)
+			}); hasSinglePass {
+				keyRecord, ok = singlePass.ValidateKeyWithUsage(rawToken, isNonAdminKey)
+			} else if nonMutating, hasNonMutating := c.keyValidator.(interface {
+				ValidateKeyWithoutUsage(rawToken string) (*auth.StoredAPIKey, bool)
+			}); hasNonMutating {
+				keyRecord, ok = nonMutating.ValidateKeyWithoutUsage(rawToken)
+				if ok && keyRecord != nil && !auth.IsAdminRole(keyRecord.Role) {
+					keyRecord, ok = c.keyValidator.ValidateKey(rawToken)
+				}
+			} else {
+				keyRecord, ok = c.keyValidator.ValidateKey(rawToken)
+			}
 			if ok && keyRecord != nil {
+				if auth.IsAdminRole(keyRecord.Role) {
+					slog.WarnContext(r.Context(), "Admin API key rejected on MCP ingress",
+						slog.String("client_ip", clientIPStr),
+						slog.String("key_id", keyRecord.ID),
+					)
+					return nil, &forbiddenAdminKeyError{keyID: keyRecord.ID}
+				}
 				user := incomingUser
 				if user == "" {
 					user = keyRecord.Name

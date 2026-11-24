@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"crypto/hmac"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"log/slog"
 	"net"
@@ -111,9 +110,6 @@ func (l *adminLoginLimiter) reset(ip string) {
 }
 
 func (a *AdminServer) isAdminAuthRequired() bool {
-	if resolveConfiguredAdminToken() != "" {
-		return true
-	}
 	cfg := a.Config()
 	if cfg == nil {
 		return false
@@ -122,14 +118,11 @@ func (a *AdminServer) isAdminAuthRequired() bool {
 }
 
 func (a *AdminServer) hasActiveAdminCredential() bool {
-	if resolveConfiguredAdminToken() != "" {
-		return true
-	}
 	if a.keyStore == nil {
 		return false
 	}
 	for _, k := range a.keyStore.ListKeys() {
-		if k != nil && !k.Revoked && strings.EqualFold(k.Role, "Admin") {
+		if k != nil && !k.Revoked && auth.IsAdminRole(k.Role) {
 			return true
 		}
 	}
@@ -148,47 +141,50 @@ type adminStartCredentialError struct {
 }
 
 func (e *adminStartCredentialError) Error() string {
-	return "refusing to bind Admin Server to non-loopback host \"" + e.adminHost + "\" without ADMIN_API_KEY, FARADAI_WIRE_ADMIN_TOKEN, or an active Admin key in KeyStore configured"
+	return "refusing to bind Admin Server to non-loopback host \"" + e.adminHost + "\" without an active Admin key in KeyStore configured (run 'faradaiwire token' to inspect or provision)"
 }
 
-// validateAdminCredential verifies an incoming bearer or login credential and returns validity, Admin role membership, and verified actor ID.
+// validateAdminCredential verifies an incoming bearer or login credential against KeyStore
+// using a fresh disk check so external CLI rotations take effect immediately.
 func (a *AdminServer) validateAdminCredential(rawToken string) (valid bool, isAdmin bool, actorID string) {
 	rawToken = strings.TrimSpace(rawToken)
-	if rawToken == "" {
+	if rawToken == "" || a.keyStore == nil {
 		return false, false, ""
 	}
-	if expected := resolveConfiguredAdminToken(); expected != "" {
-		providedHash := sha256.Sum256([]byte(rawToken))
-		expectedHash := sha256.Sum256([]byte(expected))
-		if subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) == 1 {
-			return true, true, "env:admin_token"
-		}
+	var (
+		rec *auth.StoredAPIKey
+		ok  bool
+	)
+	if freshValidator, hasFresh := a.keyStore.(interface {
+		ValidateKeyFresh(rawToken string, recordUsage bool) (*auth.StoredAPIKey, bool)
+	}); hasFresh {
+		rec, ok = freshValidator.ValidateKeyFresh(rawToken, false)
+	} else {
+		rec, ok = a.keyStore.ValidateKey(rawToken)
 	}
-	if a.keyStore != nil {
-		if rec, ok := a.keyStore.ValidateKey(rawToken); ok && rec != nil && !rec.Revoked {
-			return true, strings.EqualFold(rec.Role, "Admin"), rec.ID
-		}
+	if ok && rec != nil && !rec.Revoked {
+		return true, auth.IsAdminRole(rec.Role), rec.ID
 	}
 	return false, false, ""
 }
 
+func deriveAdminSessionSecretForRecord(rec *auth.StoredAPIKey) []byte {
+	sum := sha256.Sum256([]byte("faw-admin-session-key:" + rec.ID + ":" + rec.Salt + ":" + rec.Hash))
+	return sum[:]
+}
+
 func (a *AdminServer) deriveAdminSessionSecrets() [][]byte {
 	var secrets [][]byte
-	if expected := resolveConfiguredAdminToken(); expected != "" {
-		sum := sha256.Sum256([]byte("faw-admin-session-env:" + expected))
-		secrets = append(secrets, sum[:])
-	}
 	if a.keyStore != nil {
 		if provider, ok := a.keyStore.(interface{ ActiveAdminCredentials() []*auth.StoredAPIKey }); ok {
 			for _, rec := range provider.ActiveAdminCredentials() {
-				if rec != nil && !rec.Revoked && strings.EqualFold(rec.Role, "Admin") {
-					sum := sha256.Sum256([]byte("faw-admin-session-key:" + rec.ID + ":" + rec.Salt + ":" + rec.Hash))
-					secrets = append(secrets, sum[:])
+				if rec != nil && !rec.Revoked && auth.IsAdminRole(rec.Role) {
+					secrets = append(secrets, deriveAdminSessionSecretForRecord(rec))
 				}
 			}
 		} else {
 			for _, meta := range a.keyStore.ListKeys() {
-				if meta != nil && !meta.Revoked && strings.EqualFold(meta.Role, "Admin") && meta.RawKey != "" {
+				if meta != nil && !meta.Revoked && auth.IsAdminRole(meta.Role) && meta.RawKey != "" {
 					sum := sha256.Sum256([]byte("faw-admin-session-mem:" + meta.ID + ":" + meta.RawKey))
 					secrets = append(secrets, sum[:])
 				}
@@ -198,18 +194,60 @@ func (a *AdminServer) deriveAdminSessionSecrets() [][]byte {
 	return secrets
 }
 
+func (a *AdminServer) deriveAdminSessionSecretForActor(actorID string) ([]byte, bool) {
+	if a.keyStore == nil {
+		return nil, false
+	}
+	if provider, ok := a.keyStore.(interface{ ActiveAdminCredentials() []*auth.StoredAPIKey }); ok {
+		var fallback []byte
+		for _, rec := range provider.ActiveAdminCredentials() {
+			if rec == nil || rec.Revoked || !auth.IsAdminRole(rec.Role) {
+				continue
+			}
+			sec := deriveAdminSessionSecretForRecord(rec)
+			if rec.ID == actorID {
+				return sec, true
+			}
+			if fallback == nil {
+				fallback = sec
+			}
+		}
+		if fallback != nil {
+			return fallback, true
+		}
+		return nil, false
+	}
+	var fallback []byte
+	for _, meta := range a.keyStore.ListKeys() {
+		if meta == nil || meta.Revoked || !auth.IsAdminRole(meta.Role) || meta.RawKey == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte("faw-admin-session-mem:" + meta.ID + ":" + meta.RawKey))
+		if meta.ID == actorID {
+			return sum[:], true
+		}
+		if fallback == nil {
+			fallback = sum[:]
+		}
+	}
+	if fallback != nil {
+		return fallback, true
+	}
+	return nil, false
+}
+
 func (a *AdminServer) signAdminSessionCookieValue(actorID string) (string, bool) {
-	secrets := a.deriveAdminSessionSecrets()
-	if len(secrets) == 0 {
+	actorID = strings.TrimSpace(actorID)
+	secret, ok := a.deriveAdminSessionSecretForActor(actorID)
+	if !ok {
 		return "", false
 	}
-	actorID = strings.TrimSpace(actorID)
 	if actorID == "" {
-		actorID = "env:admin_token"
+		actorID = "admin"
 	}
 	expHex := strconv.FormatInt(time.Now().Add(adminSessionTTL).Unix(), 16)
 	payload := expHex + "." + actorID
-	mac := hmac.New(sha256.New, secrets[0])
+	mac := hmac.New(sha256.New, secret)
 	_, _ = mac.Write([]byte(payload))
 	sigHex := hex.EncodeToString(mac.Sum(nil))
 	return payload + "." + sigHex, true

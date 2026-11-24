@@ -73,7 +73,6 @@ func TestGateway_SSELiveStreamingIntegration(t *testing.T) {
 	defer cancel()
 
 	req := httptest.NewRequestWithContext(ctx, "GET", "/api/v1/logs/events", nil)
-	req.Header.Set("Authorization", "Bearer admin-live-key")
 
 	go func() {
 		defer pw.Close()

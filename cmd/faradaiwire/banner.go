@@ -127,9 +127,6 @@ func printStartupBanner(cfg *config.Config, out io.Writer) {
 }
 
 func lookupBannerAdminKeyPrefix(cfg *config.Config) string {
-	if envKey := strings.TrimSpace(os.Getenv("FARADAI_WIRE_API_KEY")); envKey != "" {
-		return auth.MaskTokenPrefix(envKey)
-	}
 	if cfg == nil {
 		return ""
 	}

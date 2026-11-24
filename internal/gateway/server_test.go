@@ -2161,7 +2161,6 @@ func TestServer_DesktopNotifierWiringAndHotReload(t *testing.T) {
 
 	tempDir := t.TempDir()
 	t.Setenv("FARADAI_WIRE_HOME", tempDir)
-	t.Setenv("FARADAI_WIRE_ADMIN_TOKEN", "test-admin-secret-token")
 	dbPath := filepath.Join(tempDir, "wire.duckdb")
 	agentDir := setupTestAgentDir(t, "test-desktop-notifier")
 
@@ -2217,6 +2216,16 @@ func TestServer_DesktopNotifierWiringAndHotReload(t *testing.T) {
 	}
 
 	// 2. Verify live SettingsCache reactivity via /admin/settings without restart
+	ks, err := auth.NewFileKeyStore(filepath.Join(tempDir, "keys", "api_keys.json"))
+	if err != nil {
+		t.Fatalf("NewFileKeyStore: %v", err)
+	}
+	admins := ks.ActiveAdminCredentials()
+	if len(admins) == 0 || admins[0].RawKey == "" {
+		t.Fatalf("expected bootstrapped active Admin key in keystore, got %d", len(admins))
+	}
+	adminToken := admins[0].RawKey
+
 	adminH := srv.AdminHandler()
 	postSetting := func(key string, value any) {
 		t.Helper()
@@ -2226,7 +2235,7 @@ func TestServer_DesktopNotifierWiringAndHotReload(t *testing.T) {
 		}
 		req := httptest.NewRequest(http.MethodPost, "/admin/settings", strings.NewReader(string(body)))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer test-admin-secret-token")
+		req.Header.Set("Authorization", "Bearer "+adminToken)
 		rec := httptest.NewRecorder()
 		adminH.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {

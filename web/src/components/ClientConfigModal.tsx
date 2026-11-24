@@ -161,8 +161,12 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
       ? `http://${effectiveHost}:${ingressPort}/mcp?profile=${encodeURIComponent(effectiveAgent)}`
       : `http://${effectiveHost}:${ingressPort}/mcp`
 
-    const isTokenMasked = !token || token.includes('••••••')
-    const displayToken = isTokenMasked ? 'faw_live_YOUR_TOKEN_HERE' : token
+    const trimmedToken = (token || '').trim()
+    const isTokenMasked =
+      !trimmedToken ||
+      trimmedToken.includes('••••') ||
+      (trimmedToken.startsWith('faw_live_') && trimmedToken.length <= 16)
+    const displayToken = isTokenMasked ? 'faw_live_YOUR_TOKEN_HERE' : trimmedToken
 
     const activeClientMeta = useMemo(
       () => visibleClients.find((c) => c.id === selectedClient) || visibleClients[0],

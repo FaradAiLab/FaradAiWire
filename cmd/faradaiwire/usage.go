@@ -116,6 +116,7 @@ func printTokenUsage(out io.Writer) {
 	fmt.Fprintln(out, "Flags:")
 	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(w, "  -config <path>\tPath to YAML configuration file")
+	fmt.Fprintln(w, "  -rotate\tAtomically revoke prior Admin keys and generate a fresh Bootstrap Master Key")
 	fmt.Fprintln(w, "  -host <host>\tHostname to embed in the Magic Link URL")
 	fmt.Fprintln(w, "  -port <port>\tAdmin port to embed in the Magic Link URL")
 	fmt.Fprintln(w, "  -json\tOutput token metadata and Magic Link as JSON")

@@ -15,7 +15,7 @@ import (
 func TestCLI_Run_StandaloneDefaults(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("FARADAI_WIRE_HOME", tempHome)
-	t.Setenv("FARADAI_WIRE_API_KEY", "")
+	t.Setenv("AGENT_API_KEY", "")
 	t.Setenv("API_KEY", "")
 
 	// 1. Verify autodiscovery of default standalone runtime config

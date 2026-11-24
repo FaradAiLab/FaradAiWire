@@ -17,6 +17,18 @@ import (
 	"time"
 )
 
+const (
+	// DefaultAdminRole is the canonical role for Admin Console Master Keys (:19415).
+	DefaultAdminRole = "Admin"
+	// DefaultIngressRole is the canonical role for MCP Ingress API Keys (:19410).
+	DefaultIngressRole = "Agent"
+)
+
+// IsAdminRole reports whether role represents the administrative control-plane role.
+func IsAdminRole(role string) bool {
+	return strings.EqualFold(strings.TrimSpace(role), DefaultAdminRole)
+}
+
 var (
 	// ErrKeyNotFound is returned when an API key ID does not exist.
 	ErrKeyNotFound = errors.New("api key not found")
@@ -380,23 +392,7 @@ func (f *FileKeyStore) saveLocked() error {
 	return nil
 }
 
-// GenerateKey produces a new cryptographically secure API key and persists its salted hash and raw token.
-// Plaintext token format: faw_live_<32 hex chars> (total 40 chars).
-// Preserves raw token under POSIX 0600 file permissions for local workstation reveal (ADR-0031).
-func (f *FileKeyStore) GenerateKey(name, role string, agentName ...string) (string, *StoredAPIKey, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "", nil, ErrInvalidName
-	}
-	role = strings.TrimSpace(role)
-	if role == "" {
-		return "", nil, ErrInvalidRole
-	}
-	targetAgent := "*"
-	if len(agentName) > 0 && strings.TrimSpace(agentName[0]) != "" {
-		targetAgent = strings.TrimSpace(agentName[0])
-	}
-
+func buildGeneratedKeyRecord(name, role, targetAgent string) (string, *StoredAPIKey, error) {
 	// 1. Generate 16 random bytes for the token secret
 	rawBytes := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, rawBytes); err != nil {
@@ -441,14 +437,40 @@ func (f *FileKeyStore) GenerateKey(name, role string, agentName ...string) (stri
 		Revoked:    false,
 	}
 	record.initMemory()
+	return rawToken, record, nil
+}
+
+// GenerateKey produces a new cryptographically secure API key and persists its salted hash and raw token.
+// Plaintext token format: faw_live_<32 hex chars> (total 40 chars).
+// Preserves raw token under POSIX 0600 file permissions for local workstation reveal (ADR-0031).
+func (f *FileKeyStore) GenerateKey(name, role string, agentName ...string) (string, *StoredAPIKey, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", nil, ErrInvalidName
+	}
+	role = strings.TrimSpace(role)
+	if role == "" {
+		return "", nil, ErrInvalidRole
+	}
+	targetAgent := "*"
+	if len(agentName) > 0 && strings.TrimSpace(agentName[0]) != "" {
+		targetAgent = strings.TrimSpace(agentName[0])
+	}
+
+	rawToken, record, err := buildGeneratedKeyRecord(name, role, targetAgent)
+	if err != nil {
+		return "", nil, err
+	}
 
 	f.mu.Lock()
 	_ = f.reloadIfChangedLocked()
 	f.syncLastUsedLocked()
-	f.keys[id] = record
-	err := f.saveLocked()
+	f.keys[record.ID] = record
+	err = f.saveLocked()
 	if err == nil {
 		f.dirty.Store(false)
+	} else {
+		delete(f.keys, record.ID)
 	}
 	f.mu.Unlock()
 
@@ -461,31 +483,101 @@ func (f *FileKeyStore) GenerateKey(name, role string, agentName ...string) (stri
 	return rawToken, &recCopy, nil
 }
 
+// RotateAdminKey atomically revokes all active Admin keys and persists a single new Admin key
+// in one lock acquisition and atomic file rename, preserving all non-Admin ingress keys.
+func (f *FileKeyStore) RotateAdminKey(name string) (string, *StoredAPIKey, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "bootstrap-admin"
+	}
+
+	rawToken, record, err := buildGeneratedKeyRecord(name, DefaultAdminRole, "*")
+	if err != nil {
+		return "", nil, err
+	}
+
+	f.mu.Lock()
+	_ = f.reloadIfChangedLocked()
+	f.syncLastUsedLocked()
+
+	var revokedPrev []*StoredAPIKey
+	for _, k := range f.keys {
+		if k != nil && !k.Revoked && IsAdminRole(k.Role) {
+			k.Revoked = true
+			revokedPrev = append(revokedPrev, k)
+		}
+	}
+	f.keys[record.ID] = record
+
+	err = f.saveLocked()
+	if err != nil {
+		delete(f.keys, record.ID)
+		for _, k := range revokedPrev {
+			k.Revoked = false
+		}
+		f.mu.Unlock()
+		return "", nil, fmt.Errorf("rotate admin key: %w", err)
+	}
+	f.dirty.Store(false)
+	f.mu.Unlock()
+
+	recCopy := *record
+	return rawToken, &recCopy, nil
+}
+
+func alwaysRecordUsage(*StoredAPIKey) bool { return true }
+
 // ValidateKey validates an incoming raw token against registered unrevoked keys in constant time.
 // If valid, updates LastUsedAt in memory without disk I/O or background goroutine allocations (SEC-018 / DEC-06).
 // On lookup miss (or once per second on disk change), reloads api_keys.json transparently so keys created
 // externally (e.g. `faradaiwire adopt`) take effect without restarting a running daemon.
 func (f *FileKeyStore) ValidateKey(rawToken string) (*StoredAPIKey, bool) {
+	return f.validateKey(rawToken, false, alwaysRecordUsage)
+}
+
+// ValidateKeyWithoutUsage validates rawToken in constant time without mutating LastUsedAt or dirty state.
+func (f *FileKeyStore) ValidateKeyWithoutUsage(rawToken string) (*StoredAPIKey, bool) {
+	return f.validateKey(rawToken, false, nil)
+}
+
+// ValidateKeyWithUsage validates rawToken in a single lock acquisition and SHA-256 pass,
+// recording LastUsedAt/dirty state only when shouldRecordUsage is non-nil and returns true.
+// This eliminates double-hashing on hot-path ingress checks that reject Admin keys without mutating usage.
+func (f *FileKeyStore) ValidateKeyWithUsage(rawToken string, shouldRecordUsage func(*StoredAPIKey) bool) (*StoredAPIKey, bool) {
+	return f.validateKey(rawToken, false, shouldRecordUsage)
+}
+
+// ValidateKeyFresh forces a disk freshness check before validating rawToken so external
+// Admin key rotations or revocations take effect immediately without waiting for the hot-path throttle.
+func (f *FileKeyStore) ValidateKeyFresh(rawToken string, recordUsage bool) (*StoredAPIKey, bool) {
+	var pred func(*StoredAPIKey) bool
+	if recordUsage {
+		pred = alwaysRecordUsage
+	}
+	return f.validateKey(rawToken, true, pred)
+}
+
+func (f *FileKeyStore) validateKey(rawToken string, forceReload bool, shouldRecordUsage func(*StoredAPIKey) bool) (*StoredAPIKey, bool) {
 	rawToken = strings.TrimSpace(rawToken)
 	if rawToken == "" {
 		return nil, false
 	}
 
 	if f.filePath != "" {
-		f.reloadIfChanged(false)
+		f.reloadIfChanged(forceReload)
 	}
 
-	if keyCopy, ok := f.validateCachedKey(rawToken); ok {
+	if keyCopy, ok := f.validateCachedKey(rawToken, shouldRecordUsage); ok {
 		return keyCopy, true
 	}
 
-	if f.filePath != "" && f.reloadIfChanged(true) {
-		return f.validateCachedKey(rawToken)
+	if !forceReload && f.filePath != "" && f.reloadIfChanged(true) {
+		return f.validateCachedKey(rawToken, shouldRecordUsage)
 	}
 	return nil, false
 }
 
-func (f *FileKeyStore) validateCachedKey(rawToken string) (*StoredAPIKey, bool) {
+func (f *FileKeyStore) validateCachedKey(rawToken string, shouldRecordUsage func(*StoredAPIKey) bool) (*StoredAPIKey, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
@@ -509,14 +601,17 @@ func (f *FileKeyStore) validateCachedKey(rawToken string) (*StoredAPIKey, bool) 
 		return nil, false
 	}
 
-	now := time.Now().UTC()
-	if matchedKey.lastUsedNano != nil {
-		matchedKey.lastUsedNano.Store(now.UnixNano())
-	}
-	f.dirty.Store(true)
-
 	keyCopy := *matchedKey
-	keyCopy.LastUsedAt = now
+	if shouldRecordUsage != nil && shouldRecordUsage(matchedKey) {
+		now := time.Now().UTC()
+		if matchedKey.lastUsedNano != nil {
+			matchedKey.lastUsedNano.Store(now.UnixNano())
+		}
+		f.dirty.Store(true)
+		keyCopy.LastUsedAt = now
+	} else {
+		keyCopy.LastUsedAt = matchedKey.GetLastUsedAt()
+	}
 	return &keyCopy, true
 }
 
@@ -703,19 +798,20 @@ func (f *FileKeyStore) ImportKey(name, role, agentName, rawToken string) (*Store
 }
 
 // ActiveAdminCredentials returns copies of active unrevoked Admin key records for HMAC session key derivation.
+// Always performs a fresh disk check so external CLI rotations immediately invalidate prior session cookies.
 func (f *FileKeyStore) ActiveAdminCredentials() []*StoredAPIKey {
 	if f == nil {
 		return nil
 	}
 	if f.filePath != "" {
-		f.reloadIfChanged(false)
+		f.reloadIfChanged(true)
 	}
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
 	var admins []*StoredAPIKey
 	for _, k := range f.keys {
-		if k != nil && !k.Revoked && strings.EqualFold(k.Role, "Admin") {
+		if k != nil && !k.Revoked && IsAdminRole(k.Role) {
 			cp := *k
 			admins = append(admins, &cp)
 		}
@@ -733,11 +829,11 @@ func EnsureBootstrapAdminKey(ks KeyStore, envRawKey string) (*KeyMetadata, bool,
 
 	envRawKey = strings.TrimSpace(envRawKey)
 	if envRawKey != "" {
-		if existing, ok := ks.ValidateKey(envRawKey); ok && existing != nil && !existing.Revoked && strings.EqualFold(existing.Role, "Admin") {
+		if existing, ok := ks.ValidateKey(envRawKey); ok && existing != nil && !existing.Revoked && IsAdminRole(existing.Role) {
 			return existing.ToMetadata(), false, nil
 		}
 		if fks, ok := ks.(*FileKeyStore); ok {
-			rec, err := fks.ImportKey("bootstrap-admin", "Admin", "*", envRawKey)
+			rec, err := fks.ImportKey("bootstrap-admin", DefaultAdminRole, "*", envRawKey)
 			if err != nil {
 				return nil, false, fmt.Errorf("import bootstrap admin key: %w", err)
 			}
@@ -747,7 +843,7 @@ func EnsureBootstrapAdminKey(ks KeyStore, envRawKey string) (*KeyMetadata, bool,
 
 	var activeAdmin *KeyMetadata
 	for _, k := range ks.ListKeys() {
-		if k != nil && !k.Revoked && strings.EqualFold(k.Role, "Admin") {
+		if k != nil && !k.Revoked && IsAdminRole(k.Role) {
 			if activeAdmin == nil || k.CreatedAt.Before(activeAdmin.CreatedAt) || (k.CreatedAt.Equal(activeAdmin.CreatedAt) && k.ID < activeAdmin.ID) {
 				activeAdmin = k
 			}
@@ -757,7 +853,7 @@ func EnsureBootstrapAdminKey(ks KeyStore, envRawKey string) (*KeyMetadata, bool,
 		return activeAdmin, false, nil
 	}
 
-	_, rec, err := ks.GenerateKey("bootstrap-admin", "Admin", "*")
+	_, rec, err := ks.GenerateKey("bootstrap-admin", DefaultAdminRole, "*")
 	if err != nil {
 		return nil, false, fmt.Errorf("generate bootstrap admin key: %w", err)
 	}

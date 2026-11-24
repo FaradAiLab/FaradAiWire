@@ -39,7 +39,7 @@ Many traditional API proxies multiplex administrative routes (`/admin`, `/metric
 | :--- | :--- | :--- |
 | **Primary Consumer** | AI Agents (Claude Code, Cursor, SDKs) | Developers, Security Engineers, Browsers |
 | **Default Binding** | `127.0.0.1:19410` | `127.0.0.1:19415` (Strict Loopback) |
-| **Authentication** | Fail-Closed (`Authorization: Bearer <key>`) | Loopback Standalone or `Authorization: Bearer <token>` (`ADMIN_API_KEY` / `FARADAI_WIRE_ADMIN_TOKEN`) |
+| **Authentication** | Fail-Closed (`Agent` key via `Authorization: Bearer` / `X-API-Key`; `Admin` keys rejected with `403 INGRESS_ROLE_REQUIRED`) | Loopback Standalone or `Admin` key in `keys/api_keys.json` (`faradaiwire token [--rotate]`; `Agent` keys rejected with `403 ADMIN_ROLE_REQUIRED`) |
 | **Primary Endpoints** | `/sse`, `/message`, `/mcp` | `/admin/dashboard`, `/admin/status`, REST APIs |
 | **Payload Protocols** | JSON-RPC 2.0 over SSE & HTTP POST | HTML/React UI, JSON REST responses |
 | **Security Pipeline** | Full Inspection Pipeline (Prefill, DLP, AI Guard) | Direct Administrative Handlers |
@@ -62,7 +62,7 @@ The Proxy Ingress listener handles high-volume JSON-RPC 2.0 streaming.
 ## Port 19415: Admin Console Details
 
 The Admin Console listener hosts the embedded developer dashboard and system configuration APIs.
-- **Loopback Binding:** By default, Port 19415 strictly binds to `127.0.0.1` (`admin_host` / `--admin-host` / `FARADAI_WIRE_ADMIN_HOST`). Binding the Admin Console to a non-loopback address fails closed at startup unless `ADMIN_API_KEY` or `FARADAI_WIRE_ADMIN_TOKEN` is configured, in which case protected Admin APIs require `Authorization: Bearer <token>`.
+- **Loopback Binding & Single KeyStore Admin Source:** By default, Port 19415 strictly binds to `127.0.0.1` (`admin_host` / `--admin-host` / `FARADAI_WIRE_ADMIN_HOST`). Binding the Admin Console to a non-loopback address fails closed at startup unless an active `Admin` key (`Bootstrap Master Key`) exists in `keys/api_keys.json` (`faradaiwire token [--rotate]`), in which case protected Admin APIs require an `Admin` Bearer token or `HttpOnly` session cookie. Even on loopback, sending an explicit `Authorization: Bearer <AgentKey>` returns `403 ADMIN_ROLE_REQUIRED`.
 - **Browser CSRF & CSWSH Isolation:** Admin routes and WebSocket upgrades validate `Sec-Fetch-Site`, `Origin`, and `Content-Type: application/json` (on mutations). Setting `security.cors_allowed_origins: ["*"]` does not bypass Origin/CSRF or WebSocket Origin checks.
 - **Capabilities:**
   - **Embedded Web Console (`/admin/dashboard`):** Real-time threat visualizer, audit log stream, and agent studio.

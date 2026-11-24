@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { Bot, Plus, CheckCircle2, AlertTriangle, X } from 'lucide-react'
-import { AgentItem, ProtocolItem, GatewayStatus } from '../types'
+import { AgentItem, ProtocolItem, GatewayStatus, isAdminRole } from '../types'
 import { DEFAULT_INGRESS_PORT, normalizeBrowserIngressHost } from '../constants'
 import { api } from '../api'
 import { Button } from './ui/Button'
@@ -125,22 +125,25 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({ status: propStatus }) => {
   const handleConnectClient = useCallback(async (agentName: string) => {
     try {
       const keysRes = await api.getApiKeys()
-      const existingKeys = (keysRes.keys || []).filter((k) => !k.revoked)
+      const existingKeys = (keysRes.keys || []).filter(
+        (k) => !k.revoked && !isAdminRole(k.role) && Boolean(k.raw_key)
+      )
       // Look for a key specifically for this agent, or a global key '*'
       const matchingKey =
-        existingKeys.find((k) => k.agent_name === agentName) ||
-        existingKeys.find((k) => !k.agent_name || k.agent_name === '*')
+        existingKeys.find(
+          (k) => (k.agent_name || '').trim().toLowerCase() === agentName.trim().toLowerCase()
+        ) || existingKeys.find((k) => !k.agent_name || k.agent_name === '*')
 
       if (matchingKey) {
         setClientModal({
           isOpen: true,
-          token: matchingKey.raw_key || matchingKey.key_prefix || '',
+          token: matchingKey.raw_key || '',
           keyName: matchingKey.name,
           agentName: agentName,
         })
       } else {
-        // Automatically generate a dedicated key for this agent
-        const newKey = await api.createApiKey(`${agentName}-client-key`, agentName, 'Developer')
+        // Automatically generate a dedicated Agent ingress key for this profile
+        const newKey = await api.createApiKey(`${agentName}-client-key`, agentName, 'Agent')
         setClientModal({
           isOpen: true,
           token: newKey.raw_key || newKey.api_key || newKey.key || '',

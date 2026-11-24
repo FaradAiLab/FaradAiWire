@@ -103,11 +103,11 @@ func TestValidateAdminCredential_ReturnsActorID(t *testing.T) {
 		wantActorID string
 	}{
 		{
-			name:        "env admin token",
+			name:        "env admin token is ignored",
 			token:       "env-super-secret-admin-token",
-			wantValid:   true,
-			wantIsAdmin: true,
-			wantActorID: "env:admin_token",
+			wantValid:   false,
+			wantIsAdmin: false,
+			wantActorID: "",
 		},
 		{
 			name:        "stored admin api key returns key ID",

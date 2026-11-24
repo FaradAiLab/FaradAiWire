@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -350,7 +351,7 @@ func TestContextExtractor_BearerAuth_ValidKey(t *testing.T) {
 
 func TestContextExtractor_XAPIKey_ValidKey(t *testing.T) {
 	keyStore := auth.NewMemoryKeyStore()
-	rawToken, _, err := keyStore.GenerateKey("Claude Desktop Agent", "Admin")
+	rawToken, _, err := keyStore.GenerateKey("Claude Desktop Agent", auth.DefaultIngressRole)
 	if err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
@@ -366,11 +367,60 @@ func TestContextExtractor_XAPIKey_ValidKey(t *testing.T) {
 	req.Header.Set("X-API-Key", rawToken)
 
 	uCtx := extractor.Extract(req)
-	if uCtx.Role != "Admin" {
-		t.Errorf("expected role 'Admin', got '%s'", uCtx.Role)
+	if uCtx == nil {
+		t.Fatal("expected non-nil UserContext for valid Agent X-API-Key")
+	}
+	if uCtx.Role != auth.DefaultIngressRole {
+		t.Errorf("expected role %q, got %q", auth.DefaultIngressRole, uCtx.Role)
 	}
 	if uCtx.UserID != "Claude Desktop Agent" {
 		t.Errorf("expected userID 'Claude Desktop Agent', got '%s'", uCtx.UserID)
+	}
+}
+
+func TestContextExtractor_AdminAPIKeyRejectedWithoutUsageMutation(t *testing.T) {
+	keyStore := auth.NewMemoryKeyStore()
+	adminToken, adminRec, err := keyStore.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Admin): %v", err)
+	}
+
+	extractor := NewContextExtractor(config.UserContextConfig{
+		FallbackRole: "Customer",
+		FallbackUser: "guest-customer",
+	}, keyStore)
+
+	for _, tc := range []struct {
+		name   string
+		header string
+		value  string
+	}{
+		{name: "Bearer", header: "Authorization", value: "Bearer " + adminToken},
+		{name: "lowercase bearer (RFC 9110)", header: "Authorization", value: "bearer " + adminToken},
+		{name: "X-API-Key", header: "X-API-Key", value: adminToken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/message", nil)
+			req.Header.Set(tc.header, tc.value)
+			uCtx, err := extractor.Authenticate(req)
+			if !errors.Is(err, ErrForbiddenAdminKeyOnIngress) {
+				t.Fatalf("Authenticate err = %v, want ErrForbiddenAdminKeyOnIngress", err)
+			}
+			if uCtx != nil {
+				t.Fatalf("expected nil UserContext, got %+v", uCtx)
+			}
+		})
+	}
+
+	if keyStore.IsDirty() {
+		t.Error("rejected Admin key on ingress must not mark keystore dirty")
+	}
+	meta, err := keyStore.GetKey(adminRec.ID)
+	if err != nil {
+		t.Fatalf("GetKey(admin): %v", err)
+	}
+	if !meta.LastUsedAt.IsZero() {
+		t.Errorf("rejected Admin key LastUsedAt must remain zero, got %v", meta.LastUsedAt)
 	}
 }
 

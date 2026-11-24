@@ -128,7 +128,10 @@ func (s *SSEProxy) resolveTargetURL(r *http.Request) (string, error) {
 	return repo.ResolveTargetURLFromPath(r.URL.Path, s.targetURL)
 }
 
-const unauthorizedPayload = `{"error":"UNAUTHORIZED","message":"Missing, invalid, or revoked API key. Provide Authorization: Bearer <key> or X-API-Key."}`
+const (
+	unauthorizedPayload         = `{"error":"UNAUTHORIZED","message":"Missing, invalid, or revoked API key. Provide Authorization: Bearer <key> or X-API-Key."}`
+	forbiddenIngressRolePayload = `{"error":"INGRESS_ROLE_REQUIRED","message":"Forbidden: admin keys are restricted to the Admin Console; use an Agent ingress key"}`
+)
 
 var ingressSecSeq atomic.Uint64
 
@@ -141,6 +144,10 @@ func nextIngressSecEventID() string {
 }
 
 func (s *SSEProxy) logIngressSecurityRejection(r *http.Request, eventType, action, resourceType, resourceID, reason string) {
+	s.logIngressSecurityRejectionAs(r, "", "", eventType, action, resourceType, resourceID, reason)
+}
+
+func (s *SSEProxy) logIngressSecurityRejectionAs(r *http.Request, explicitActorID, explicitActorRole, eventType, action, resourceType, resourceID, reason string) {
 	s.mu.RLock()
 	logger := s.securityAuditLogger
 	s.mu.RUnlock()
@@ -149,16 +156,18 @@ func (s *SSEProxy) logIngressSecurityRejection(r *http.Request, eventType, actio
 	}
 
 	var clientIP, traceID string
-	actorID := "anonymous"
-	actorRole := "unknown"
+	actorID := cmp.Or(explicitActorID, "anonymous")
+	actorRole := cmp.Or(explicitActorRole, "unknown")
 	if r != nil {
 		if ip := extractClientIP(r); ip != nil {
 			clientIP = ip.String()
 		}
 		traceID = strings.TrimSpace(r.Header.Get("X-Request-ID"))
-		if uCtx, ok := r.Context().Value(filter.UserContextKey).(*filter.UserContext); ok && uCtx != nil {
-			actorID = cmp.Or(uCtx.APIKeyID, uCtx.UserID, "anonymous")
-			actorRole = cmp.Or(uCtx.Role, "unknown")
+		if explicitActorID == "" {
+			if uCtx, ok := r.Context().Value(filter.UserContextKey).(*filter.UserContext); ok && uCtx != nil {
+				actorID = cmp.Or(uCtx.APIKeyID, uCtx.UserID, "anonymous")
+				actorRole = cmp.Or(uCtx.Role, "unknown")
+			}
 		}
 	}
 
@@ -192,6 +201,27 @@ func (s *SSEProxy) writeUnauthorized(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire"`)
 	w.WriteHeader(http.StatusUnauthorized)
 	_, _ = w.Write([]byte(unauthorizedPayload))
+}
+
+func (s *SSEProxy) writeForbiddenIngressRole(w http.ResponseWriter, r *http.Request, authErr error) {
+	path := ""
+	method := ""
+	if r != nil {
+		path = r.URL.Path
+		method = r.Method
+	}
+	var actorID, actorRole string
+	var forbiddenErr *forbiddenAdminKeyError
+	if errors.As(authErr, &forbiddenErr) && forbiddenErr.keyID != "" {
+		actorID = forbiddenErr.keyID
+		actorRole = auth.DefaultAdminRole
+	}
+	s.logIngressSecurityRejectionAs(r, actorID, actorRole, "ingress_auth_forbidden", method, "ingress_mcp", path, "ingress_role_required")
+	metrics.Default().IncAuthFailure("proxy", "ingress_role_required")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(forbiddenIngressRolePayload))
 }
 
 func (s *SSEProxy) authenticate(r *http.Request) (*filter.UserContext, error) {

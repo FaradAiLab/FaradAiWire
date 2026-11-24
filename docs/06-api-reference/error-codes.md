@@ -41,7 +41,7 @@ The codes below are the constants defined in `pkg/mcp/protocol.go`. The detail p
 | **`-32008`** | `ErrLoopDetected` | Same tool called with identical arguments more than `max_repeat` times inside the window | [Loop Protection](/docs/wire/03-security-filters/loop-protection/) |
 | **`-32009`** | `ErrRateLimitExceeded` | Tool-call token bucket is empty | [Rate Limiting](/docs/wire/03-security-filters/rate-limiting/) |
 
-HTTP ingress rate limiting is separate: it returns HTTP `429` with a JSON body (`RATE_LIMIT_EXCEEDED` or `TOO_MANY_FAILED_ATTEMPTS`), not a JSON-RPC error.
+HTTP ingress rate limiting is separate: it returns HTTP `429` with a JSON body (`RATE_LIMIT_EXCEEDED` or `TOO_MANY_FAILED_ATTEMPTS`), not a JSON-RPC error. Plane-segregation HTTP auth errors also return JSON (`403 Forbidden`): `INGRESS_ROLE_REQUIRED` (`Admin` key used on `:19410` ingress), `ADMIN_ROLE_REQUIRED` (`Agent` key used on `:19415` admin), and `ADMIN_KEY_CLI_ONLY` (`DELETE /admin/api-keys` targeting an `Admin` key; rotate via `faradaiwire token --rotate`).
 
 ---
 

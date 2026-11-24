@@ -66,5 +66,5 @@ faradaiwire guard install qwen3guard
 *FaradAiWire communicates with the local Ollama API (or the running gateway's Admin Console) to pull and verify model weights.*
 
 > [!NOTE]
-> When `guard` calls the running gateway's Admin Console endpoints (such as `/admin/guards/models/{id}/install` or `/admin/guards/models/{id}/progress`), CLI HTTP clients disable HTTP redirects (`CheckRedirect`) and attach the `Authorization: Bearer` admin token (`ADMIN_API_KEY` / `FARADAI_WIRE_ADMIN_TOKEN`) only over loopback or HTTPS (`admin_tls.enabled: true`) connections.
+> When `guard` calls the running gateway's Admin Console endpoints (such as `/admin/guards/models/{id}/install` or `/admin/guards/models/{id}/progress`), CLI HTTP clients disable HTTP redirects (`CheckRedirect`) and attach the `Authorization: Bearer` admin token (`ADMIN_API_KEY`, or the local `keys/api_keys.json` active Admin key on loopback) only over loopback or HTTPS (`admin_tls.enabled: true`) connections.
 

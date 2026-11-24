@@ -481,7 +481,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 			keyStore = fsKeyStore
 		}
 	}
-	if adminMeta, created, bootErr := auth.EnsureBootstrapAdminKey(keyStore, os.Getenv("FARADAI_WIRE_API_KEY")); bootErr != nil {
+	if adminMeta, created, bootErr := auth.EnsureBootstrapAdminKey(keyStore, ""); bootErr != nil {
 		slog.Warn("Failed to ensure Bootstrap Master Key", slog.String("error", bootErr.Error()))
 	} else if adminMeta != nil {
 		containerized := !cfg.IsStdioAllowed()

@@ -198,6 +198,10 @@ func (s *SSEProxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	uCtx, err := s.authenticate(r)
 	if err != nil {
+		if errors.Is(err, ErrForbiddenAdminKeyOnIngress) {
+			s.writeForbiddenIngressRole(w, r, err)
+			return
+		}
 		s.writeUnauthorized(w, r)
 		return
 	}
@@ -296,6 +300,10 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	uCtx, err := s.authenticate(r)
 	if err != nil {
+		if errors.Is(err, ErrForbiddenAdminKeyOnIngress) {
+			s.writeForbiddenIngressRole(w, r, err)
+			return
+		}
 		s.writeUnauthorized(w, r)
 		return
 	}

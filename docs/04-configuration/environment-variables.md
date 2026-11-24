@@ -24,9 +24,8 @@ Settings are resolved in the following order (highest precedence first):
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| **`API_KEY`** | *(None)* | Master secret for agent Ingress Bearer authentication. |
-| **`ADMIN_API_KEY`** | *(None)* | Bearer secret for Admin REST APIs & WebSockets (`/admin/*`, `/api/*`, `/ws`). Required when binding Admin Console to a non-loopback host. |
-| **`FARADAI_WIRE_ADMIN_TOKEN`** | *(None)* | Alternative env var for the Admin Bearer token when `ADMIN_API_KEY` is unset. |
+| **`AGENT_API_KEY`** | *(None)* | Optional client-side MCP Ingress Bearer token override for `faradaiwire connect` (scrubbed from child MCP subprocesses). |
+| **`ADMIN_API_KEY`** | *(None)* | Optional client-side Admin Bearer token for remote HTTPS CLI commands (`faradaiwire adopt`, `faradaiwire guard`). Server Admin auth uses `keys/api_keys.json` exclusively (`faradaiwire token [--rotate]`). |
 | **`GATEWAY_ID`** | `faradaiwire-gw-local-01` | Unique node identifier recorded in audit telemetry and DuckDB events. |
 | **`FARADAI_WIRE_HOST`** | `127.0.0.1` | Network interface address to bind Ingress listeners (`0.0.0.0` for containers). |
 | **`FARADAI_WIRE_ADMIN_HOST`** | `127.0.0.1` | Network interface address for the Admin Console listener (`admin_host` / `--admin-host` takes higher precedence). |

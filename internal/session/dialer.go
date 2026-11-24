@@ -611,7 +611,7 @@ func (d *CompositeDialer) Dial(ctx context.Context, proto agent.ProtocolConfig, 
 
 // BuildSafeSubprocessEnv constructs a minimal, sanitized execution environment
 // for child stdio MCP processes. It eliminates host secret leakage (such as API_KEY,
-// ADMIN_API_KEY, FARADAI_WIRE_HMAC_SECRET, and host cloud credentials) by strictly whitelisting
+// ADMIN_API_KEY, AGENT_API_KEY, FARADAI_WIRE_HMAC_SECRET, and host cloud credentials) by strictly whitelisting
 // standard runtime fundamentals and appending caller-specified protocol overrides.
 // When expandHostRefs is true, explicit ${VAR} references inside protoEnv values are resolved from the host environment.
 func BuildSafeSubprocessEnv(protoEnv []string, expandHostRefs bool) []string {
@@ -673,6 +673,7 @@ func BuildSafeSubprocessEnv(protoEnv []string, expandHostRefs bool) []string {
 var blockedHostRefEnvVars = map[string]struct{}{
 	"API_KEY":                  {},
 	"ADMIN_API_KEY":            {},
+	"AGENT_API_KEY":            {},
 	"FARADAI_WIRE_HMAC_SECRET": {},
 	"AWS_ACCESS_KEY_ID":        {},
 	"AWS_SECRET_ACCESS_KEY":    {},

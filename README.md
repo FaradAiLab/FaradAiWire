@@ -120,8 +120,8 @@ To elevate defense against complex zero-day indirect prompt injections and jailb
 
 | Port | Service | Endpoints | Authentication |
 | :--- | :--- | :--- | :--- |
-| **19410** | **Proxy Ingress** | `/sse`, `/message`, `/mcp` | Fail-closed (`Authorization: Bearer <key>`) |
-| **19415** | **Admin Console** | `/admin/dashboard`, `/admin/status`, REST APIs | Loopback standalone or `Authorization: Bearer <token>` (`ADMIN_API_KEY` / `FARADAI_WIRE_ADMIN_TOKEN`) |
+| **19410** | **Proxy Ingress** | `/sse`, `/message`, `/mcp` | Fail-closed (`Agent` API key via `Authorization: Bearer` / `X-API-Key`; `Admin` keys rejected with `403 INGRESS_ROLE_REQUIRED`) |
+| **19415** | **Admin Console** | `/admin/dashboard`, `/admin/status`, REST APIs | Loopback standalone or `Admin` key from `keys/api_keys.json` (`faradaiwire token [--rotate]`; `Agent` keys rejected with `403 ADMIN_ROLE_REQUIRED`) |
 
 ---
 
@@ -131,8 +131,8 @@ FaradAiWire can be configured via `config.yaml` or overridden through environmen
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `API_KEY` | *(None)* | Agent ingress proxy authentication secret (`Authorization: Bearer <key>`). |
-| `ADMIN_API_KEY` / `FARADAI_WIRE_ADMIN_TOKEN` | *(None)* | Admin Console Bearer token. Required at startup if `admin_host` is bound to a non-loopback address. |
+| `AGENT_API_KEY` | *(None)* | Optional client-side MCP Ingress Bearer token override for `faradaiwire connect` (scrubbed from child MCP subprocesses). |
+| `ADMIN_API_KEY` | *(None)* | Optional client-side Admin Bearer token for remote HTTPS CLI commands (`faradaiwire adopt`, `faradaiwire guard`). Server Admin auth uses `keys/api_keys.json` exclusively (`faradaiwire token [--rotate]`). |
 | `GATEWAY_ID` | `faradaiwire-gw-local-01` | Unique node identifier recorded in audit telemetry. |
 | `FARADAI_WIRE_HOST` | `127.0.0.1` | Network interface to bind the proxy ingress listener (`0.0.0.0` for containers). |
 | `FARADAI_WIRE_ADMIN_HOST` | `127.0.0.1` | Network interface to bind the Admin Console listener (defaults to strict loopback). |

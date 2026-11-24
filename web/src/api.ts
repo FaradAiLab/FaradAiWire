@@ -202,7 +202,7 @@ export const api = {
       body: JSON.stringify({
         name,
         agent_name: agentName || '*',
-        role: role || 'Developer',
+        role: role || 'Agent',
       }),
     }),
   revokeApiKey: (id: string) =>

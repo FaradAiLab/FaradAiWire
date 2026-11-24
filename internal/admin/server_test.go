@@ -1170,18 +1170,23 @@ func TestAdminServer_NonLoopbackStartRequiresAuthToken(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected Start() to refuse non-loopback %s without auth token", tc.adminHost)
 			}
-			if !strings.Contains(err.Error(), "ADMIN_API_KEY") {
-				t.Fatalf("expected helpful error mentioning ADMIN_API_KEY, got: %v", err)
+			if !strings.Contains(err.Error(), "KeyStore") {
+				t.Fatalf("expected helpful error mentioning KeyStore, got: %v", err)
 			}
 		})
 	}
 }
 
 func TestAdminServer_BearerAuthAndCSRFProtection(t *testing.T) {
-	t.Run("Bearer token enforced on API endpoints when ADMIN_API_KEY is set", func(t *testing.T) {
-		t.Setenv("ADMIN_API_KEY", "secret-admin-token")
+	t.Run("Bearer token enforced on non-loopback API endpoints via KeyStore", func(t *testing.T) {
+		ks := auth.NewMemoryKeyStore()
+		adminToken, _, err := ks.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*")
+		if err != nil {
+			t.Fatalf("GenerateKey(Admin): %v", err)
+		}
 		srv := NewAdminServer(AdminDependencies{
-			Config:     &config.Config{},
+			Config:     &config.Config{AdminHost: "0.0.0.0", AdminPort: 19415},
+			KeyStore:   ks,
 			ReloadFunc: func() error { return nil },
 		})
 		h := srv.Handler()
@@ -1226,7 +1231,7 @@ func TestAdminServer_BearerAuthAndCSRFProtection(t *testing.T) {
 
 		// Valid token succeeds
 		okReq := httptest.NewRequest(http.MethodPost, "/api/reload", nil)
-		okReq.Header.Set("Authorization", "Bearer secret-admin-token")
+		okReq.Header.Set("Authorization", "Bearer "+adminToken)
 		okRec := httptest.NewRecorder()
 		h.ServeHTTP(okRec, okReq)
 		if okRec.Code != http.StatusOK {
@@ -1544,7 +1549,11 @@ func TestHandleGuardProbe_RedactsCredentials(t *testing.T) {
 }
 
 func TestAdminServer_CORSWildcardDoesNotBypassCSRF(t *testing.T) {
-	t.Setenv("ADMIN_API_KEY", "csrf-test-token")
+	ks := auth.NewMemoryKeyStore()
+	adminToken, _, err := ks.GenerateKey("csrf-admin", auth.DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Admin): %v", err)
+	}
 
 	cases := []struct {
 		name           string
@@ -1598,10 +1607,11 @@ func TestAdminServer_CORSWildcardDoesNotBypassCSRF(t *testing.T) {
 			}
 			srv := NewAdminServer(AdminDependencies{
 				Config:     cfg,
+				KeyStore:   ks,
 				ReloadFunc: func() error { return nil },
 			})
 			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8095/api/reload", nil)
-			req.Header.Set("Authorization", "Bearer csrf-test-token")
+			req.Header.Set("Authorization", "Bearer "+adminToken)
 			req.Header.Set("Origin", tc.origin)
 			if tc.secFetchSite != "" {
 				req.Header.Set("Sec-Fetch-Site", tc.secFetchSite)
@@ -2156,5 +2166,184 @@ func TestAdminServer_AuditLogs_RealDuckDB_EndToEnd(t *testing.T) {
 				t.Fatalf("unexpected MASKED hydrated detail: %+v", detBody.Record)
 			}
 		}
+	}
+}
+
+func TestAdminServer_EnvOverridesIgnored_SingleKeyStoreSource(t *testing.T) {
+	t.Setenv("ADMIN_API_KEY", "env-admin-should-be-ignored")
+	t.Setenv("FARADAI_WIRE_ADMIN_TOKEN", "legacy-env-token-should-be-ignored")
+
+	ks := auth.NewMemoryKeyStore()
+	adminToken, _, err := ks.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Admin): %v", err)
+	}
+
+	srv := NewAdminServer(AdminDependencies{
+		Config:   &config.Config{AdminHost: "0.0.0.0", AdminPort: 19415},
+		KeyStore: ks,
+	})
+	h := srv.Handler()
+
+	// Env tokens must be rejected (401).
+	for _, envTok := range []string{"env-admin-should-be-ignored", "legacy-env-token-should-be-ignored"} {
+		req := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+		req.Header.Set("Authorization", "Bearer "+envTok)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for ignored env token %q, got %d", envTok, rec.Code)
+		}
+	}
+
+	// KeyStore Admin key must succeed (200).
+	req := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for KeyStore Admin token, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminServer_LoopbackExplicitBearerRoleGuard(t *testing.T) {
+	ks := auth.NewMemoryKeyStore()
+	adminToken, _, err := ks.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Admin): %v", err)
+	}
+	agentToken, _, err := ks.GenerateKey("cursor-agent", auth.DefaultIngressRole, "cursor")
+	if err != nil {
+		t.Fatalf("GenerateKey(Agent): %v", err)
+	}
+	devToken, _, err := ks.GenerateKey("legacy-dev", "Developer", "claude")
+	if err != nil {
+		t.Fatalf("GenerateKey(Developer): %v", err)
+	}
+
+	srv := NewAdminServer(AdminDependencies{
+		Config:   &config.Config{AdminHost: "127.0.0.1", AdminPort: 19415},
+		KeyStore: ks,
+	})
+	h := srv.Handler()
+
+	tests := []struct {
+		name     string
+		authHdr  string
+		wantCode int
+		wantErr  string
+	}{
+		{name: "unauthenticated loopback remains open", authHdr: "", wantCode: http.StatusOK},
+		{name: "explicit Agent bearer rejected on loopback", authHdr: "Bearer " + agentToken, wantCode: http.StatusForbidden, wantErr: "ADMIN_ROLE_REQUIRED"},
+		{name: "explicit legacy Developer bearer rejected on loopback", authHdr: "Bearer " + devToken, wantCode: http.StatusForbidden, wantErr: "ADMIN_ROLE_REQUIRED"},
+		{name: "explicit invalid bearer rejected on loopback", authHdr: "Bearer faw_live_invalid", wantCode: http.StatusUnauthorized},
+		{name: "explicit Admin bearer allowed on loopback", authHdr: "Bearer " + adminToken, wantCode: http.StatusOK},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+			if tc.authHdr != "" {
+				req.Header.Set("Authorization", tc.authHdr)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			if tc.wantErr != "" {
+				var body map[string]string
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("decode error JSON: %v", err)
+				}
+				if body["error"] != tc.wantErr {
+					t.Fatalf("error = %q, want %q", body["error"], tc.wantErr)
+				}
+			}
+		})
+	}
+}
+
+func TestAdminServer_LiveRotateAdminKey_ImmediatelyInvalidatesSessionAndBearer(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "keys", "api_keys.json")
+	daemonKS, err := auth.NewFileKeyStore(filePath)
+	if err != nil {
+		t.Fatalf("NewFileKeyStore daemon: %v", err)
+	}
+	oldAdminToken, _, err := daemonKS.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey initial admin: %v", err)
+	}
+
+	srv := NewAdminServer(AdminDependencies{
+		Config:   &config.Config{AdminHost: "0.0.0.0", AdminPort: 19415},
+		KeyStore: daemonKS,
+	})
+	h := srv.Handler()
+
+	// Establish session cookie with oldAdminToken.
+	loginReq := httptest.NewRequest(http.MethodPost, "/admin/auth/session", strings.NewReader(`{"api_key":"`+oldAdminToken+`"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRec := httptest.NewRecorder()
+	h.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("POST /admin/auth/session = %d, want 200 (%s)", loginRec.Code, loginRec.Body.String())
+	}
+	var sessionCookie *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Name == adminSessionCookieName {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("expected faw_admin_session cookie to be set")
+	}
+
+	// Verify session cookie works prior to rotation.
+	preReq := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+	preReq.AddCookie(sessionCookie)
+	preRec := httptest.NewRecorder()
+	h.ServeHTTP(preRec, preReq)
+	if preRec.Code != http.StatusOK {
+		t.Fatalf("pre-rotation session cookie status = %d, want 200", preRec.Code)
+	}
+
+	// External CLI rotates admin key on disk.
+	cliKS, err := auth.NewFileKeyStore(filePath)
+	if err != nil {
+		t.Fatalf("NewFileKeyStore cli: %v", err)
+	}
+	time.Sleep(15 * time.Millisecond)
+	newAdminToken, _, err := cliKS.RotateAdminKey("bootstrap-admin")
+	if err != nil {
+		t.Fatalf("RotateAdminKey: %v", err)
+	}
+
+	// Old session cookie must fail immediately (401).
+	staleCookieReq := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+	staleCookieReq.AddCookie(sessionCookie)
+	staleCookieRec := httptest.NewRecorder()
+	h.ServeHTTP(staleCookieRec, staleCookieReq)
+	if staleCookieRec.Code != http.StatusUnauthorized {
+		t.Fatalf("post-rotation old session cookie status = %d, want 401", staleCookieRec.Code)
+	}
+
+	// Old Bearer token must fail immediately (401).
+	staleBearerReq := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+	staleBearerReq.Header.Set("Authorization", "Bearer "+oldAdminToken)
+	staleBearerRec := httptest.NewRecorder()
+	h.ServeHTTP(staleBearerRec, staleBearerReq)
+	if staleBearerRec.Code != http.StatusUnauthorized {
+		t.Fatalf("post-rotation old bearer status = %d, want 401", staleBearerRec.Code)
+	}
+
+	// New Bearer token must succeed immediately (200).
+	newBearerReq := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+	newBearerReq.Header.Set("Authorization", "Bearer "+newAdminToken)
+	newBearerRec := httptest.NewRecorder()
+	h.ServeHTTP(newBearerRec, newBearerReq)
+	if newBearerRec.Code != http.StatusOK {
+		t.Fatalf("post-rotation new bearer status = %d, want 200 (%s)", newBearerRec.Code, newBearerRec.Body.String())
 	}
 }

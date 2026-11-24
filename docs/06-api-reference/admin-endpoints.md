@@ -9,7 +9,8 @@ All endpoints documented here are hosted on FaradAiWire's **Admin Console Port (
 
 ### Authentication & CSRF Protections
 
-- **Bearer Authentication:** When `ADMIN_API_KEY` or `FARADAI_WIRE_ADMIN_TOKEN` is configured (mandatory whenever `admin_host` is bound to a non-loopback interface), protected `/admin` and `/api` endpoints require `Authorization: Bearer <token>` (checked in constant time; `/admin/dashboard` and `/admin/assets/*` remain reachable so the web UI can load).
+- **Bearer & Session Authentication:** Server-side Admin authentication uses active `role: "Admin"` keys in `keys/api_keys.json` (`faradaiwire token [--rotate]`) exclusively. On non-loopback interfaces, protected `/admin`, `/api`, and `/ws` endpoints require an `Admin` Bearer token or `faw_admin_session` `HttpOnly` cookie (`/admin/dashboard`, `/admin/assets/*`, `/admin/auth/session`, and `/admin/auth/logout` remain reachable for login). Even on loopback, an explicit `Authorization: Bearer` header carrying an `Agent` (or legacy `Developer`) key is rejected with `403 ADMIN_ROLE_REQUIRED`.
+- **Admin Key Lifecycle:** `GET /admin/api-keys` and `GET /admin/api-keys/{id}` redact `raw_key` on `Admin` keys while returning `prefix`; `POST /admin/api-keys` always mints `role: "Agent"` ingress keys; `DELETE /admin/api-keys` rejects `Admin` keys with `403 ADMIN_KEY_CLI_ONLY`.
 - **CSRF & Origin Enforcement:** Cross-site browser requests (`Sec-Fetch-Site: cross-site` or disallowed `Origin`) are rejected with `403 Forbidden`. Setting `security.cors_allowed_origins: ["*"]` does not disable Origin validation for CSRF or WebSocket upgrades.
 - **JSON Content-Type:** Mutating requests (`POST`, `PUT`, `PATCH`, `DELETE`) must use `Content-Type: application/json` (otherwise rejected with `415 Unsupported Media Type`).
 

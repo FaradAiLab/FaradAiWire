@@ -15,7 +15,7 @@ FaradAiWire uses YAML for its primary configuration file (`config.yaml`). The fi
 # Network Port Bindings
 listen_host: "127.0.0.1"           # Ingress listener host (default 127.0.0.1)
 listen_port: 19410                 # Ingress Proxy port (Fail-Closed Bearer Auth)
-admin_host: "127.0.0.1"            # Admin Console host (default 127.0.0.1; non-loopback requires ADMIN_API_KEY/FARADAI_WIRE_ADMIN_TOKEN)
+admin_host: "127.0.0.1"            # Admin Console host (default 127.0.0.1; non-loopback requires an active Admin key in keys/api_keys.json)
 admin_port: 19415                  # Admin Console & REST API port (Loopback by default)
 agents_dir: "./agents"             # Directory containing per-agent configurations
 

@@ -124,7 +124,12 @@ func executeConnect(profile string, host string, port int, token string, noSpawn
 
 	// 2. Resolve token if not explicitly provided
 	if token == "" {
-		token = resolveActiveToken(profile)
+		var tokErr error
+		token, tokErr = resolveActiveToken(profile, host)
+		if tokErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", tokErr)
+			return 1
+		}
 	}
 	if token != "" && !isTrustedHTTPTarget(host) {
 		fmt.Fprintf(os.Stderr, "Error: refusing to send bearer token over unencrypted http:// to untrusted non-loopback host %q (set FARADAI_WIRE_ALLOW_INSECURE_HTTP=true to override)\n", host)
@@ -259,36 +264,59 @@ func spawnDetachedDaemon(ctx context.Context, host string, port int) error {
 	return fmt.Errorf("daemon failed to respond to /health on %s within 3s (inspect %s)", net.JoinHostPort(normalizeGatewayHost(host), strconv.Itoa(port)), logFilePath)
 }
 
-func resolveActiveToken(profile string) string {
-	if envTok := strings.TrimSpace(os.Getenv("FARADAI_WIRE_API_KEY")); envTok != "" {
-		return envTok
+func resolveActiveToken(profile, host string) (string, error) {
+	cfg := loadConfigWithoutCreating("")
+	if cfg == nil {
+		cfg = &config.Config{}
 	}
+	keyStorePath := cfg.GetAPIKeysPath()
+	ks, ksErr := auth.NewFileKeyStore(keyStorePath)
 
-	keyStorePath := (&config.Config{}).GetAPIKeysPath()
-	ks, err := auth.NewFileKeyStore(keyStorePath)
-	if err != nil {
-		return ""
-	}
-
-	keys := ks.ListKeys()
-	sort.Slice(keys, func(i, j int) bool {
-		if !keys[i].CreatedAt.Equal(keys[j].CreatedAt) {
-			return keys[i].CreatedAt.After(keys[j].CreatedAt)
+	if envTok := strings.TrimSpace(os.Getenv("AGENT_API_KEY")); envTok != "" {
+		isLocalAdmin := false
+		if ks != nil {
+			if rec, ok := ks.ValidateKeyWithoutUsage(envTok); ok && rec != nil && auth.IsAdminRole(rec.Role) {
+				isLocalAdmin = true
+			}
 		}
-		return keys[i].ID < keys[j].ID
-	})
-
-	for _, k := range keys {
-		if !k.Revoked && k.RawKey != "" && strings.EqualFold(k.AgentName, profile) {
-			return k.RawKey
+		if !isLocalAdmin {
+			return envTok, nil
 		}
 	}
-	for _, k := range keys {
-		if !k.Revoked && k.RawKey != "" && k.AgentName == "*" {
-			return k.RawKey
+
+	if ksErr == nil && ks != nil {
+		keys := ks.ListKeys()
+		sort.Slice(keys, func(i, j int) bool {
+			if !keys[i].CreatedAt.Equal(keys[j].CreatedAt) {
+				return keys[i].CreatedAt.After(keys[j].CreatedAt)
+			}
+			return keys[i].ID < keys[j].ID
+		})
+
+		for _, k := range keys {
+			if k != nil && !k.Revoked && k.RawKey != "" && !auth.IsAdminRole(k.Role) && strings.EqualFold(k.AgentName, profile) {
+				return k.RawKey, nil
+			}
+		}
+		for _, k := range keys {
+			if k != nil && !k.Revoked && k.RawKey != "" && !auth.IsAdminRole(k.Role) && k.AgentName == "*" {
+				return k.RawKey, nil
+			}
+		}
+
+		if isLoopbackHost(host) {
+			rawTok, _, genErr := ks.GenerateKey("connect-"+profile, auth.DefaultIngressRole, profile)
+			if genErr != nil {
+				return "", fmt.Errorf("auto-provision Agent ingress key: %w", genErr)
+			}
+			return rawTok, nil
 		}
 	}
-	return ""
+
+	if !isLoopbackHost(host) {
+		return "", fmt.Errorf("no Agent ingress API key configured for remote host %q; pass --token <AGENT_API_KEY> or set AGENT_API_KEY", host)
+	}
+	return "", nil
 }
 
 func runBridge(ctx context.Context, profile, host string, port int, token string, in io.Reader, out io.Writer) error {

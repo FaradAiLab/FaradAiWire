@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -580,15 +579,6 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func resolveConfiguredAdminToken() string {
-	for _, envVar := range []string{"ADMIN_API_KEY", "FARADAI_WIRE_ADMIN_TOKEN"} {
-		if tok := strings.TrimSpace(os.Getenv(envVar)); tok != "" {
-			return tok
-		}
-	}
-	return ""
-}
-
 func isExplicitlyAllowedOrigin(origin string, allowedOrigins []string) bool {
 	trimmedOrigin := strings.TrimSpace(origin)
 	if trimmedOrigin == "" {
@@ -688,9 +678,12 @@ func (a *AdminServer) withAdminSecurity(next http.Handler) http.Handler {
 			}
 		}
 
-		// 2. Enforce Admin-role authentication (Bearer token or HttpOnly HMAC cookie) when configured or non-loopback.
+		// 2. Enforce Admin-role authentication:
+		//    - Explicit Authorization: Bearer headers are ALWAYS validated (even on loopback) so Agent keys receive 403 ADMIN_ROLE_REQUIRED.
+		//    - Unauthenticated requests on non-loopback require a valid HttpOnly HMAC session cookie (or Bearer token).
+		//    - Unauthenticated requests on loopback remain open for zero-auth localhost access.
 		clientIP := clientIPFromRequest(r)
-		if isProtectedPath && a.isAdminAuthRequired() {
+		if isProtectedPath {
 			authHeader := r.Header.Get("Authorization")
 			const bearerPrefix = "Bearer "
 			if len(authHeader) > len(bearerPrefix) && strings.EqualFold(authHeader[:len(bearerPrefix)], bearerPrefix) {
@@ -729,25 +722,27 @@ func (a *AdminServer) withAdminSecurity(next http.Handler) http.Handler {
 					ActorRole: "admin",
 					ClientIP:  clientIP,
 				})
-			} else if actorID, ok := a.extractValidAdminSessionCookie(r); ok {
+			} else if a.isAdminAuthRequired() {
+				if actorID, ok := a.extractValidAdminSessionCookie(r); ok {
+					r = withVerifiedAdminActor(r, verifiedAdminActor{
+						ActorID:   actorID,
+						ActorRole: "admin",
+						ClientIP:  clientIP,
+					})
+				} else {
+					a.logSecurityAuditAs(r, "anonymous", "unknown", "admin_auth_failed", "session_auth", "admin_auth", r.URL.Path, "denied", "missing_or_invalid_session", nil)
+					metrics.Default().IncAuthFailure("admin", "missing_or_invalid_session")
+					w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
+					http.Error(w, "Unauthorized: admin bearer token or session required", http.StatusUnauthorized)
+					return
+				}
+			} else {
 				r = withVerifiedAdminActor(r, verifiedAdminActor{
-					ActorID:   actorID,
+					ActorID:   "local-operator",
 					ActorRole: "admin",
 					ClientIP:  clientIP,
 				})
-			} else {
-				a.logSecurityAuditAs(r, "anonymous", "unknown", "admin_auth_failed", "session_auth", "admin_auth", r.URL.Path, "denied", "missing_or_invalid_session", nil)
-				metrics.Default().IncAuthFailure("admin", "missing_or_invalid_session")
-				w.Header().Set("WWW-Authenticate", `Bearer realm="FaradAiWire Admin"`)
-				http.Error(w, "Unauthorized: admin bearer token or session required", http.StatusUnauthorized)
-				return
 			}
-		} else if isProtectedPath {
-			r = withVerifiedAdminActor(r, verifiedAdminActor{
-				ActorID:   "local-operator",
-				ActorRole: "admin",
-				ClientIP:  clientIP,
-			})
 		}
 
 		next.ServeHTTP(w, r)

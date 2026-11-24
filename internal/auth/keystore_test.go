@@ -585,3 +585,181 @@ func TestTokenRecoveryCommand(t *testing.T) {
 		t.Fatalf("TokenRecoveryPortHint(19425) = %q", got)
 	}
 }
+
+func TestIsAdminRole(t *testing.T) {
+	tests := []struct {
+		name string
+		role string
+		want bool
+	}{
+		{name: "exact Admin", role: DefaultAdminRole, want: true},
+		{name: "lowercase admin", role: "admin", want: true},
+		{name: "whitespace padded", role: "  ADMIN  ", want: true},
+		{name: "Agent role", role: DefaultIngressRole, want: false},
+		{name: "legacy Developer role", role: "Developer", want: false},
+		{name: "empty role", role: "", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsAdminRole(tc.role); got != tc.want {
+				t.Errorf("IsAdminRole(%q) = %v, want %v", tc.role, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFileKeyStore_ValidateKeyWithoutUsage(t *testing.T) {
+	store := NewMemoryKeyStore()
+	rawToken, rec, err := store.GenerateKey("Admin Key", DefaultAdminRole)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	if store.IsDirty() {
+		t.Fatal("expected clean keystore after GenerateKey")
+	}
+
+	got, ok := store.ValidateKeyWithoutUsage(rawToken)
+	if !ok || got == nil || got.ID != rec.ID {
+		t.Fatalf("ValidateKeyWithoutUsage(%q) = (%+v, %v), want valid record %s", rawToken, got, ok, rec.ID)
+	}
+	if store.IsDirty() {
+		t.Error("ValidateKeyWithoutUsage must not mark keystore dirty")
+	}
+	if !got.LastUsedAt.IsZero() {
+		t.Errorf("ValidateKeyWithoutUsage must not mutate LastUsedAt, got %v", got.LastUsedAt)
+	}
+	meta, err := store.GetKey(rec.ID)
+	if err != nil {
+		t.Fatalf("GetKey: %v", err)
+	}
+	if !meta.LastUsedAt.IsZero() {
+		t.Errorf("stored key LastUsedAt mutated by ValidateKeyWithoutUsage: %v", meta.LastUsedAt)
+	}
+
+	if _, ok := store.ValidateKeyWithoutUsage("faw_live_invalid"); ok {
+		t.Error("expected invalid token to fail ValidateKeyWithoutUsage")
+	}
+}
+
+func TestFileKeyStore_RotateAdminKey_AtomicAndPreservesIngressKeys(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "keys", "api_keys.json")
+	store, err := NewFileKeyStore(filePath)
+	if err != nil {
+		t.Fatalf("NewFileKeyStore: %v", err)
+	}
+
+	oldAdmin1, oldAdminRec1, err := store.GenerateKey("bootstrap-admin", DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey old admin 1: %v", err)
+	}
+	oldAdmin2, oldAdminRec2, err := store.GenerateKey("secondary-admin", DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey old admin 2: %v", err)
+	}
+	agentToken, agentRec, err := store.GenerateKey("cursor-agent", DefaultIngressRole, "cursor")
+	if err != nil {
+		t.Fatalf("GenerateKey agent: %v", err)
+	}
+	devToken, devRec, err := store.GenerateKey("legacy-dev", "Developer", "claude")
+	if err != nil {
+		t.Fatalf("GenerateKey developer: %v", err)
+	}
+
+	newAdminToken, newAdminRec, err := store.RotateAdminKey("")
+	if err != nil {
+		t.Fatalf("RotateAdminKey: %v", err)
+	}
+	if newAdminRec == nil || newAdminToken == "" {
+		t.Fatal("expected non-empty rotated admin key")
+	}
+	if newAdminRec.Name != "bootstrap-admin" {
+		t.Errorf("default rotated name = %q, want %q", newAdminRec.Name, "bootstrap-admin")
+	}
+	if newAdminRec.Role != DefaultAdminRole || newAdminRec.AgentName != "*" {
+		t.Errorf("unexpected rotated admin record: role=%q agent=%q", newAdminRec.Role, newAdminRec.AgentName)
+	}
+	if newAdminToken == oldAdmin1 || newAdminToken == oldAdmin2 {
+		t.Error("rotated admin token must differ from prior admin tokens")
+	}
+
+	// Prior admin keys must be revoked; new admin key must validate.
+	if _, ok := store.ValidateKey(oldAdmin1); ok {
+		t.Error("old admin key 1 must be invalid after rotation")
+	}
+	if _, ok := store.ValidateKey(oldAdmin2); ok {
+		t.Error("old admin key 2 must be invalid after rotation")
+	}
+	if rec, ok := store.ValidateKeyWithoutUsage(newAdminToken); !ok || rec.ID != newAdminRec.ID {
+		t.Fatalf("new admin key must validate, got ok=%v rec=%+v", ok, rec)
+	}
+
+	// Agent and legacy Developer keys must remain untouched.
+	if rec, ok := store.ValidateKeyWithoutUsage(agentToken); !ok || rec.ID != agentRec.ID || rec.Role != DefaultIngressRole {
+		t.Fatalf("Agent key must remain valid after admin rotation, got ok=%v rec=%+v", ok, rec)
+	}
+	if rec, ok := store.ValidateKeyWithoutUsage(devToken); !ok || rec.ID != devRec.ID || rec.Role != "Developer" {
+		t.Fatalf("legacy Developer key must remain valid after admin rotation, got ok=%v rec=%+v", ok, rec)
+	}
+
+	// Reload from disk to verify atomic persistence.
+	reloaded, err := NewFileKeyStore(filePath)
+	if err != nil {
+		t.Fatalf("reload keystore: %v", err)
+	}
+	admins := reloaded.ActiveAdminCredentials()
+	if len(admins) != 1 || admins[0].ID != newAdminRec.ID {
+		t.Fatalf("expected exactly 1 active admin key on disk (%s), got %d", newAdminRec.ID, len(admins))
+	}
+	for _, oldID := range []string{oldAdminRec1.ID, oldAdminRec2.ID} {
+		meta, err := reloaded.GetKey(oldID)
+		if err != nil {
+			t.Fatalf("GetKey(%s): %v", oldID, err)
+		}
+		if !meta.Revoked {
+			t.Errorf("expected old admin key %s to be persisted as revoked", oldID)
+		}
+	}
+}
+
+func TestFileKeyStore_ExternalAdminRotation_ImmediateObservation(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "keys", "api_keys.json")
+
+	daemonStore, err := NewFileKeyStore(filePath)
+	if err != nil {
+		t.Fatalf("NewFileKeyStore daemon: %v", err)
+	}
+	oldAdmin, oldRec, err := daemonStore.GenerateKey("bootstrap-admin", DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey initial admin: %v", err)
+	}
+
+	// Prime daemonStore's stat throttle within the current 1-second window.
+	if admins := daemonStore.ActiveAdminCredentials(); len(admins) != 1 || admins[0].ID != oldRec.ID {
+		t.Fatalf("expected initial admin %s, got %+v", oldRec.ID, admins)
+	}
+
+	// Separate CLI process opens the same file and rotates the admin key.
+	cliStore, err := NewFileKeyStore(filePath)
+	if err != nil {
+		t.Fatalf("NewFileKeyStore cli: %v", err)
+	}
+	// Ensure mtime/size changes even on coarse-resolution filesystems.
+	time.Sleep(15 * time.Millisecond)
+	newAdmin, newRec, err := cliStore.RotateAdminKey("bootstrap-admin")
+	if err != nil {
+		t.Fatalf("cli RotateAdminKey: %v", err)
+	}
+
+	// Without waiting 1 second or clearing lastStatCheckUnix, ActiveAdminCredentials and ValidateKeyFresh must see the rotation immediately.
+	admins := daemonStore.ActiveAdminCredentials()
+	if len(admins) != 1 || admins[0].ID != newRec.ID {
+		t.Fatalf("expected daemon ActiveAdminCredentials to immediately observe rotated admin %s, got %+v", newRec.ID, admins)
+	}
+	if _, ok := daemonStore.ValidateKeyFresh(oldAdmin, false); ok {
+		t.Error("expected daemon ValidateKeyFresh to immediately reject old rotated admin key")
+	}
+	if got, ok := daemonStore.ValidateKeyFresh(newAdmin, false); !ok || got == nil || got.ID != newRec.ID {
+		t.Fatalf("expected daemon ValidateKeyFresh to accept new rotated admin key %s, got ok=%v rec=%+v", newRec.ID, ok, got)
+	}
+}

@@ -85,8 +85,8 @@ func TestAdminAPIKeys_Lifecycle(t *testing.T) {
 	if genResp.AgentName != "Claude" {
 		t.Errorf("expected agent_name 'Claude', got '%s'", genResp.AgentName)
 	}
-	if genResp.Role != "Developer" {
-		t.Errorf("expected role 'Developer', got '%s'", genResp.Role)
+	if genResp.Role != auth.DefaultIngressRole {
+		t.Errorf("expected role %q, got %q", auth.DefaultIngressRole, genResp.Role)
 	}
 	if !strings.HasPrefix(genResp.APIKey, "faw_live_") {
 		t.Errorf("expected raw api_key to start with 'faw_live_', got '%s'", genResp.APIKey)
@@ -106,8 +106,8 @@ func TestAdminAPIKeys_Lifecycle(t *testing.T) {
 	if !ok || validated == nil {
 		t.Fatalf("expected ValidateKey to succeed for freshly generated key")
 	}
-	if validated.Role != "Developer" {
-		t.Errorf("expected validated role 'Developer', got '%s'", validated.Role)
+	if validated.Role != auth.DefaultIngressRole {
+		t.Errorf("expected validated role %q, got %q", auth.DefaultIngressRole, validated.Role)
 	}
 	if validated.AgentName != "Claude" {
 		t.Errorf("expected validated agent_name 'Claude', got '%s'", validated.AgentName)
@@ -214,31 +214,154 @@ func TestAdminAPIKeys_RoleSanitization(t *testing.T) {
 	server, keyStore := setupTestAdminServerWithKeyStore()
 	handler := server.Handler()
 
-	// Generating a key with requested role "Admin" must be sanitized to "Developer"
-	genPayload := `{"name": "Admin Impersonator", "role": "Admin"}`
-	req := httptest.NewRequest(http.MethodPost, "/admin/api-keys", bytes.NewBufferString(genPayload))
-	req.Header.Set("Content-Type", "application/json")
+	roles := []string{"", "Admin", "admin", "Developer", "SuperUser"}
+	for _, requested := range roles {
+		t.Run("role_"+requested, func(t *testing.T) {
+			payload, _ := json.Marshal(map[string]string{
+				"name": "Key " + requested,
+				"role": requested,
+			})
+			req := httptest.NewRequest(http.MethodPost, "/admin/api-keys", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("expected status 201 Created, got %d: %s", rec.Code, rec.Body.String())
+			}
+
+			var genResp struct {
+				Role   string `json:"role"`
+				APIKey string `json:"api_key"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &genResp); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+
+			if genResp.Role != auth.DefaultIngressRole {
+				t.Errorf("requested role %q -> got %q, want %q", requested, genResp.Role, auth.DefaultIngressRole)
+			}
+
+			validated, ok := keyStore.ValidateKey(genResp.APIKey)
+			if !ok || validated.Role != auth.DefaultIngressRole {
+				t.Errorf("keyStore validated role = %q (ok=%v), want %q", validated.Role, ok, auth.DefaultIngressRole)
+			}
+		})
+	}
+}
+
+func TestAdminAPIKeys_AdminRawKeyRedactedOnGet(t *testing.T) {
+	server, keyStore := setupTestAdminServerWithKeyStore()
+	handler := server.Handler()
+
+	adminRaw, adminRec, err := keyStore.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Admin): %v", err)
+	}
+	agentRaw, agentRec, err := keyStore.GenerateKey("cursor-agent", auth.DefaultIngressRole, "cursor")
+	if err != nil {
+		t.Fatalf("GenerateKey(Agent): %v", err)
+	}
+
+	// 1. GET /admin/api-keys must strip raw_key from Admin key but keep prefix and keep Agent raw_key.
+	req := httptest.NewRequest(http.MethodGet, "/admin/api-keys", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected status 201 Created, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/api-keys = %d, want 200", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), adminRaw) {
+		t.Fatal("CRITICAL: raw Admin secret leaked in GET /admin/api-keys response")
 	}
 
-	var genResp struct {
-		Role   string `json:"role"`
-		APIKey string `json:"api_key"`
+	var listResp struct {
+		Keys []*auth.KeyMetadata `json:"keys"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &genResp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
+	if err := json.Unmarshal(rec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	var foundAdmin, foundAgent *auth.KeyMetadata
+	for _, k := range listResp.Keys {
+		switch k.ID {
+		case adminRec.ID:
+			foundAdmin = k
+		case agentRec.ID:
+			foundAgent = k
+		}
+	}
+	if foundAdmin == nil || foundAgent == nil {
+		t.Fatalf("expected both Admin and Agent keys in list, got %+v", listResp.Keys)
+	}
+	if foundAdmin.RawKey != "" {
+		t.Errorf("expected Admin key raw_key to be redacted, got %q", foundAdmin.RawKey)
+	}
+	if foundAdmin.Prefix != adminRaw[:12] {
+		t.Errorf("expected Admin key prefix %q, got %q", adminRaw[:12], foundAdmin.Prefix)
+	}
+	if foundAgent.RawKey != agentRaw {
+		t.Errorf("expected Agent key raw_key preserved, got %q", foundAgent.RawKey)
 	}
 
-	if genResp.Role != "Developer" {
-		t.Errorf("expected sanitized role 'Developer', got '%s'", genResp.Role)
+	// 2. GET /admin/api-keys/{adminID} must also redact raw_key.
+	singleReq := httptest.NewRequest(http.MethodGet, "/admin/api-keys/"+adminRec.ID, nil)
+	singleRec := httptest.NewRecorder()
+	handler.ServeHTTP(singleRec, singleReq)
+	if singleRec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/api-keys/{adminID} = %d, want 200", singleRec.Code)
+	}
+	if strings.Contains(singleRec.Body.String(), adminRaw) {
+		t.Fatal("CRITICAL: raw Admin secret leaked in GET /admin/api-keys/{id}")
+	}
+	var singleAdmin auth.KeyMetadata
+	if err := json.Unmarshal(singleRec.Body.Bytes(), &singleAdmin); err != nil {
+		t.Fatalf("decode single admin: %v", err)
+	}
+	if singleAdmin.RawKey != "" || singleAdmin.Prefix != adminRaw[:12] {
+		t.Errorf("unexpected single admin metadata: raw_key=%q prefix=%q", singleAdmin.RawKey, singleAdmin.Prefix)
+	}
+}
+
+func TestAdminAPIKeys_AdminRevokeCLIOnly(t *testing.T) {
+	server, keyStore := setupTestAdminServerWithKeyStore()
+	handler := server.Handler()
+
+	adminRaw, adminRec, err := keyStore.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Admin): %v", err)
+	}
+	_, agentRec, err := keyStore.GenerateKey("cursor-agent", auth.DefaultIngressRole, "cursor")
+	if err != nil {
+		t.Fatalf("GenerateKey(Agent): %v", err)
 	}
 
-	validated, ok := keyStore.ValidateKey(genResp.APIKey)
-	if !ok || validated.Role != "Developer" {
-		t.Errorf("expected keyStore validated role 'Developer', got '%s'", validated.Role)
+	for _, target := range []string{"/admin/api-keys/" + adminRec.ID, "/admin/api-keys?id=" + adminRec.ID} {
+		t.Run("DELETE_"+target, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodDelete, target, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("DELETE %s = %d, want 403 (%s)", target, rec.Code, rec.Body.String())
+			}
+			var errResp map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+				t.Fatalf("decode error JSON: %v", err)
+			}
+			if errResp["error"] != "ADMIN_KEY_CLI_ONLY" {
+				t.Errorf("error = %q, want ADMIN_KEY_CLI_ONLY", errResp["error"])
+			}
+		})
+	}
+
+	// Admin key must remain active.
+	if _, ok := keyStore.ValidateKey(adminRaw); !ok {
+		t.Fatal("Admin key should remain active after rejected HTTP DELETE")
+	}
+
+	// Agent key revocation must still succeed.
+	delAgentReq := httptest.NewRequest(http.MethodDelete, "/admin/api-keys/"+agentRec.ID, nil)
+	delAgentRec := httptest.NewRecorder()
+	handler.ServeHTTP(delAgentRec, delAgentReq)
+	if delAgentRec.Code != http.StatusOK {
+		t.Fatalf("DELETE agent key = %d, want 200 (%s)", delAgentRec.Code, delAgentRec.Body.String())
 	}
 }

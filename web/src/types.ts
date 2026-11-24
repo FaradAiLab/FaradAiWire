@@ -66,11 +66,16 @@ export interface SecurityFiltersConfig {
   hitl: boolean
 }
 
+export function isAdminRole(role?: string): boolean {
+  return (role || '').trim().toLowerCase() === 'admin'
+}
+
 export interface ApiKeyItem {
   id: string
   name: string
   agent_name?: string
-  key_prefix: string
+  prefix: string
+  key_prefix?: string
   raw_key?: string
   role?: string
   created_at: string
@@ -85,7 +90,9 @@ export interface CreatedApiKey {
   api_key: string
   raw_key?: string
   key: string
+  prefix?: string
   key_prefix?: string
+  role?: string
   created_at?: string
 }
 

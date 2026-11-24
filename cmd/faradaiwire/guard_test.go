@@ -507,7 +507,6 @@ func TestGuardHTTPClients_BlockRedirects(t *testing.T) {
 
 func TestExecuteGuardInstall_HTTPSProgressAuth(t *testing.T) {
 	t.Setenv("ADMIN_API_KEY", "secret-guard-token")
-	t.Setenv("FARADAI_WIRE_ADMIN_TOKEN", "")
 
 	cases := []struct {
 		name           string

@@ -137,6 +137,7 @@ func TestBuildSafeSubprocessEnv_Unit(t *testing.T) {
 	// Set parent environment variables, including sensitive secrets and standard vars
 	t.Setenv("API_KEY", "secret-gateway-api-key")
 	t.Setenv("ADMIN_API_KEY", "secret-gateway-admin-key")
+	t.Setenv("AGENT_API_KEY", "secret-gateway-agent-key")
 	t.Setenv("FARADAI_WIRE_HMAC_SECRET", "secret-farad-ai-hmac")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret-aws-access-key")
 	t.Setenv("CUSTOM_PARENT_SECRET", "do-not-leak")
@@ -171,7 +172,7 @@ func TestBuildSafeSubprocessEnv_Unit(t *testing.T) {
 	}
 
 	// Verify secrets are strictly absent
-	forbiddenKeys := []string{"API_KEY", "ADMIN_API_KEY", "FARADAI_WIRE_HMAC_SECRET", "AWS_SECRET_ACCESS_KEY", "CUSTOM_PARENT_SECRET"}
+	forbiddenKeys := []string{"API_KEY", "ADMIN_API_KEY", "AGENT_API_KEY", "FARADAI_WIRE_HMAC_SECRET", "AWS_SECRET_ACCESS_KEY", "CUSTOM_PARENT_SECRET"}
 	for _, k := range forbiddenKeys {
 		if hasKey(safeEnv, k) {
 			t.Errorf("expected secret %q to be absent from safeEnv, but found: %s", k, getKeyVal(safeEnv, k))
@@ -232,9 +233,13 @@ func TestBuildSafeSubprocessEnv_Unit(t *testing.T) {
 
 	// 4. Sensitive gateway secrets must NOT be expanded even when expandHostRefs=true
 	t.Setenv("ADMIN_API_KEY", "secret-gateway-admin-key")
-	blockedEnv := BuildSafeSubprocessEnv([]string{"LEAK=${ADMIN_API_KEY}"}, true)
+	t.Setenv("AGENT_API_KEY", "secret-gateway-agent-key")
+	blockedEnv := BuildSafeSubprocessEnv([]string{"LEAK=${ADMIN_API_KEY}", "LEAK_AGENT=${AGENT_API_KEY}"}, true)
 	if strings.Contains(getKeyVal(blockedEnv, "LEAK"), "secret-gateway-admin-key") {
 		t.Fatalf("CRITICAL LEAK: expandBracedHostRefs must block gateway secret ADMIN_API_KEY")
+	}
+	if strings.Contains(getKeyVal(blockedEnv, "LEAK_AGENT"), "secret-gateway-agent-key") {
+		t.Fatalf("CRITICAL LEAK: expandBracedHostRefs must block gateway secret AGENT_API_KEY")
 	}
 }
 

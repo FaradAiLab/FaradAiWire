@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FaradAiLab/FaradAiWire/internal/auth"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
@@ -47,15 +48,20 @@ func TestAdminMetrics_EndpointAndAuth(t *testing.T) {
 	reg.ObserveRequest("ALLOWED", "request", "dlp", "fast")
 
 	// 1. Non-loopback host enforces admin auth (401 without bearer/session).
+	ks := auth.NewMemoryKeyStore()
+	adminToken, _, err := ks.GenerateKey("metrics-admin", auth.DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Admin): %v", err)
+	}
 	srvAuth := newTestAdminServer(func(d *AdminDependencies) {
 		d.Config = &config.Config{
 			RuntimeMode: config.RuntimeModeStandalone,
 			AdminHost:   "0.0.0.0",
 			AdminPort:   19415,
 		}
+		d.KeyStore = ks
 		d.Metrics = reg
 	})
-	t.Setenv("FARADAI_WIRE_ADMIN_TOKEN", "metrics-admin-secret")
 	defer func() { _ = srvAuth.Shutdown(context.Background()) }()
 
 	handler := srvAuth.Handler()
@@ -68,7 +74,7 @@ func TestAdminMetrics_EndpointAndAuth(t *testing.T) {
 	}
 
 	reqAuth := httptest.NewRequest(http.MethodGet, "/admin/metrics", nil)
-	reqAuth.Header.Set("Authorization", "Bearer metrics-admin-secret")
+	reqAuth.Header.Set("Authorization", "Bearer "+adminToken)
 	recAuth := httptest.NewRecorder()
 	handler.ServeHTTP(recAuth, reqAuth)
 	if recAuth.Code != http.StatusOK {

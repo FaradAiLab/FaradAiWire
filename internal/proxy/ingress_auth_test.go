@@ -26,7 +26,7 @@ func (f *ingressAuthFilter) FilterRequest(ctx context.Context, req *mcp.Request)
 	if u, ok := ctx.Value(types.UserContextKey).(*types.UserContext); ok {
 		role = u.Role
 	}
-	if role == "Developer" || role == "Admin" {
+	if role == auth.DefaultIngressRole || role == "Developer" || role == "Admin" {
 		return req, nil
 	}
 	return nil, mcp.NewError(mcp.ErrPolicyDenied, "Access denied by ingress auth policy", nil)
@@ -319,5 +319,117 @@ func TestIngressAuth_SSEEndpoint_ContextExtraction(t *testing.T) {
 	proxy.handleMessage(recMCPUnauth, reqMCPUnauth)
 	if recMCPUnauth.Code != http.StatusUnauthorized {
 		t.Errorf("expected HTTP 401 for unauthenticated /mcp, got %d", recMCPUnauth.Code)
+	}
+}
+
+type spyIngressSecAuditLogger struct {
+	events []*filter.SecurityAuditEvent
+}
+
+func (s *spyIngressSecAuditLogger) LogSecurityEvent(ev *filter.SecurityAuditEvent) {
+	s.events = append(s.events, ev)
+}
+
+func TestIngressAuth_AdminKeyRejectedWith403_OnSSEAndMessage(t *testing.T) {
+	proxy, keyStore := setupTestIngressWithPolicyAuth(t)
+	secAudit := &spyIngressSecAuditLogger{}
+	proxy.SetSecurityAuditLogger(secAudit)
+
+	adminToken, adminRec, err := keyStore.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Admin): %v", err)
+	}
+	agentToken, _, err := keyStore.GenerateKey("cursor-agent", auth.DefaultIngressRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Agent): %v", err)
+	}
+	devToken, _, err := keyStore.GenerateKey("legacy-dev", "Developer", "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Developer): %v", err)
+	}
+
+	toolCallBody := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"execute_privileged_task","arguments":{"action":"deploy"}},"id":3001}`
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		header string
+		value  string
+	}{
+		{name: "SSE Bearer Admin", method: http.MethodGet, path: "/sse", header: "Authorization", value: "Bearer " + adminToken},
+		{name: "SSE X-API-Key Admin", method: http.MethodGet, path: "/sse", header: "X-API-Key", value: adminToken},
+		{name: "Message Bearer Admin", method: http.MethodPost, path: "/message?sessionId=s-admin-1", body: toolCallBody, header: "Authorization", value: "Bearer " + adminToken},
+		{name: "Message X-API-Key Admin", method: http.MethodPost, path: "/message?sessionId=s-admin-2", body: toolCallBody, header: "X-API-Key", value: adminToken},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var bodyReader io.Reader
+			if tc.body != "" {
+				bodyReader = bytes.NewBufferString(tc.body)
+			}
+			req := httptest.NewRequest(tc.method, tc.path, bodyReader)
+			req.Header.Set(tc.header, tc.value)
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rec := httptest.NewRecorder()
+			if tc.method == http.MethodGet {
+				proxy.handleSSE(rec, req)
+			} else {
+				proxy.handleMessage(rec, req)
+			}
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+			}
+			var errResp map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+				t.Fatalf("decode JSON: %v", err)
+			}
+			if errResp["error"] != "INGRESS_ROLE_REQUIRED" {
+				t.Errorf("error = %q, want INGRESS_ROLE_REQUIRED", errResp["error"])
+			}
+		})
+	}
+
+	// Verify keystore was NOT dirtied and LastUsedAt was NOT updated by rejected Admin requests.
+	if fks, ok := keyStore.(*auth.FileKeyStore); ok && fks.IsDirty() {
+		t.Error("keystore must not be dirty after rejected Admin ingress attempts")
+	}
+	adminMeta, err := keyStore.GetKey(adminRec.ID)
+	if err != nil {
+		t.Fatalf("GetKey(admin): %v", err)
+	}
+	if !adminMeta.LastUsedAt.IsZero() {
+		t.Errorf("Admin key LastUsedAt must remain zero after rejected ingress requests, got %v", adminMeta.LastUsedAt)
+	}
+
+	// Verify SecurityAuditLogger recorded the rejected Admin key's ID and role (never "anonymous").
+	if len(secAudit.events) != len(cases) {
+		t.Fatalf("expected %d security audit events, got %d", len(cases), len(secAudit.events))
+	}
+	for i, ev := range secAudit.events {
+		if ev.ActorID != adminRec.ID || ev.ActorRole != auth.DefaultAdminRole || ev.Reason != "ingress_role_required" {
+			t.Errorf("security audit event[%d] = actor=%q role=%q reason=%q, want %q / %q / ingress_role_required",
+				i, ev.ActorID, ev.ActorRole, ev.Reason, adminRec.ID, auth.DefaultAdminRole)
+		}
+	}
+
+	// Verify Agent (including lowercase RFC 9110 bearer) and legacy Developer keys still succeed on /message.
+	for i, tok := range []string{agentToken, devToken} {
+		req := httptest.NewRequest(http.MethodPost, "/message?sessionId=s-ok", bytes.NewBufferString(toolCallBody))
+		req.Header.Set("Content-Type", "application/json")
+		if i == 0 {
+			req.Header.Set("Authorization", "bearer "+tok)
+		} else {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		rec := httptest.NewRecorder()
+		proxy.handleMessage(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for valid ingress key, got %d (%s)", rec.Code, rec.Body.String())
+		}
 	}
 }

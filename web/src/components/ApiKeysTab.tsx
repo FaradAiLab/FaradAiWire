@@ -12,8 +12,10 @@ import {
   Layers,
   ArrowRight,
   Info,
+  Lock,
+  Terminal,
 } from 'lucide-react'
-import { ApiKeyItem, CreatedApiKey, GatewayStatus } from '../types'
+import { ApiKeyItem, CreatedApiKey, GatewayStatus, isAdminRole } from '../types'
 import { DEFAULT_INGRESS_PORT, normalizeBrowserIngressHost } from '../constants'
 import { api } from '../api'
 import { Badge } from './ui/Badge'
@@ -102,7 +104,7 @@ export const ApiKeysTab: React.FC = () => {
     try {
       setIsCreating(true)
       setError(null)
-      const res = await api.createApiKey(keyName.trim(), selectedAgent, 'Developer')
+      const res = await api.createApiKey(keyName.trim(), selectedAgent, 'Agent')
       setCreatedKey(res)
       setKeyName('')
       setSelectedAgent('*')
@@ -137,7 +139,7 @@ export const ApiKeysTab: React.FC = () => {
     (keyItem: ApiKeyItem) => {
       setClientModal({
         isOpen: true,
-        token: keyItem.raw_key || keyItem.key_prefix || '',
+        token: keyItem.raw_key || '',
         keyName: keyItem.name,
         agentName: keyItem.agent_name || '*',
       })
@@ -148,6 +150,18 @@ export const ApiKeysTab: React.FC = () => {
   const ingressPort = gatewayStatus?.ingress_port || DEFAULT_INGRESS_PORT
   const ingressHost = normalizeBrowserIngressHost(gatewayStatus?.ingress_host)
   const allowStdio = gatewayStatus?.allow_stdio !== false
+
+  const activeAdminKeys = useMemo(
+    () => keys.filter((k) => isAdminRole(k.role) && !k.revoked),
+    [keys]
+  )
+  const ingressKeys = useMemo(
+    () => keys.filter((k) => !isAdminRole(k.role)),
+    [keys]
+  )
+  const adminRotateCmd = allowStdio
+    ? 'faradaiwire token --rotate'
+    : 'docker exec -it <container_name> faradaiwire token --rotate'
 
   // The unmasked token of the newly created key (fallback gracefully)
   const resolvedCreatedToken = useMemo(() => {
@@ -190,6 +204,68 @@ export const ApiKeysTab: React.FC = () => {
         </div>
       )}
 
+      {/* Read-Only Admin Console Master Key Card (CLI-Only Lifecycle) */}
+      {activeAdminKeys.length > 0 && (
+        <div className="bg-surface border border-subtle border-l-4 border-l-amber-500 rounded-2xl p-5 shadow-xs space-y-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400">
+                <Lock className="w-4 h-4 shrink-0" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-primary flex items-center gap-2">
+                  <span>Admin Console Master Key</span>
+                  <Badge variant="amber" size="sm">
+                    Admin (CLI-Only)
+                  </Badge>
+                </h3>
+                <p className="text-xs text-muted mt-0.5">
+                  Authorizes Admin Console (<span className="font-mono">:19415</span>) only. Rejected on MCP Ingress (<span className="font-mono">:{ingressPort}</span>). Raw secrets are never transmitted over HTTP.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            {activeAdminKeys.map((adminKey) => {
+              const maskedPrefix = `${adminKey.prefix || adminKey.key_prefix || 'faw_live_'}••••••••`
+              return (
+                <div
+                  key={adminKey.id}
+                  className="flex flex-wrap items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl bg-surface-elevated/50 border border-subtle text-xs"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="font-semibold text-primary">{adminKey.name}</span>
+                    <code className="font-mono text-amber-700 dark:text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                      {maskedPrefix}
+                    </code>
+                  </div>
+                  <div className="flex items-center gap-3 text-[11px] text-muted">
+                    <span>
+                      Created {adminKey.created_at ? new Date(adminKey.created_at).toLocaleDateString() : 'N/A'}
+                    </span>
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                      Active
+                    </span>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="flex items-center gap-2 text-[11px] text-muted pt-1">
+            <Terminal className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+            <span>
+              Recover or rotate via CLI:{' '}
+              <code className="font-mono text-primary bg-surface-elevated px-1.5 py-0.5 rounded border border-subtle">
+                {adminRotateCmd}
+              </code>
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* API Keys Table */}
       <div className="bg-surface border border-subtle rounded-2xl overflow-hidden shadow-xs">
         <div className="overflow-x-auto">
@@ -205,13 +281,13 @@ export const ApiKeysTab: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-subtle font-mono text-primary text-xs">
-              {loading && keys.length === 0 ? (
+              {loading && ingressKeys.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-8 text-center text-muted">
                     Loading API keys...
                   </td>
                 </tr>
-              ) : keys.length === 0 ? (
+              ) : ingressKeys.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-8 text-center text-muted">
                     No ingress API keys configured. Click &apos;Generate Ingress Key&apos; to connect
@@ -219,14 +295,15 @@ export const ApiKeysTab: React.FC = () => {
                   </td>
                 </tr>
               ) : (
-                keys.map((k) => {
+                ingressKeys.map((k) => {
                   const isVisible = visibleKeyIds.has(k.id)
                   const hasRaw = Boolean(k.raw_key)
+                  const keyPrefix = k.prefix || k.key_prefix || 'faw_live_'
                   const tokenText = hasRaw
                     ? isVisible
                       ? k.raw_key!
-                      : `${k.key_prefix || 'faw_live_'}••••••••`
-                    : `${k.key_prefix || 'faw_live_'}••••••`
+                      : `${keyPrefix}••••••••`
+                    : `${keyPrefix}••••••••`
 
                   return (
                     <tr key={k.id} className="hover:bg-surface/50 transition-colors">
@@ -371,10 +448,10 @@ export const ApiKeysTab: React.FC = () => {
           <button
             type="button"
             onClick={() => {
-              const activeKey = keys.find((k) => !k.revoked)
+              const activeKey = ingressKeys.find((k) => !k.revoked && Boolean(k.raw_key))
               setClientModal({
                 isOpen: true,
-                token: activeKey?.raw_key || activeKey?.key_prefix || '',
+                token: activeKey?.raw_key || '',
                 keyName: activeKey?.name || 'Default Key',
                 agentName: activeKey?.agent_name || '*',
               })
@@ -481,6 +558,14 @@ export const ApiKeysTab: React.FC = () => {
                         : `Key is dedicated to '${selectedAgent}'. Requests to root /sse automatically route to '${selectedAgent}'.`}
                     </span>
                   </p>
+                </div>
+
+                {/* Fixed Ingress Role Indicator */}
+                <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-surface-elevated/60 border border-subtle text-xs">
+                  <span className="font-semibold text-primary">Assigned Role</span>
+                  <Badge variant="cyan" size="sm">
+                    Agent (MCP Ingress Only)
+                  </Badge>
                 </div>
 
                 {/* Form Buttons */}

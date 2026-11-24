@@ -190,3 +190,103 @@ func TestCLI_TokenCommand_RecoversBootstrapAdminKeyAndMagicLink(t *testing.T) {
 		t.Fatalf("did not expect port hint when --port override is provided:\n%s", stdout.String())
 	}
 }
+
+func TestPrintStartupBanner_IgnoresLegacyAPIKeyEnv(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tempHome)
+	t.Setenv("FARADAI_WIRE_API_KEY", "faw_live_env_should_never_be_shown_in_banner")
+
+	ks, err := auth.NewFileKeyStore(filepath.Join(tempHome, "keys", "api_keys.json"))
+	if err != nil {
+		t.Fatalf("NewFileKeyStore: %v", err)
+	}
+	rawKey, _, err := ks.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	cfg := &config.Config{
+		RuntimeMode: config.RuntimeModeStandalone,
+		ListenHost:  "127.0.0.1",
+		ListenPort:  19410,
+		AdminHost:   "127.0.0.1",
+		AdminPort:   19415,
+	}
+
+	var buf strings.Builder
+	printStartupBanner(cfg, &buf)
+	out := buf.String()
+
+	if strings.Contains(out, "faw_live_env") {
+		t.Fatalf("startup banner must ignore FARADAI_WIRE_API_KEY env var:\n%s", out)
+	}
+	if !strings.Contains(out, auth.MaskTokenPrefix(rawKey)) {
+		t.Fatalf("expected keystore Admin masked prefix %q in banner:\n%s", auth.MaskTokenPrefix(rawKey), out)
+	}
+}
+
+func TestCLI_TokenCommand_RotateAtomicallyReplacesAdminKey(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tempHome)
+	keysPath := filepath.Join(tempHome, "keys", "api_keys.json")
+
+	ks, err := auth.NewFileKeyStore(keysPath)
+	if err != nil {
+		t.Fatalf("NewFileKeyStore: %v", err)
+	}
+	oldAdmin, _, err := ks.GenerateKey("bootstrap-admin", auth.DefaultAdminRole, "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Admin): %v", err)
+	}
+	agentKey, _, err := ks.GenerateKey("cursor-agent", auth.DefaultIngressRole, "cursor")
+	if err != nil {
+		t.Fatalf("GenerateKey(Agent): %v", err)
+	}
+
+	// 1. Rotate with --json
+	var stdout, stderr bytes.Buffer
+	code := runCLI([]string{"token", "--rotate", "--json"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("faradaiwire token --rotate --json exited %d (stderr=%s stdout=%s)", code, stderr.String(), stdout.String())
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal json: %v (%s)", err, stdout.String())
+	}
+	rotated1 := payload["api_key"]
+	if rotated1 == "" || rotated1 == oldAdmin {
+		t.Fatalf("expected fresh rotated admin key, got %q (old=%q)", rotated1, oldAdmin)
+	}
+	if payload["role"] != auth.DefaultAdminRole || !strings.Contains(payload["magic_link"], "?token="+rotated1) {
+		t.Fatalf("unexpected rotated JSON payload: %+v", payload)
+	}
+
+	reloaded, err := auth.NewFileKeyStore(keysPath)
+	if err != nil {
+		t.Fatalf("reload keystore: %v", err)
+	}
+	if _, ok := reloaded.ValidateKeyWithoutUsage(oldAdmin); ok {
+		t.Error("old admin key must be revoked after --rotate")
+	}
+	if _, ok := reloaded.ValidateKeyWithoutUsage(rotated1); !ok {
+		t.Error("new rotated admin key must be active after --rotate")
+	}
+	if _, ok := reloaded.ValidateKeyWithoutUsage(agentKey); !ok {
+		t.Error("existing Agent key must remain active after admin --rotate")
+	}
+
+	// 2. Rotate again in human-readable text mode
+	stdout.Reset()
+	stderr.Reset()
+	code = runCLI([]string{"token", "--rotate"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("faradaiwire token --rotate exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, rotated1) {
+		t.Fatalf("expected second --rotate to produce a new key, still saw %q", rotated1)
+	}
+	if !strings.Contains(out, "Magic Link") || !strings.Contains(out, "/admin/dashboard?token=faw_live_") {
+		t.Fatalf("expected Magic Link in rotated text output:\n%s", out)
+	}
+}
