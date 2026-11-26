@@ -112,7 +112,7 @@ func (a *AdminServer) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	auditLogPath := cfg.AuditLog.Path
+	auditLogPath := cfg.GetAuditLogPath()
 	segments, segErr := logger.ListAuditSegmentsDesc(auditLogPath)
 	if segErr != nil || len(segments) == 0 {
 		slog.WarnContext(r.Context(), "Failed to open fallback audit log file", slog.String("path", auditLogPath))

@@ -92,7 +92,6 @@ func TestBuilder_Build_ProtocolStore_InUseIntegrity(t *testing.T) {
 
 	enabled := false
 	cfg := &config.Config{
-		RuntimeMode:  config.RuntimeModeStandalone,
 		Mode:         "sse",
 		ListenPort:   8080,
 		AdminPort:    9090,
@@ -171,11 +170,10 @@ func TestBuilder_Build_BootstrapsAdminKeyAndDefaultProfile(t *testing.T) {
 	allowStdio := false
 	enabled := false
 	cfg := &config.Config{
-		AllowStdio:  &allowStdio,
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  19491,
-		AdminPort:   19496,
+		AllowStdio: &allowStdio,
+		Mode:       "sse",
+		ListenPort: 19491,
+		AdminPort:  19496,
 		Telemetry: config.TelemetryConfig{
 			Enabled: &enabled,
 			DBPath:  ":memory:",
@@ -211,11 +209,10 @@ func TestBuilder_Build_ToolDispatcherBlocksCloudMetadataSSRF(t *testing.T) {
 	allowStdio := false
 	enabled := false
 	cfg := &config.Config{
-		AllowStdio:  &allowStdio,
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  19492,
-		AdminPort:   19497,
+		AllowStdio: &allowStdio,
+		Mode:       "sse",
+		ListenPort: 19492,
+		AdminPort:  19497,
 		Telemetry: config.TelemetryConfig{
 			Enabled: &enabled,
 			DBPath:  ":memory:",

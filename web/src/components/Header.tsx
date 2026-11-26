@@ -23,13 +23,12 @@ export const Header: React.FC<HeaderProps> = ({
   onLockSession,
 }) => {
   const isOnline = status?.status === 'active' || status?.status === 'healthy' || status?.status?.toLowerCase() === 'ready'
-  const isManaged = status?.runtime_mode === 'MANAGED'
   const guardActive = isGuardActive(status)
   const versionBadge = status?.version
     ? `${status.version.startsWith('v') ? status.version : `v${status.version}`} Core`
     : 'Core'
 
-  const runtimeLabel = isManaged ? 'Enterprise Managed' : 'Standalone Core (Zero-Egress)'
+  const runtimeLabel = 'Standalone Core (Zero-Egress)'
 
   return (
     <header className="border-b border-gray-200 dark:border-white/10 bg-white/90 dark:bg-dark-bg/80 backdrop-blur-md sticky top-0 z-50 px-4 sm:px-6 py-3.5 flex flex-wrap items-center justify-between gap-3 transition-colors">

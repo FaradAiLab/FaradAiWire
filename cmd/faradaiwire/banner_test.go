@@ -13,16 +13,15 @@ import (
 
 func TestPrintStartupBanner_Standby(t *testing.T) {
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		ListenHost:  "0.0.0.0",
-		ListenPort:  19410,
-		AdminHost:   "127.0.0.1",
-		AdminPort:   19415,
+		ListenHost: "0.0.0.0",
+		ListenPort: 19410,
+		AdminHost:  "127.0.0.1",
+		AdminPort:  19415,
 	}
 	cfg.Filters.DLP.Enabled = true
 	cfg.Filters.LoopProtection.Enabled = true
-	cfg.Filters.InjectionScanner.Enabled = true
-	cfg.Filters.InjectionScanner.ClassifierURL = ""
+	cfg.Filters.Guard.Enabled = true
+	cfg.Filters.Guard.Discovery.CustomURL = ""
 
 	var buf strings.Builder
 	printStartupBanner(cfg, &buf)
@@ -53,12 +52,11 @@ func TestPrintStartupBanner_Standby(t *testing.T) {
 
 func TestPrintStartupBanner_Disabled(t *testing.T) {
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		ListenHost:  "127.0.0.1",
-		ListenPort:  8090,
-		AdminPort:   8095,
+		ListenHost: "127.0.0.1",
+		ListenPort: 8090,
+		AdminPort:  8095,
 	}
-	cfg.Filters.InjectionScanner.Enabled = false
+	cfg.Filters.Guard.Enabled = false
 
 	var buf strings.Builder
 	printStartupBanner(cfg, &buf)
@@ -98,12 +96,11 @@ func TestPrintStartupBanner_ZeroBleedTokenMasking(t *testing.T) {
 
 	allowStdio := false
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		AllowStdio:  &allowStdio,
-		ListenHost:  "0.0.0.0",
-		ListenPort:  19410,
-		AdminHost:   "0.0.0.0",
-		AdminPort:   19415,
+		AllowStdio: &allowStdio,
+		ListenHost: "0.0.0.0",
+		ListenPort: 19410,
+		AdminHost:  "0.0.0.0",
+		AdminPort:  19415,
 	}
 
 	var buf strings.Builder
@@ -206,11 +203,10 @@ func TestPrintStartupBanner_IgnoresLegacyAPIKeyEnv(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		ListenHost:  "127.0.0.1",
-		ListenPort:  19410,
-		AdminHost:   "127.0.0.1",
-		AdminPort:   19415,
+		ListenHost: "127.0.0.1",
+		ListenPort: 19410,
+		AdminHost:  "127.0.0.1",
+		AdminPort:  19415,
 	}
 
 	var buf strings.Builder

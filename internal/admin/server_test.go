@@ -22,6 +22,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/mcpprobe"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
 	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 	"github.com/FaradAiLab/FaradAiWire/web"
@@ -29,7 +30,6 @@ import (
 
 func TestAdminEndpoints_ZeroAuth_Standalone(t *testing.T) {
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
 		Filters: config.FiltersConfig{
 			SchemaValidation: config.SchemaValidationConfig{
 				SchemasDir: t.TempDir(),
@@ -93,204 +93,40 @@ func TestAdminServer_StrictLoopbackBinding(t *testing.T) {
 		}
 	})
 
-	t.Run("Standalone ignores ListenHost 0.0.0.0 and enforces 127.0.0.1", func(t *testing.T) {
+	t.Run("Admin ignores ListenHost 0.0.0.0 and enforces 127.0.0.1", func(t *testing.T) {
 		cfg := &config.Config{
-			AdminPort:   8095,
-			ListenHost:  "0.0.0.0",
-			RuntimeMode: config.RuntimeModeStandalone,
+			AdminPort:  8095,
+			ListenHost: "0.0.0.0",
 		}
 		server := NewAdminServer(AdminDependencies{Config: cfg})
 		addr := server.ListenAddr()
 		if addr != "127.0.0.1:8095" {
-			t.Fatalf("expected standalone mode to enforce 127.0.0.1:8095 even with 0.0.0.0 configured, got %s", addr)
+			t.Fatalf("expected default admin host to enforce 127.0.0.1:8095 even with ListenHost 0.0.0.0, got %s", addr)
 		}
 	})
 
-	t.Run("Managed mode allows configured host", func(t *testing.T) {
+	t.Run("Explicit AdminHost overrides default loopback", func(t *testing.T) {
 		cfg := &config.Config{
-			AdminPort:   8095,
-			ListenHost:  "192.168.1.100",
-			RuntimeMode: config.RuntimeModeManaged,
-		}
-		server := NewAdminServer(AdminDependencies{Config: cfg})
-		addr := server.ListenAddr()
-		if addr != "192.168.1.100:8095" {
-			t.Fatalf("expected managed mode to allow configured host 192.168.1.100:8095, got %s", addr)
-		}
-	})
-
-	t.Run("Explicit AdminHost overrides standalone loopback enforcement", func(t *testing.T) {
-		cfg := &config.Config{
-			AdminPort:   19415,
-			ListenHost:  "127.0.0.1",
-			AdminHost:   "0.0.0.0",
-			RuntimeMode: config.RuntimeModeStandalone,
+			AdminPort:  19415,
+			ListenHost: "127.0.0.1",
+			AdminHost:  "0.0.0.0",
 		}
 		server := NewAdminServer(AdminDependencies{Config: cfg})
 		addr := server.ListenAddr()
 		if addr != "0.0.0.0:19415" {
-			t.Fatalf("expected explicit AdminHost 0.0.0.0:19415 in standalone mode, got %s", addr)
+			t.Fatalf("expected explicit AdminHost 0.0.0.0:19415, got %s", addr)
 		}
 	})
 
-	t.Run("FARADAI_WIRE_ADMIN_HOST env enables explicit binding in standalone mode", func(t *testing.T) {
+	t.Run("FARADAI_WIRE_ADMIN_HOST env enables explicit binding", func(t *testing.T) {
 		t.Setenv("FARADAI_WIRE_ADMIN_HOST", "0.0.0.0")
 		cfg := &config.Config{
-			AdminPort:   19415,
-			RuntimeMode: config.RuntimeModeStandalone,
+			AdminPort: 19415,
 		}
 		server := NewAdminServer(AdminDependencies{Config: cfg})
 		addr := server.ListenAddr()
 		if addr != "0.0.0.0:19415" {
 			t.Fatalf("expected FARADAI_WIRE_ADMIN_HOST to bind 0.0.0.0:19415, got %s", addr)
-		}
-	})
-}
-
-func TestAdminServer_MutationGuard_ManagedMode(t *testing.T) {
-	mutatingEndpoints := []struct {
-		name   string
-		method string
-		path   string
-		body   string
-	}{
-		{
-			name:   "Config toggle",
-			method: http.MethodPost,
-			path:   "/admin/config/toggle",
-			body:   `{"filter_name":"sql_injection","enabled":false}`,
-		},
-		{
-			name:   "Clear schemas",
-			method: http.MethodPost,
-			path:   "/admin/schemas/clear",
-			body:   `{}`,
-		},
-		{
-			name:   "Configure AI Guard",
-			method: http.MethodPost,
-			path:   "/admin/guards/configure",
-			body:   `{"primary_endpoint":"http://localhost:11434"}`,
-		},
-		{
-			name:   "Sync tools",
-			method: http.MethodPost,
-			path:   "/admin/agents/sync-tools",
-			body:   `{"tools":[]}`,
-		},
-		{
-			name:   "Rollback agent",
-			method: http.MethodPost,
-			path:   "/admin/agents/rollback",
-			body:   `{"agent":"default","timestamp":"20260101"}`,
-		},
-		{
-			name:   "Create API key",
-			method: http.MethodPost,
-			path:   "/admin/api-keys",
-			body:   `{"name":"test-key","role":"Developer"}`,
-		},
-		{
-			name:   "Revoke API key",
-			method: http.MethodDelete,
-			path:   "/admin/api-keys/key-1",
-		},
-		{
-			name:   "Activate guard model",
-			method: http.MethodPost,
-			path:   "/admin/guards/models/qwen3guard/activate",
-			body:   `{}`,
-		},
-		{
-			name:   "Update guard model policy",
-			method: http.MethodPost,
-			path:   "/admin/guards/models/qwen3guard/policy",
-			body:   `{"default_action":"hitl"}`,
-		},
-		{
-			name:   "Pin tool schema",
-			method: http.MethodPost,
-			path:   "/admin/schemas/tavily__search/pin",
-			body:   `{"pinned":true}`,
-		},
-		{
-			name:   "Create DLP rule",
-			method: http.MethodPost,
-			path:   "/admin/dlp/rules",
-			body:   `{"id":"r1","name":"R1"}`,
-		},
-		{
-			name:   "Create policy pack",
-			method: http.MethodPost,
-			path:   "/admin/policy-packs",
-			body:   `{"id":"pack1","name":"Pack 1"}`,
-		},
-		{
-			name:   "Update agent DLP",
-			method: http.MethodPut,
-			path:   "/admin/agents/default/dlp",
-			body:   `{}`,
-		},
-		{
-			name:   "Create protocol",
-			method: http.MethodPost,
-			path:   "/admin/protocols",
-			body:   `{"id":"p1","name":"P1","type":"stdio","command":"echo"}`,
-		},
-		{
-			name:   "Create agent",
-			method: http.MethodPost,
-			path:   "/admin/agents",
-			body:   `{"agent_name":"a1"}`,
-		},
-	}
-
-	t.Run("Managed mode blocks mutations with 403 Forbidden", func(t *testing.T) {
-		cfg := &config.Config{
-			RuntimeMode: config.RuntimeModeManaged,
-		}
-		server := NewAdminServer(AdminDependencies{Config: cfg})
-		handler := server.Handler()
-
-		for _, ep := range mutatingEndpoints {
-			t.Run(ep.name, func(t *testing.T) {
-				req := httptest.NewRequest(ep.method, ep.path, bytes.NewBufferString(ep.body))
-				req.Header.Set("Content-Type", "application/json")
-				rec := httptest.NewRecorder()
-				handler.ServeHTTP(rec, req)
-
-				if rec.Code != http.StatusForbidden {
-					t.Fatalf("expected 403 Forbidden for mutating endpoint %s in managed mode, got %d", ep.path, rec.Code)
-				}
-
-				var resp map[string]string
-				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if resp["error"] != "FORBIDDEN_MANAGED_MODE" {
-					t.Fatalf("expected error FORBIDDEN_MANAGED_MODE, got %s", resp["error"])
-				}
-			})
-		}
-	})
-
-	t.Run("Standalone mode allows mutating endpoints past mutation guard", func(t *testing.T) {
-		cfg := &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
-		}
-		server := NewAdminServer(AdminDependencies{
-			Config:          cfg,
-			SchemaClearFunc: func() {},
-		})
-		handler := server.Handler()
-
-		// Testing schemas/clear in standalone should return 200 OK
-		req := httptest.NewRequest(http.MethodPost, "/admin/schemas/clear", bytes.NewBufferString(`{}`))
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK in standalone mode, got %d (body: %s)", rec.Code, rec.Body.String())
 		}
 	})
 }
@@ -516,7 +352,7 @@ func (m *mockTelemetryReader) GetAuditLogByID(ctx context.Context, id string) (*
 }
 
 func TestAdminServer_AuditLogDetail(t *testing.T) {
-	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	cfg := &config.Config{}
 	server := NewAdminServer(AdminDependencies{
 		Config: cfg,
 		TelemetryEngine: &mockTelemetryReader{
@@ -555,9 +391,7 @@ func TestAdminServer_AuditLogDetail(t *testing.T) {
 }
 
 func TestAdminServer_AuditLogs_DuckDB(t *testing.T) {
-	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-	}
+	cfg := &config.Config{}
 	mockReader := &mockTelemetryReader{
 		result: &duckdb.QueryResult{
 			Total:  10,
@@ -800,11 +634,9 @@ func TestAdminServer_AgentEndpoints_RepositoryMediation(t *testing.T) {
 }
 
 func TestAdmin_GuardProbe_And_Configure(t *testing.T) {
-	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-	}
-	cfg.Filters.InjectionScanner.Enabled = true
-	cfg.Filters.InjectionScanner.ClassifierURL = ""
+	cfg := &config.Config{}
+	cfg.Filters.Guard.Enabled = true
+	cfg.Filters.Guard.Discovery.CustomURL = ""
 
 	reloaded := false
 	server := NewAdminServer(AdminDependencies{
@@ -861,10 +693,10 @@ func TestAdmin_GuardProbe_And_Configure(t *testing.T) {
 
 	// 3. Verify POST /admin/guards/configure updates config and triggers reload
 	cfgBody, _ := json.Marshal(map[string]interface{}{
-		"classifier_url": "http://localhost:8088/predict",
-		"mode":           "docker",
-		"docker_url":     "http://localhost:8088",
-		"ollama_url":     "http://localhost:11434",
+		"custom_url": "http://localhost:8088/predict",
+		"mode":       "docker",
+		"docker_url": "http://localhost:8088",
+		"ollama_url": "http://localhost:11434",
 	})
 	reqCfg := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", bytes.NewReader(cfgBody))
 	recCfg := httptest.NewRecorder()
@@ -880,8 +712,8 @@ func TestAdmin_GuardProbe_And_Configure(t *testing.T) {
 	if srvCfg == nil {
 		t.Fatalf("expected server.Config() to be non-nil")
 	}
-	if srvCfg.Filters.InjectionScanner.ClassifierURL != "http://localhost:8088/predict" {
-		t.Errorf("expected classifier_url updated in server config, got %s", srvCfg.Filters.InjectionScanner.ClassifierURL)
+	if srvCfg.Filters.Guard.Discovery.CustomURL != "http://localhost:8088/predict" {
+		t.Errorf("expected custom_url updated in server config, got %s", srvCfg.Filters.Guard.Discovery.CustomURL)
 	}
 	if srvCfg.Filters.Guard.Discovery.Mode != "docker" {
 		t.Errorf("expected discovery mode 'docker', got %s", srvCfg.Filters.Guard.Discovery.Mode)
@@ -889,8 +721,8 @@ func TestAdmin_GuardProbe_And_Configure(t *testing.T) {
 	if srvCfg.Filters.Guard.Discovery.DockerURL != "http://localhost:8088" {
 		t.Errorf("expected discovery docker_url updated, got %s", srvCfg.Filters.Guard.Discovery.DockerURL)
 	}
-	if cfg.Filters.InjectionScanner.ClassifierURL != "" {
-		t.Errorf("expected original cfg pointer not to be mutated in-place, got %s", cfg.Filters.InjectionScanner.ClassifierURL)
+	if cfg.Filters.Guard.Discovery.CustomURL != "" {
+		t.Errorf("expected original cfg pointer not to be mutated in-place, got %s", cfg.Filters.Guard.Discovery.CustomURL)
 	}
 
 	// 4. Verify /admin/status reflects neural_active tier after configuration
@@ -904,16 +736,14 @@ func TestAdmin_GuardProbe_And_Configure(t *testing.T) {
 	if guardStatus2["tier"] != "neural_active" {
 		t.Errorf("expected tier=neural_active, got %v", guardStatus2["tier"])
 	}
-	if guardStatus2["classifier_url"] != "http://localhost:8088/predict" {
-		t.Errorf("expected classifier_url in status, got %v", guardStatus2["classifier_url"])
+	if guardStatus2["custom_url"] != "http://localhost:8088/predict" {
+		t.Errorf("expected custom_url in status, got %v", guardStatus2["custom_url"])
 	}
 }
 
 func TestAdmin_Guard_SecurityGuardrails(t *testing.T) {
-	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-	}
-	cfg.Filters.InjectionScanner.Enabled = true
+	cfg := &config.Config{}
+	cfg.Filters.Guard.Enabled = true
 	server := NewAdminServer(AdminDependencies{
 		Config:     cfg,
 		ReloadFunc: func() error { return nil },
@@ -922,7 +752,7 @@ func TestAdmin_Guard_SecurityGuardrails(t *testing.T) {
 
 	// 1. Rejection of Cloud Metadata (169.254.169.254) in configure
 	metaBody, _ := json.Marshal(map[string]interface{}{
-		"classifier_url": "http://169.254.169.254/latest/meta-data/",
+		"custom_url": "http://169.254.169.254/latest/meta-data/",
 	})
 	reqMeta := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", bytes.NewReader(metaBody))
 	recMeta := httptest.NewRecorder()
@@ -941,7 +771,7 @@ func TestAdmin_Guard_SecurityGuardrails(t *testing.T) {
 
 	// 3. Acceptance of loopback and LAN endpoints in configure
 	lanBody, _ := json.Marshal(map[string]interface{}{
-		"classifier_url": "http://192.168.1.150:11434",
+		"custom_url": "http://192.168.1.150:11434",
 	})
 	reqLan := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", bytes.NewReader(lanBody))
 	recLan := httptest.NewRecorder()
@@ -952,7 +782,7 @@ func TestAdmin_Guard_SecurityGuardrails(t *testing.T) {
 
 	// 4. Verification of credential redaction in /admin/status
 	authBody, _ := json.Marshal(map[string]interface{}{
-		"classifier_url": "http://admin:secretPass123@127.0.0.1:8088/predict",
+		"custom_url": "http://admin:secretPass123@127.0.0.1:8088/predict",
 	})
 	reqAuth := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", bytes.NewReader(authBody))
 	recAuth := httptest.NewRecorder()
@@ -967,7 +797,7 @@ func TestAdmin_Guard_SecurityGuardrails(t *testing.T) {
 	var statusMap map[string]interface{}
 	json.NewDecoder(recStatus.Body).Decode(&statusMap)
 	guardMap := statusMap["guard_status"].(map[string]interface{})
-	maskedURL, _ := guardMap["classifier_url"].(string)
+	maskedURL, _ := guardMap["custom_url"].(string)
 
 	if strings.Contains(maskedURL, "secretPass123") {
 		t.Errorf("expected password to be redacted in status output, got %s", maskedURL)
@@ -1050,9 +880,7 @@ func TestAdminServer_StaticAssetsAndCSP(t *testing.T) {
 }
 
 func TestAdminServer_ConfigToggle_AllFilters(t *testing.T) {
-	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-	}
+	cfg := &config.Config{}
 	server := NewAdminServer(AdminDependencies{Config: cfg})
 	handler := server.Handler()
 
@@ -1105,9 +933,7 @@ func TestAdminServer_ConfigToggle_AllFilters(t *testing.T) {
 }
 
 func TestAdminServer_Status_ActiveFilters_ExactCountAndNoDuplicates(t *testing.T) {
-	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-	}
+	cfg := &config.Config{}
 	cfg.Filters.PrefillBlock.Enabled = true
 	cfg.Filters.RateLimiting.Enabled = true
 	cfg.Filters.LoopProtection.Enabled = true
@@ -1337,27 +1163,27 @@ func TestHandleGuardConfigure_ValidatesAllGuardURLs(t *testing.T) {
 
 	t.Run("redacts credentials in response and does not mutate cfg on reload failure", func(t *testing.T) {
 		cfg := &config.Config{}
-		cfg.Filters.InjectionScanner.ClassifierURL = "http://127.0.0.1:8088/predict"
+		cfg.Filters.Guard.Discovery.CustomURL = "http://127.0.0.1:8088/predict"
 		failSrv := NewAdminServer(AdminDependencies{
 			Config:     cfg,
 			ReloadFunc: func() error { return errors.New("reload boom") },
 		})
-		failReq := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(`{"classifier_url":"http://admin:secret@127.0.0.1:9000/predict"}`))
+		failReq := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(`{"custom_url":"http://admin:secret@127.0.0.1:9000/predict"}`))
 		failReq.Header.Set("Content-Type", "application/json")
 		failRec := httptest.NewRecorder()
 		failSrv.Handler().ServeHTTP(failRec, failReq)
 		if failRec.Code != http.StatusInternalServerError {
 			t.Fatalf("expected 500 on reload failure, got %d", failRec.Code)
 		}
-		if cfg.Filters.InjectionScanner.ClassifierURL != "http://127.0.0.1:8088/predict" {
-			t.Fatalf("expected cfg to remain unchanged on reload failure, got %q", cfg.Filters.InjectionScanner.ClassifierURL)
+		if cfg.Filters.Guard.Discovery.CustomURL != "http://127.0.0.1:8088/predict" {
+			t.Fatalf("expected cfg to remain unchanged on reload failure, got %q", cfg.Filters.Guard.Discovery.CustomURL)
 		}
 
 		okSrv := NewAdminServer(AdminDependencies{
 			Config:     &config.Config{},
 			ReloadFunc: func() error { return nil },
 		})
-		okReq := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(`{"classifier_url":"http://admin:secret@127.0.0.1:9000/predict"}`))
+		okReq := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(`{"custom_url":"http://admin:secret@127.0.0.1:9000/predict"}`))
 		okReq.Header.Set("Content-Type", "application/json")
 		okRec := httptest.NewRecorder()
 		okSrv.Handler().ServeHTTP(okRec, okReq)
@@ -1371,13 +1197,18 @@ func TestHandleGuardConfigure_ValidatesAllGuardURLs(t *testing.T) {
 }
 
 func TestHandleGuardConfigure_LifecycleAndConcurrency(t *testing.T) {
-	t.Run("live SetReloadConfigFunc swaps config without origCfg overwrite", func(t *testing.T) {
-		origCfg := &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
-		}
-		origCfg.Filters.InjectionScanner.ClassifierURL = "http://127.0.0.1:8088/predict"
+	t.Run("live SetReloadConfigFunc swaps config without origCfg overwrite or disk write", func(t *testing.T) {
+		origCfg := &config.Config{}
+		origCfg.Filters.Guard.Discovery.CustomURL = "http://127.0.0.1:8088/predict"
 
-		cfgProvider := config.NewYAMLConfigProvider(filepath.Join(t.TempDir(), "config.yaml"))
+		cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+		origYAML := "listen_port: 19410\nfilters:\n  guard:\n    enabled: true\n"
+		if err := os.WriteFile(cfgPath, []byte(origYAML), 0444); err != nil {
+			t.Fatalf("seed read-only config: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(cfgPath, 0644) })
+		cfgProvider := config.NewYAMLConfigProvider(cfgPath)
+
 		var reloadedCfg *config.Config
 		var srv *AdminServer
 		srv = NewAdminServer(AdminDependencies{
@@ -1391,7 +1222,7 @@ func TestHandleGuardConfigure_LifecycleAndConcurrency(t *testing.T) {
 		})
 		oldClient := srv.SafeHTTPClient()
 
-		body := `{"mode":"docker","docker_url":"http://127.0.0.1:18088","classifier_url":"http://127.0.0.1:18088/predict"}`
+		body := `{"mode":"docker","docker_url":"http://127.0.0.1:18088","custom_url":"http://127.0.0.1:18088/predict"}`
 		req := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
@@ -1406,40 +1237,48 @@ func TestHandleGuardConfigure_LifecycleAndConcurrency(t *testing.T) {
 		if srv.Config() != reloadedCfg || srv.Config() == origCfg {
 			t.Fatalf("expected server.Config() to point to reloaded nextCfg and not origCfg")
 		}
-		if origCfg.Filters.InjectionScanner.ClassifierURL != "http://127.0.0.1:8088/predict" {
-			t.Fatalf("expected origCfg not to be mutated in-place, got %q", origCfg.Filters.InjectionScanner.ClassifierURL)
+		if origCfg.Filters.Guard.Discovery.CustomURL != "http://127.0.0.1:8088/predict" {
+			t.Fatalf("expected origCfg not to be mutated in-place, got %q", origCfg.Filters.Guard.Discovery.CustomURL)
 		}
 		if srv.SafeHTTPClient() == oldClient {
 			t.Fatalf("expected SetConfig to invalidate cached safeHTTPClient")
 		}
 
-		persisted, err := cfgProvider.Load()
+		afterYAML, err := os.ReadFile(cfgPath)
 		if err != nil {
-			t.Fatalf("expected config saved after reload, load failed: %v", err)
+			t.Fatalf("read config.yaml: %v", err)
 		}
-		if persisted.Filters.InjectionScanner.ClassifierURL != "http://127.0.0.1:18088/predict" {
-			t.Fatalf("expected persisted classifier_url updated, got %q", persisted.Filters.InjectionScanner.ClassifierURL)
+		if string(afterYAML) != origYAML {
+			t.Fatalf("expected read-only config.yaml untouched, got %q", string(afterYAML))
 		}
 	})
 
-	t.Run("reload failure skips disk save when using SetReloadConfigFunc", func(t *testing.T) {
-		origCfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
-		origCfg.Filters.InjectionScanner.ClassifierURL = "http://127.0.0.1:8088/predict"
-
-		cfgProvider := config.NewYAMLConfigProvider(filepath.Join(t.TempDir(), "config.yaml"))
-		if err := cfgProvider.Save(origCfg); err != nil {
-			t.Fatalf("seed config: %v", err)
+	t.Run("reload failure rolls back DuckDB guard discovery overrides", func(t *testing.T) {
+		db, err := sql.Open("duckdb", ":memory:")
+		if err != nil {
+			t.Fatalf("open duckdb: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		sStore := settings.NewDuckDBStore(db)
+		if err := sStore.Migrate(context.Background()); err != nil {
+			t.Fatalf("migrate settings: %v", err)
+		}
+		if err := sStore.Set(context.Background(), settings.GuardDiscoveryCustomURLKey, "http://127.0.0.1:8088/predict"); err != nil {
+			t.Fatalf("seed prior override: %v", err)
 		}
 
+		origCfg := &config.Config{}
+		origCfg.Filters.Guard.Discovery.CustomURL = "http://127.0.0.1:8088/predict"
+
 		srv := NewAdminServer(AdminDependencies{
-			Config:         origCfg,
-			ConfigProvider: cfgProvider,
+			Config:        origCfg,
+			SettingsStore: sStore,
 			ReloadConfigFunc: func(*config.Config) error {
 				return errors.New("reload boom")
 			},
 		})
 
-		req := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(`{"classifier_url":"http://127.0.0.1:19000/predict"}`))
+		req := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(`{"mode":"custom","custom_url":"http://127.0.0.1:19000/predict"}`))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
@@ -1447,49 +1286,64 @@ func TestHandleGuardConfigure_LifecycleAndConcurrency(t *testing.T) {
 		if rec.Code != http.StatusInternalServerError {
 			t.Fatalf("expected 500 InternalServerError, got %d", rec.Code)
 		}
-		persisted, err := cfgProvider.Load()
-		if err != nil {
-			t.Fatalf("load persisted config: %v", err)
+		if strings.Contains(rec.Body.String(), "reload boom") {
+			t.Fatalf("expected 500 error body not to leak raw internal error details, got %s", rec.Body.String())
 		}
-		if persisted.Filters.InjectionScanner.ClassifierURL != "http://127.0.0.1:8088/predict" {
-			t.Fatalf("expected disk config unchanged after reload failure, got %q", persisted.Filters.InjectionScanner.ClassifierURL)
+		gotURL, ok, err := sStore.Get(context.Background(), settings.GuardDiscoveryCustomURLKey)
+		if err != nil || !ok || gotURL != "http://127.0.0.1:8088/predict" {
+			t.Fatalf("expected custom_url rolled back in DuckDB, got %q (ok=%v, err=%v)", gotURL, ok, err)
+		}
+		if _, modeExists, _ := sStore.Get(context.Background(), settings.GuardDiscoveryModeKey); modeExists {
+			t.Fatalf("expected newly inserted guard.discovery.mode key deleted on rollback")
 		}
 	})
 
-	t.Run("legacy reloadFunc failure rolls back disk save", func(t *testing.T) {
-		origCfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
-		origCfg.Filters.InjectionScanner.ClassifierURL = "http://127.0.0.1:8088/predict"
-
-		cfgProvider := config.NewYAMLConfigProvider(filepath.Join(t.TempDir(), "config.yaml"))
-		if err := cfgProvider.Save(origCfg); err != nil {
-			t.Fatalf("seed config: %v", err)
+	t.Run("switching back to auto clears previously configured custom_url", func(t *testing.T) {
+		db, err := sql.Open("duckdb", ":memory:")
+		if err != nil {
+			t.Fatalf("open duckdb: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		sStore := settings.NewDuckDBStore(db)
+		if err := sStore.Migrate(context.Background()); err != nil {
+			t.Fatalf("migrate settings: %v", err)
 		}
 
-		srv := NewAdminServer(AdminDependencies{
-			Config:         origCfg,
-			ConfigProvider: cfgProvider,
-			ReloadFunc:     func() error { return errors.New("legacy reload boom") },
+		origCfg := &config.Config{}
+		origCfg.Filters.Guard.Discovery.Mode = "custom"
+		origCfg.Filters.Guard.Discovery.CustomURL = "http://127.0.0.1:9000/predict"
+		if err := sStore.Set(context.Background(), settings.GuardDiscoveryCustomURLKey, "http://127.0.0.1:9000/predict"); err != nil {
+			t.Fatalf("seed custom url: %v", err)
+		}
+
+		var srv *AdminServer
+		srv = NewAdminServer(AdminDependencies{
+			Config:        origCfg,
+			SettingsStore: sStore,
+			ReloadConfigFunc: func(next *config.Config) error {
+				srv.SetConfig(next)
+				return nil
+			},
 		})
 
-		req := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(`{"classifier_url":"http://127.0.0.1:19000/predict"}`))
+		req := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(`{"mode":"auto","ollama_url":"http://127.0.0.1:11434","custom_url":""}`))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusInternalServerError {
-			t.Fatalf("expected 500 InternalServerError, got %d", rec.Code)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
 		}
-		persisted, err := cfgProvider.Load()
-		if err != nil {
-			t.Fatalf("load persisted config: %v", err)
+		if got := srv.Config().Filters.Guard.Discovery.CustomURL; got != "" {
+			t.Fatalf("expected in-memory CustomURL cleared, got %q", got)
 		}
-		if persisted.Filters.InjectionScanner.ClassifierURL != "http://127.0.0.1:8088/predict" {
-			t.Fatalf("expected disk config rolled back after legacy reload failure, got %q", persisted.Filters.InjectionScanner.ClassifierURL)
+		if gotURL, ok, err := sStore.Get(context.Background(), settings.GuardDiscoveryCustomURLKey); err != nil || !ok || gotURL != "" {
+			t.Fatalf("expected DuckDB custom_url cleared to empty string, got %q (ok=%v, err=%v)", gotURL, ok, err)
 		}
 	})
 
 	t.Run("concurrent readers and configures are race-free", func(t *testing.T) {
-		origCfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+		origCfg := &config.Config{}
 		var srv *AdminServer
 		srv = NewAdminServer(AdminDependencies{
 			Config: origCfg,
@@ -1512,7 +1366,7 @@ func TestHandleGuardConfigure_LifecycleAndConcurrency(t *testing.T) {
 					settingsRec := httptest.NewRecorder()
 					handler.ServeHTTP(settingsRec, httptest.NewRequest(http.MethodGet, "/admin/settings", nil))
 
-					body := fmt.Sprintf(`{"classifier_url":"http://127.0.0.1:%d/predict"}`, 18000+idx)
+					body := fmt.Sprintf(`{"custom_url":"http://127.0.0.1:%d/predict"}`, 18000+idx)
 					cfgReq := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(body))
 					cfgReq.Header.Set("Content-Type", "application/json")
 					cfgRec := httptest.NewRecorder()
@@ -1525,8 +1379,8 @@ func TestHandleGuardConfigure_LifecycleAndConcurrency(t *testing.T) {
 }
 
 func TestHandleGuardProbe_RedactsCredentials(t *testing.T) {
-	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
-	cfg.Filters.InjectionScanner.ClassifierURL = "http://admin:supersecret@127.0.0.1:19999/predict"
+	cfg := &config.Config{}
+	cfg.Filters.Guard.Discovery.CustomURL = "http://admin:supersecret@127.0.0.1:19999/predict"
 	srv := NewAdminServer(AdminDependencies{Config: cfg})
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/guards/probe", nil)
@@ -1630,8 +1484,7 @@ func TestAdminServer_AtomicConfigPipeline_ConcurrentRace(t *testing.T) {
 	t.Parallel()
 
 	initialCfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		AdminPort:   8095,
+		AdminPort: 8095,
 		Filters: config.FiltersConfig{
 			DLP: config.DLPConfig{Enabled: true},
 		},
@@ -1652,7 +1505,7 @@ func TestAdminServer_AtomicConfigPipeline_ConcurrentRace(t *testing.T) {
 			defer wg.Done()
 			for iter := 0; iter < 15; iter++ {
 				nextCfg := initialCfg.Clone()
-				nextCfg.PollIntervalSeconds = 10 + iter + idx
+				nextCfg.Filters.DLP.Enabled = (iter+idx)%2 == 0
 				srv.SetConfig(nextCfg)
 				srv.SetPipeline(filter.NewPipeline(nil))
 				_ = srv.Config()
@@ -1686,7 +1539,7 @@ func TestAdminServer_UninitializedStores_Return503(t *testing.T) {
 	t.Parallel()
 
 	srv := NewAdminServer(AdminDependencies{
-		Config: &config.Config{RuntimeMode: config.RuntimeModeStandalone},
+		Config: &config.Config{},
 	})
 	handler := srv.Handler()
 
@@ -1751,10 +1604,9 @@ func TestAdminServer_NonLoopbackAuth_MagicLink_CookieAndRBAC(t *testing.T) {
 	allowStdio := false
 	srv := NewAdminServer(AdminDependencies{
 		Config: &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
-			AllowStdio:  &allowStdio,
-			AdminHost:   "0.0.0.0",
-			AdminPort:   19415,
+			AllowStdio: &allowStdio,
+			AdminHost:  "0.0.0.0",
+			AdminPort:  19415,
 		},
 		KeyStore:   ks,
 		ReloadFunc: func() error { return nil },
@@ -1868,9 +1720,8 @@ func TestAdminServer_SessionCreate_AcceptsBothAPIKeyAndTokenFields(t *testing.T)
 
 	srv := NewAdminServer(AdminDependencies{
 		Config: &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
-			AdminHost:   "0.0.0.0",
-			AdminPort:   19415,
+			AdminHost: "0.0.0.0",
+			AdminPort: 19415,
 		},
 		KeyStore: ks,
 	})
@@ -1919,9 +1770,8 @@ func TestAdminServer_MagicLink_BruteForceLockout(t *testing.T) {
 
 	srv := NewAdminServer(AdminDependencies{
 		Config: &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
-			AdminHost:   "0.0.0.0",
-			AdminPort:   19415,
+			AdminHost: "0.0.0.0",
+			AdminPort: 19415,
 		},
 		KeyStore: ks,
 	})
@@ -2085,7 +1935,7 @@ func TestAdminServer_AuditLogs_RealDuckDB_EndToEnd(t *testing.T) {
 	}
 
 	srv := NewAdminServer(AdminDependencies{
-		Config:          &config.Config{RuntimeMode: config.RuntimeModeStandalone},
+		Config:          &config.Config{},
 		TelemetryEngine: engine,
 	})
 	h := srv.Handler()

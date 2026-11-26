@@ -16,12 +16,11 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
-	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/protocol"
 )
 
 func TestAdminEndpoints_Agents_CRUD_And_Archiving(t *testing.T) {
-	server, _, agentsDir := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, agentsDir := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	// 1. GET /admin/agents returns empty list initially
@@ -182,7 +181,7 @@ func TestAdminEndpoints_Agents_CRUD_And_Archiving(t *testing.T) {
 }
 
 func TestAdminEndpoints_Agents_ActiveSessionProtection(t *testing.T) {
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, func(d *AdminDependencies) {
+	server, _, _ := setupTestAdminServerWithProtocols(t, func(d *AdminDependencies) {
 		d.ActiveSessionChecker = func(agentName string) bool {
 			return agentName == "active-agent"
 		}
@@ -223,43 +222,8 @@ func TestAdminEndpoints_Agents_ActiveSessionProtection(t *testing.T) {
 	}
 }
 
-func TestAdminEndpoints_Agents_ManagedModeGuards(t *testing.T) {
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeManaged)
-	handler := server.Handler()
-
-	// 1. POST /admin/agents is forbidden
-	body := []byte(`{"agent_name": "managed-test"}`)
-	req := httptest.NewRequest(http.MethodPost, "/admin/agents", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 Forbidden in managed mode, got %d", rec.Code)
-	}
-
-	// 2. PUT /admin/agents/managed-test is forbidden
-	req = httptest.NewRequest(http.MethodPut, "/admin/agents/managed-test", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 Forbidden in managed mode, got %d", rec.Code)
-	}
-
-	// 3. DELETE /admin/agents/managed-test is forbidden
-	req = httptest.NewRequest(http.MethodDelete, "/admin/agents/managed-test", nil)
-	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 Forbidden in managed mode, got %d", rec.Code)
-	}
-}
-
 func TestAdminEndpoints_Agents_ReferentialIntegrityFlow(t *testing.T) {
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, _ := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	// 1. Create protocol "shared-db"
@@ -336,7 +300,7 @@ func TestAdminEndpoints_Agents_ReferentialIntegrityFlow(t *testing.T) {
 }
 
 func TestAdminEndpoints_Agents_ToolGovernance(t *testing.T) {
-	server, _, agentsDir := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, agentsDir := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	// 1. POST /admin/agents with invalid tool governance mode -> 400 Bad Request
@@ -451,7 +415,7 @@ func TestAdminEndpoints_Agents_ToolGovernance(t *testing.T) {
 }
 
 func TestAdminEndpoints_Agents_DefensiveProtocolPreservation(t *testing.T) {
-	server, _, agentsDir := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, agentsDir := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	// 1. Create an agent with an attached protocol
@@ -536,7 +500,7 @@ func TestAdminEndpoints_Agents_DefensiveProtocolPreservation(t *testing.T) {
 }
 
 func TestAdminEndpoints_Agents_GovernanceRetentionAndRestoration(t *testing.T) {
-	server, _, agentsDir := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, agentsDir := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	// 1. Create agent with two protocols (alpha and beta) and tool governance rules
@@ -673,7 +637,7 @@ func TestAdminEndpoints_Agents_GovernanceRetentionAndRestoration(t *testing.T) {
 }
 
 func TestAdminEndpoints_Agents_TrafficPipelineOverrides(t *testing.T) {
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, _ := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 	repo := server.agentRepo
 
@@ -802,7 +766,7 @@ func TestAdminEndpoints_Agents_TrafficPipelineOverrides(t *testing.T) {
 }
 
 func TestAdminEndpoints_Agents_ConcurrentPUT_NoDataRace(t *testing.T) {
-	server, _, agentsDir := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, agentsDir := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	// 1. Create agent initially
@@ -879,7 +843,7 @@ func TestAdminEndpoints_Agents_ConcurrentPUT_NoDataRace(t *testing.T) {
 }
 
 func TestAdminEndpoints_Agents_DetachedProtocol_RetainsGovernance(t *testing.T) {
-	server, _, agentsDir := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, agentsDir := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 	repo := agent.NewFSRepository(agentsDir, "")
 
@@ -967,7 +931,7 @@ func TestAdminEndpoints_Agents_DetachedProtocol_RetainsGovernance(t *testing.T) 
 }
 
 func TestAdminEndpoints_Agents_EnrichAgentProtocols_HydratesSecrets(t *testing.T) {
-	server, protoDir, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, protoDir, _ := setupTestAdminServerWithProtocols(t)
 
 	// Save a protocol with secret auth token and custom headers
 	store, _ := protocol.NewFSStore(protoDir)
@@ -1021,7 +985,7 @@ func TestAdminEndpoints_Agents_EnrichAgentProtocols_HydratesSecrets(t *testing.T
 }
 
 func TestAdminEndpoints_Agents_PUT_HydratesExistingBeforeTemplateStore(t *testing.T) {
-	server, protoDir, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, protoDir, _ := setupTestAdminServerWithProtocols(t)
 
 	if err := server.getProtocolStore().Save(&protocol.Protocol{
 		ID:           "shared-proto",
@@ -1083,7 +1047,7 @@ func TestAdminEndpoints_Agents_PUT_HydratesExistingBeforeTemplateStore(t *testin
 }
 
 func TestAdminEndpoints_Agents_RestoreRetainedProtocolsNotWipedByToolGovernance(t *testing.T) {
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, _ := setupTestAdminServerWithProtocols(t)
 	repo := server.getAgentRepository()
 
 	if err := repo.SaveAgentConfig("restore-agent", &agent.RouteConfig{
@@ -1136,7 +1100,7 @@ func TestSyncAgentToolsProbed_BoundedParallelDeterministicOrder(t *testing.T) {
 		t.Skip("POSIX shell test skipped on Windows")
 	}
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, _ := setupTestAdminServerWithProtocols(t)
 
 	mkScript := func(toolName string) string {
 		return fmt.Sprintf(`

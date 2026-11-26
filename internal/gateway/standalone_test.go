@@ -33,10 +33,9 @@ func TestStandaloneGateway_Bootstrap(t *testing.T) {
 	t.Setenv("GATEWAY_ID", "test-standalone-gw")
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		ListenPort:  8080,
-		AdminPort:   8095,
-		Mode:        "sse",
+		ListenPort: 8080,
+		AdminPort:  8095,
+		Mode:       "sse",
 	}
 
 	provider := &mockConfigProvider{cfg: cfg}
@@ -64,7 +63,7 @@ func TestStandaloneGateway_Bootstrap(t *testing.T) {
 		t.Errorf("expected /admin/dashboard body to contain dashboard markup, got %s", bodyDash[:min(len(bodyDash), 200)])
 	}
 
-	// 2. Acceptance Criteria: GET /admin/status returns HTTP 200 with mode: STANDALONE
+	// 2. Acceptance Criteria: GET /admin/status returns HTTP 200 with Ready status
 	reqStatus := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
 	recStatus := httptest.NewRecorder()
 	adminHandler.ServeHTTP(recStatus, reqStatus)
@@ -78,14 +77,11 @@ func TestStandaloneGateway_Bootstrap(t *testing.T) {
 		t.Fatalf("failed to parse /admin/status JSON response: %v", err)
 	}
 
-	mode, ok := statusResp["mode"].(string)
-	if !ok || mode != "STANDALONE" {
-		t.Errorf("expected status mode to be 'STANDALONE', got %v", statusResp["mode"])
+	if st, ok := statusResp["status"].(string); !ok || st != "Ready" {
+		t.Errorf("expected status to be 'Ready', got %v", statusResp["status"])
 	}
-
-	runtimeMode, ok := statusResp["runtime_mode"].(string)
-	if !ok || runtimeMode != "STANDALONE" {
-		t.Errorf("expected status runtime_mode to be 'STANDALONE', got %v", statusResp["runtime_mode"])
+	if tm, ok := statusResp["transport_mode"].(string); !ok || tm != "sse" {
+		t.Errorf("expected transport_mode to be 'sse', got %v", statusResp["transport_mode"])
 	}
 
 	// 3. Root URL redirects to /admin/dashboard
@@ -109,11 +105,10 @@ func TestStandaloneGateway_ZeroEgress(t *testing.T) {
 	t.Setenv("API_KEY", "")
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		ListenPort:  8080,
-		AdminPort:   8095,
-		Mode:        "sse",
-		HotReload:   false,
+		ListenPort: 8080,
+		AdminPort:  8095,
+		Mode:       "sse",
+		HotReload:  false,
 	}
 
 	egressTracker := &egressRecordingTransport{}
@@ -169,9 +164,6 @@ func TestStandaloneGateway_DefaultConfigResolution(t *testing.T) {
 		t.Fatalf("failed to auto-bootstrap standalone config: %v", err)
 	}
 
-	if cfg.GetRuntimeMode() != config.RuntimeModeStandalone {
-		t.Errorf("expected auto-bootstrapped config to have mode STANDALONE, got %s", cfg.GetRuntimeMode())
-	}
 	if cfg.GetListenPort() != 19410 {
 		t.Errorf("expected auto-bootstrapped config port 19410, got %d", cfg.GetListenPort())
 	}
@@ -193,8 +185,8 @@ func TestStandaloneGateway_DefaultConfigResolution(t *testing.T) {
 
 	var status map[string]interface{}
 	_ = json.Unmarshal(rec.Body.Bytes(), &status)
-	if status["mode"] != "STANDALONE" {
-		t.Errorf("expected status mode 'STANDALONE', got %v", status["mode"])
+	if status["status"] != "Ready" {
+		t.Errorf("expected status 'Ready', got %v", status["status"])
 	}
 }
 

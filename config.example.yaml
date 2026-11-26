@@ -2,6 +2,7 @@
 # Multi-Agent Architecture
 
 # Gateway Ingress Configuration
+# listen_host: "127.0.0.1"      # Defaults to 127.0.0.1 (or FARADAI_WIRE_HOST / LISTEN_HOST; keep omitted in Docker)
 listen_port: 19410
 allow_stdio: true               # Set false (or FARADAI_WIRE_ALLOW_STDIO=false) in Docker / Containerized Security Gateway mode
 # agents_dir: "~/.faradaiwire/agents"   # Defaults to $FARADAI_WIRE_HOME/agents (~/.faradaiwire/agents locally, /data/agents in Docker)
@@ -12,9 +13,6 @@ security:
     - "http://localhost:19418"
     - "http://localhost:19410"
     - "http://localhost:19415"
-  trusted_proxies:
-    - "127.0.0.1/32"
-    - "10.0.0.0/8"
   ssrf_protection:
     enabled: true
     block_private_ips: false        # Allow local/Docker bridge MCPs; cloud metadata (169.254.169.254) stays blocked
@@ -100,7 +98,15 @@ filters:
 # Immutable log file for audit events
 audit_log:
   enabled: true
-  path: "~/.faradaiwire/logs/faradai_audit.jsonl"
+  # path: "~/.faradaiwire/logs/faradai_audit.jsonl" # Defaults to $FARADAI_WIRE_HOME/logs/faradai_audit.jsonl
+  max_size_mb: 10                # Baseline rotation threshold (1-100 MB, overridable via maintenance.audit_jsonl_max_size_mb)
+  max_files: 10                  # Baseline rotated segment count (1-100, overridable via maintenance.audit_jsonl_max_files)
+
+# Local DuckDB Telemetry & Analytics
+telemetry:
+  enabled: true                  # Defaults to true; set FARADAI_WIRE_HOME or telemetry.db_path for custom storage
+  retention_days: 30             # Default: 30 days
+  max_payload_bytes: 524288      # Default: 512 KB
 
 # Hot-reload YAML configuration dynamically using fsnotify
 hot_reload: true
@@ -110,6 +116,7 @@ logging:
   level: "info"                  # debug | info | warn | error (overridable via FARADAI_WIRE_LOG_LEVEL)
 
 # Admin Server configuration (for inspection, settings, and Web Console)
+# admin_host: "127.0.0.1"       # Defaults to 127.0.0.1 (or FARADAI_WIRE_ADMIN_HOST; non-loopback requires an Admin key)
 admin_port: 19415
 admin_tls:
   enabled: false

@@ -332,7 +332,6 @@ func printUsage() {
 
 type runOptions struct {
 	configPath string
-	standalone bool
 	host       string
 	port       int
 	adminHost  string
@@ -344,7 +343,6 @@ func parseRunFlags(args []string, stderr io.Writer) (runOptions, bool, int) {
 	fs.SetOutput(stderr)
 	fs.Usage = func() { printRunUsage(stderr) }
 	cfgPath := fs.String("config", "", "Path to YAML configuration file")
-	standalone := fs.Bool("standalone", false, "Force offline-first standalone mode")
 	host := fs.String("host", "", "Host address to bind HTTP listeners to")
 	port := fs.Int("port", 0, "Ingress port to listen on")
 	adminHost := fs.String("admin-host", "", "Host address to bind Admin HTTP console listener to")
@@ -357,7 +355,6 @@ func parseRunFlags(args []string, stderr io.Writer) (runOptions, bool, int) {
 	}
 	return runOptions{
 		configPath: *cfgPath,
-		standalone: *standalone,
 		host:       *host,
 		port:       *port,
 		adminHost:  *adminHost,
@@ -366,9 +363,6 @@ func parseRunFlags(args []string, stderr io.Writer) (runOptions, bool, int) {
 }
 
 func applyRunOverrides(cfg *config.Config, opts runOptions) {
-	if opts.standalone {
-		cfg.RuntimeMode = config.RuntimeModeStandalone
-	}
 	if strings.TrimSpace(opts.host) != "" {
 		cfg.ListenHost = strings.TrimSpace(opts.host)
 	}
@@ -428,13 +422,11 @@ func runGatewayDaemon(opts runOptions) int {
 	}
 
 	slog.Info("Starting FaradAiWire",
-		slog.String("mode", cfg.GetRuntimeMode()),
 		slog.String("host", cfg.GetListenHost()),
 		slog.Int("port", cfg.GetListenPort()),
 		slog.String("admin_host", cfg.GetAdminHost()),
 		slog.Int("admin_port", cfg.GetAdminPort()),
 		slog.String("config_path", cfg.ConfigPath),
-		slog.Bool("zero_egress", cfg.IsStandalone()),
 	)
 
 	// Acquire single-instance process lock inside the unified runtime data root

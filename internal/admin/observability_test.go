@@ -55,9 +55,8 @@ func TestAdminMetrics_EndpointAndAuth(t *testing.T) {
 	}
 	srvAuth := newTestAdminServer(func(d *AdminDependencies) {
 		d.Config = &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
-			AdminHost:   "0.0.0.0",
-			AdminPort:   19415,
+			AdminHost: "0.0.0.0",
+			AdminPort: 19415,
 		}
 		d.KeyStore = ks
 		d.Metrics = reg
@@ -93,9 +92,8 @@ func TestAdminMetrics_EndpointAndAuth(t *testing.T) {
 func TestAdminStatus_UsesRealGuardLatency(t *testing.T) {
 	srv := newTestAdminServer(func(d *AdminDependencies) {
 		d.Config = &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
-			AdminHost:   "127.0.0.1",
-			AdminPort:   19415,
+			AdminHost: "127.0.0.1",
+			AdminPort: 19415,
 		}
 		d.GuardManager = &mockGuardWithLatency{
 			running:   true,
@@ -131,9 +129,8 @@ func TestAdminReadyz_StatesAndDisabledTelemetry(t *testing.T) {
 
 		srv := newTestAdminServer(func(d *AdminDependencies) {
 			d.Config = &config.Config{
-				RuntimeMode: config.RuntimeModeStandalone,
-				AdminHost:   "127.0.0.1",
-				Telemetry:   config.TelemetryConfig{Enabled: &disabled},
+				AdminHost: "127.0.0.1",
+				Telemetry: config.TelemetryConfig{Enabled: &disabled},
 			}
 			d.EventBroker = eb
 		})
@@ -172,9 +169,8 @@ func TestAdminReadyz_StatesAndDisabledTelemetry(t *testing.T) {
 
 		srv := newTestAdminServer(func(d *AdminDependencies) {
 			d.Config = &config.Config{
-				RuntimeMode: config.RuntimeModeStandalone,
-				AdminHost:   "127.0.0.1",
-				Telemetry:   config.TelemetryConfig{Enabled: &enabled},
+				AdminHost: "127.0.0.1",
+				Telemetry: config.TelemetryConfig{Enabled: &enabled},
 			}
 			d.TelemetryEngine = eng
 		})
@@ -192,9 +188,8 @@ func TestAdminReadyz_StatesAndDisabledTelemetry(t *testing.T) {
 		disabled := false
 		srv := newTestAdminServer(func(d *AdminDependencies) {
 			d.Config = &config.Config{
-				RuntimeMode: config.RuntimeModeStandalone,
-				AdminHost:   "127.0.0.1",
-				Telemetry:   config.TelemetryConfig{Enabled: &disabled},
+				AdminHost: "127.0.0.1",
+				Telemetry: config.TelemetryConfig{Enabled: &disabled},
 			}
 			d.IsDrainingFn = func() bool { return true }
 		})
@@ -219,9 +214,8 @@ func TestAdminReadyz_StatesAndDisabledTelemetry(t *testing.T) {
 
 		srv := newTestAdminServer(func(d *AdminDependencies) {
 			d.Config = &config.Config{
-				RuntimeMode: config.RuntimeModeStandalone,
-				AdminHost:   "127.0.0.1",
-				Telemetry:   config.TelemetryConfig{Enabled: &enabled},
+				AdminHost: "127.0.0.1",
+				Telemetry: config.TelemetryConfig{Enabled: &enabled},
 			}
 			d.TelemetryEngine = eng
 			d.AuditLogDroppedFn = func() uint64 { return 4 }
@@ -251,9 +245,8 @@ func TestAdminReadyz_StatesAndDisabledTelemetry(t *testing.T) {
 
 		srv := newTestAdminServer(func(d *AdminDependencies) {
 			d.Config = &config.Config{
-				RuntimeMode: config.RuntimeModeStandalone,
-				AdminHost:   "127.0.0.1",
-				Telemetry:   config.TelemetryConfig{Enabled: &enabled},
+				AdminHost: "127.0.0.1",
+				Telemetry: config.TelemetryConfig{Enabled: &enabled},
 			}
 			d.TelemetryEngine = eng
 		})
@@ -333,9 +326,8 @@ func TestAdminAnalyticsSecurityLogsAndRedactedExport(t *testing.T) {
 
 	srv := newTestAdminServer(func(d *AdminDependencies) {
 		d.Config = &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
-			AdminHost:   "127.0.0.1",
-			Telemetry:   config.TelemetryConfig{Enabled: &enabled},
+			AdminHost: "127.0.0.1",
+			Telemetry: config.TelemetryConfig{Enabled: &enabled},
 		}
 		d.TelemetryEngine = eng
 		d.SettingsCache = sCache
@@ -479,8 +471,7 @@ func TestSanitizeCSVCell_AllFormulaPrefixes(t *testing.T) {
 func TestAdminAuditLogsExport_InvalidParamsAndEmptyTelemetry(t *testing.T) {
 	srv := newTestAdminServer(func(d *AdminDependencies) {
 		d.Config = &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
-			AdminHost:   "127.0.0.1",
+			AdminHost: "127.0.0.1",
 		}
 	})
 	defer func() { _ = srv.Shutdown(context.Background()) }()

@@ -89,18 +89,10 @@ export const GuardConnectionModal: React.FC<GuardConnectionModalProps> = ({
       setIsSaving(true)
       setErrorMsg(null)
 
-      let effectiveClassifierURL = ''
-      if (mode === 'custom') {
-        effectiveClassifierURL = customURL.trim()
-        if (!effectiveClassifierURL) {
-          setErrorMsg('Custom URL is required in custom mode.')
-          setIsSaving(false)
-          return
-        }
-      } else if (mode === 'ollama') {
-        effectiveClassifierURL = ollamaURL.trim()
-      } else if (mode === 'docker') {
-        effectiveClassifierURL = dockerURL.trim()
+      if (mode === 'custom' && !customURL.trim()) {
+        setErrorMsg('Custom URL is required in custom mode.')
+        setIsSaving(false)
+        return
       }
 
       await api.configureGuard({
@@ -108,7 +100,6 @@ export const GuardConnectionModal: React.FC<GuardConnectionModalProps> = ({
         ollama_url: ollamaURL.trim(),
         docker_url: dockerURL.trim(),
         custom_url: customURL.trim(),
-        classifier_url: effectiveClassifierURL,
       })
 
       onSuccess('Security guard connection configuration updated successfully.')

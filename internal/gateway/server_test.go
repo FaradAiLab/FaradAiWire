@@ -646,8 +646,7 @@ func TestServer_SynchronousShutdown_DuckDBAndAuditFlush(t *testing.T) {
 	dbPath := filepath.Join(tempDir, "wire.duckdb")
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "stdio",
+		Mode: "stdio",
 		Stdio: config.StdioConfig{
 			Command:     "cat",
 			AutoRestart: false,
@@ -741,12 +740,10 @@ func TestServer_Shutdown_ActiveSSEStreamEviction(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(agentDir, "active-agent", "current", "config.json"), aggData, 0644)
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		AgentsDir:   agentDir,
+		Mode:      "sse",
+		AgentsDir: agentDir,
 		SSE: config.SSEConfig{
-			ListenPort: 0,
-			TargetURL:  "http://localhost:8080",
+			TargetURL: "http://localhost:8080",
 		},
 		Security: config.SecurityConfig{
 			APIKeysPath: filepath.Join(tempDir, "keys", "api_keys.json"),
@@ -901,11 +898,10 @@ func TestServer_MaintenanceCoordinator_RuntimeSessionEviction(t *testing.T) {
 	adminPort := getFreePort(t)
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		AgentsDir:   agentDir,
+		Mode:       "sse",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		AgentsDir:  agentDir,
 		SSE: config.SSEConfig{
 			TargetURL: "http://localhost:8080",
 		},
@@ -1046,11 +1042,10 @@ func TestServer_MaintenanceCoordinator_GracefulTeardown(t *testing.T) {
 	adminPort := getFreePort(t)
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		AgentsDir:   agentDir,
+		Mode:       "sse",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		AgentsDir:  agentDir,
 		SSE: config.SSEConfig{
 			TargetURL: "http://localhost:8080",
 		},
@@ -1142,11 +1137,10 @@ func TestServer_SegregatedMode_MemoryLeakPrevention_ExtendedTraffic(t *testing.T
 	adminPort := getFreePort(t)
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		AgentsDir:   agentDir,
+		Mode:       "sse",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		AgentsDir:  agentDir,
 		SSE: config.SSEConfig{
 			TargetURL: "http://localhost:8080",
 		},
@@ -1226,11 +1220,10 @@ func TestServer_StrictPhasedShutdown_InFlightExecution(t *testing.T) {
 	adminPort := getFreePort(t)
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		AgentsDir:   agentDir,
+		Mode:       "sse",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		AgentsDir:  agentDir,
 		SSE: config.SSEConfig{
 			TargetURL: "http://localhost:8080",
 		},
@@ -1360,11 +1353,10 @@ func TestServer_StrictPhasedShutdown_TimingUnder1_5s(t *testing.T) {
 	adminPort := getFreePort(t)
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		AgentsDir:   agentDir,
+		Mode:       "sse",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		AgentsDir:  agentDir,
 		SSE: config.SSEConfig{
 			TargetURL: "http://localhost:8080",
 		},
@@ -1416,11 +1408,10 @@ func TestServer_StrictPhasedShutdown_DoubleShutdownRaceFree(t *testing.T) {
 	adminPort := getFreePort(t)
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		AgentsDir:   agentDir,
+		Mode:       "sse",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		AgentsDir:  agentDir,
 		SSE: config.SSEConfig{
 			TargetURL: "http://localhost:8080",
 		},
@@ -1475,11 +1466,10 @@ func TestServer_PortCollision_Rejected(t *testing.T) {
 	// Startup validation fails fast with an explicit error when listen_port == admin_port
 	port := getFreePort(t)
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  port,
-		AdminPort:   port,
-		AgentsDir:   setupTestAgentDir(t, "test-collision"),
+		Mode:       "sse",
+		ListenPort: port,
+		AdminPort:  port,
+		AgentsDir:  setupTestAgentDir(t, "test-collision"),
 		SSE: config.SSEConfig{
 			TargetURL: "http://localhost:8080",
 		},
@@ -1506,11 +1496,10 @@ func TestServer_StrictPortSegregation(t *testing.T) {
 	agentDir := setupTestAgentDir(t, "test-segregation")
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		AgentsDir:   agentDir,
+		Mode:       "sse",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		AgentsDir:  agentDir,
 		SSE: config.SSEConfig{
 			TargetURL: "http://localhost:8080",
 		},
@@ -1609,11 +1598,10 @@ func TestServer_SlowlorisTransportTimeouts(t *testing.T) {
 	agentDir := setupTestAgentDir(t, "test-timeouts")
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		AgentsDir:   agentDir,
+		Mode:       "sse",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		AgentsDir:  agentDir,
 		SSE: config.SSEConfig{
 			TargetURL: "http://localhost:8080",
 		},
@@ -1679,11 +1667,10 @@ func TestServer_CleanIndependentListenerDraining(t *testing.T) {
 	agentDir := setupTestAgentDir(t, "test-draining")
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		AgentsDir:   agentDir,
+		Mode:       "sse",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		AgentsDir:  agentDir,
 		SSE: config.SSEConfig{
 			TargetURL: "http://localhost:8080",
 		},
@@ -1762,11 +1749,10 @@ func TestServer_LoopbackBindingDefault(t *testing.T) {
 	adminPort := getFreePort(t)
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		AgentsDir:   agentDir,
+		Mode:       "sse",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		AgentsDir:  agentDir,
 	}
 
 	provider := &mockConfigProvider{cfg: cfg}
@@ -1834,12 +1820,11 @@ func TestServer_CustomHostBinding(t *testing.T) {
 	adminPort := getFreePort(t)
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenHost:  "0.0.0.0",
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		AgentsDir:   agentDir,
+		Mode:       "sse",
+		ListenHost: "0.0.0.0",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		AgentsDir:  agentDir,
 	}
 
 	provider := &mockConfigProvider{cfg: cfg}
@@ -1978,7 +1963,6 @@ func TestServer_FilterToggle_PersistsAcrossReloadAndRestart(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "telemetry.duckdb")
 
 	originalYAML := fmt.Sprintf(`# Preserved user comment
-runtime_mode: STANDALONE
 listen_host: "127.0.0.1"
 listen_port: 8090
 admin_port: 8095
@@ -2108,11 +2092,10 @@ func TestServer_StartAndImmediateShutdown_RaceFree(t *testing.T) {
 		adminPort := getFreePort(t)
 
 		cfg := &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
-			Mode:        "sse",
-			ListenPort:  listenPort,
-			AdminPort:   adminPort,
-			AgentsDir:   agentDir,
+			Mode:       "sse",
+			ListenPort: listenPort,
+			AdminPort:  adminPort,
+			AgentsDir:  agentDir,
 			Telemetry: config.TelemetryConfig{
 				DBPath: dbPath,
 			},
@@ -2169,13 +2152,12 @@ func TestServer_DesktopNotifierWiringAndHotReload(t *testing.T) {
 	adminPort2 := getFreePort(t)
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenHost:  "127.0.0.1",
-		ListenPort:  listenPort,
-		AdminHost:   "0.0.0.0",
-		AdminPort:   adminPort1,
-		AgentsDir:   agentDir,
+		Mode:       "sse",
+		ListenHost: "127.0.0.1",
+		ListenPort: listenPort,
+		AdminHost:  "0.0.0.0",
+		AdminPort:  adminPort1,
+		AgentsDir:  agentDir,
 		Telemetry: config.TelemetryConfig{
 			DBPath: dbPath,
 		},

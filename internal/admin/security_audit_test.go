@@ -91,7 +91,7 @@ func TestValidateAdminCredential_ReturnsActorID(t *testing.T) {
 	}
 
 	srv := NewAdminServer(AdminDependencies{
-		Config:   &config.Config{RuntimeMode: config.RuntimeModeStandalone},
+		Config:   &config.Config{},
 		KeyStore: ks,
 	})
 
@@ -163,7 +163,7 @@ func TestAdminSessionCookie_ActorBindingAndLegacyCompatibility(t *testing.T) {
 	}
 
 	srv := NewAdminServer(AdminDependencies{
-		Config:   &config.Config{RuntimeMode: config.RuntimeModeStandalone, AdminHost: "0.0.0.0"},
+		Config:   &config.Config{AdminHost: "0.0.0.0"},
 		KeyStore: ks,
 	})
 
@@ -232,7 +232,7 @@ func TestAdminSecurity_VerifiedActorIgnoresSpoofedHeaders(t *testing.T) {
 
 	// Non-loopback server requiring admin auth
 	nonLoopbackSrv := NewAdminServer(AdminDependencies{
-		Config:               &config.Config{RuntimeMode: config.RuntimeModeStandalone, AdminHost: "0.0.0.0", AdminPort: 19415},
+		Config:               &config.Config{AdminHost: "0.0.0.0", AdminPort: 19415},
 		ReloadFunc:           func() error { return nil },
 		KeyStore:             ks,
 		SettingsStore:        store,
@@ -300,7 +300,7 @@ func TestAdminSecurity_VerifiedActorIgnoresSpoofedHeaders(t *testing.T) {
 	// Case C: Loopback passwordless mode preserves ADR-0028 access with actor local-operator, ignoring X-User-ID
 	loopSpy := &spySecurityAuditLogger{}
 	loopSrv := NewAdminServer(AdminDependencies{
-		Config:               &config.Config{RuntimeMode: config.RuntimeModeStandalone, AdminHost: "127.0.0.1", AdminPort: 19415},
+		Config:               &config.Config{AdminHost: "127.0.0.1", AdminPort: 19415},
 		ReloadFunc:           func() error { return nil },
 		SecurityAuditLoggers: []SecurityAuditEventLogger{loopSpy},
 	})
@@ -329,7 +329,7 @@ func TestAdminSecurity_BearerBruteForceLockoutAndAudit(t *testing.T) {
 
 	secSpy := &spySecurityAuditLogger{}
 	srv := NewAdminServer(AdminDependencies{
-		Config:               &config.Config{RuntimeMode: config.RuntimeModeStandalone, AdminHost: "0.0.0.0", AdminPort: 19415},
+		Config:               &config.Config{AdminHost: "0.0.0.0", AdminPort: 19415},
 		KeyStore:             ks,
 		SecurityAuditLoggers: []SecurityAuditEventLogger{secSpy},
 	})
@@ -465,7 +465,6 @@ func TestAdminSecurity_AuthLifecycleAndMutationAudits(t *testing.T) {
 
 	srv := NewAdminServer(AdminDependencies{
 		Config: &config.Config{
-			RuntimeMode:  config.RuntimeModeStandalone,
 			AdminHost:    "0.0.0.0",
 			AdminPort:    19415,
 			ProtocolsDir: tmpProtocols,
@@ -666,9 +665,8 @@ func TestWSHub_CapturesVerifiedActorAndClientIP(t *testing.T) {
 
 	srv := NewAdminServer(AdminDependencies{
 		Config: &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
-			AdminHost:   "0.0.0.0",
-			AdminPort:   19415,
+			AdminHost: "0.0.0.0",
+			AdminPort: 19415,
 		},
 		KeyStore: ks,
 	})
@@ -789,7 +787,7 @@ func TestAdminSecurity_HITLRespond_RESTAndWS_PropagatesActorAndChannel(t *testin
 		AllowRESTOnly: true,
 	})
 	srv := NewAdminServer(AdminDependencies{
-		Config:               &config.Config{RuntimeMode: config.RuntimeModeStandalone, AdminHost: "0.0.0.0", AdminPort: 19415},
+		Config:               &config.Config{AdminHost: "0.0.0.0", AdminPort: 19415},
 		KeyStore:             ks,
 		GuardHITL:            dispatcher,
 		SecurityAuditLoggers: []SecurityAuditEventLogger{secSpy},
@@ -932,7 +930,6 @@ func TestAdminAuditLogs_FallbackJSONLReader_RotatedAndLargeLines(t *testing.T) {
 
 	srv := NewAdminServer(AdminDependencies{
 		Config: &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
 			AuditLog: config.AuditLogConfig{
 				Enabled: true,
 				Path:    activePath,
@@ -991,8 +988,7 @@ func TestAdminAuditVerify_Endpoint(t *testing.T) {
 
 	srv := NewAdminServer(AdminDependencies{
 		Config: &config.Config{
-			RuntimeMode: config.RuntimeModeStandalone,
-			AuditLog:    config.AuditLogConfig{Enabled: true, Path: jsonlPath},
+			AuditLog: config.AuditLogConfig{Enabled: true, Path: jsonlPath},
 		},
 		TelemetryEngine: eng,
 	})

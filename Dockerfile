@@ -57,4 +57,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 USER 10001:10001
 ENTRYPOINT ["faradaiwire"]
-CMD ["run", "--standalone"]
+CMD ["run"]

@@ -74,7 +74,6 @@ export const SecurityFiltersTab: React.FC<SecurityFiltersTabProps> = ({ status, 
   const [toggling, setToggling] = useState<string | null>(null)
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
-  const isManaged = status?.runtime_mode === 'MANAGED'
   const [localActiveFilters, setLocalActiveFilters] = useState<Set<string>>(
     () => new Set((status?.active_filters || []).filter((k) => KNOWN_FILTER_KEYS.has(k)))
   )
@@ -90,14 +89,6 @@ export const SecurityFiltersTab: React.FC<SecurityFiltersTabProps> = ({ status, 
   const filterDefinitions = FILTER_DEFINITIONS
 
   const handleToggle = async (filterKey: string, currentEnabled: boolean) => {
-    if (isManaged) {
-      setNotification({
-        type: 'error',
-        text: 'Policy editing is locked: Gateway is running in corporate managed mode.',
-      })
-      return
-    }
-
     const nextEnabled = !currentEnabled
 
     // Optimistic UI update: flip state immediately for zero-latency toggle feel
@@ -156,12 +147,6 @@ export const SecurityFiltersTab: React.FC<SecurityFiltersTabProps> = ({ status, 
             Toggle individual protection layers active in the FaradAiWire execution pipeline.
           </p>
         </div>
-
-        {isManaged && (
-          <div className="px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-300">
-            Locked (Managed Mode)
-          </div>
-        )}
       </div>
 
       {notification && (
@@ -222,7 +207,7 @@ export const SecurityFiltersTab: React.FC<SecurityFiltersTabProps> = ({ status, 
                 <button
                   type="button"
                   onClick={() => handleToggle(f.key, isEnabled)}
-                  disabled={isPending || isManaged}
+                  disabled={isPending}
                   className={`w-12 h-6 rounded-full transition-colors relative shrink-0 p-0.5 focus:outline-none focus:ring-2 focus:ring-accent-primary disabled:opacity-40 ${
                     isEnabled ? 'bg-accent-primary' : 'bg-gray-300 dark:bg-gray-700'
                   }`}

@@ -83,6 +83,61 @@ func TestResolveEffectiveSettings(t *testing.T) {
 	}
 }
 
+func TestResolveEffectiveSettings_AuditLogBaselines(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		maxSizeMB    int
+		maxFiles     int
+		overrides    map[string]string
+		wantSizeMB   int
+		wantMaxFiles int
+	}{
+		{
+			name:         "YAML audit_log baselines applied when in bounds",
+			maxSizeMB:    25,
+			maxFiles:     5,
+			wantSizeMB:   25,
+			wantMaxFiles: 5,
+		},
+		{
+			name:         "DuckDB overrides supersede YAML audit_log baselines",
+			maxSizeMB:    25,
+			maxFiles:     5,
+			overrides:    map[string]string{"maintenance.audit_jsonl_max_size_mb": "50", "maintenance.audit_jsonl_max_files": "20"},
+			wantSizeMB:   50,
+			wantMaxFiles: 20,
+		},
+		{
+			name:         "out of bounds YAML values fall back to defaults",
+			maxSizeMB:    500,
+			maxFiles:     0,
+			wantSizeMB:   10,
+			wantMaxFiles: 10,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			baseCfg := &config.Config{
+				AuditLog: config.AuditLogConfig{
+					MaxSizeMB: tc.maxSizeMB,
+					MaxFiles:  tc.maxFiles,
+				},
+			}
+			effective := ResolveEffectiveSettings(baseCfg, tc.overrides)
+			if effective.Maintenance.AuditJSONLMaxSizeMB != tc.wantSizeMB {
+				t.Errorf("AuditJSONLMaxSizeMB = %d, want %d", effective.Maintenance.AuditJSONLMaxSizeMB, tc.wantSizeMB)
+			}
+			if effective.Maintenance.AuditJSONLMaxFiles != tc.wantMaxFiles {
+				t.Errorf("AuditJSONLMaxFiles = %d, want %d", effective.Maintenance.AuditJSONLMaxFiles, tc.wantMaxFiles)
+			}
+		})
+	}
+}
+
 func TestCache_Concurrency(t *testing.T) {
 	t.Parallel()
 

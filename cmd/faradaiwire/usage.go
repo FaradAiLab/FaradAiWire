@@ -56,7 +56,6 @@ func printRunUsage(out io.Writer) {
 	fmt.Fprintln(out, "Flags:")
 	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(w, "  -config <path>\tPath to YAML configuration file (autodiscovers if omitted)")
-	fmt.Fprintln(w, "  -standalone\tForce offline-first standalone mode (zero-egress, no cloud auth)")
 	fmt.Fprintln(w, "  -host <host>\tHost address to bind HTTP listeners to (default: 127.0.0.1)")
 	fmt.Fprintln(w, "  -port <port>\tIngress port to listen on (default: 19410)")
 	fmt.Fprintln(w, "  -admin-host <host>\tHost address to bind Admin console listener to (default: 127.0.0.1)")

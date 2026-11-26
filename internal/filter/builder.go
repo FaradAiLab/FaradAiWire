@@ -108,7 +108,7 @@ func BuildFilters(cfg *config.Config, auditLog AuditLogger) ([]SecurityFilter, e
 	if cfg.Filters.SchemaValidation.Enabled {
 		filters = append(filters, schema.NewSchemaFilter(
 			true,
-			cfg.Filters.SchemaValidation.SchemasDir,
+			cfg.GetSchemasDir(),
 			cfg.Filters.SchemaValidation.DynamicCapture,
 			cfg.Filters.SchemaValidation.BaselinePinning,
 		))

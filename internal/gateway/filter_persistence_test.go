@@ -153,8 +153,7 @@ func TestFilterPersistence_Legacy3FilterConfigHydratesOnToggle(t *testing.T) {
 	dbPath := filepath.Join(tmpHome, "wire.duckdb")
 
 	// Simulate pre-fix Windows config.yaml with only 3 filters
-	legacyYAML := `runtime_mode: STANDALONE
-listen_host: "127.0.0.1"
+	legacyYAML := `listen_host: "127.0.0.1"
 listen_port: 8090
 admin_port: 8095
 filters:
@@ -328,5 +327,79 @@ func TestServer_Reload_AbortsOnSettingsStoreError_PreservesLKG(t *testing.T) {
 
 	if len(srv.Pipeline().GetFilters()) != len(initialFilters) {
 		t.Fatalf("expected LKG pipeline filters preserved on failed reload")
+	}
+}
+
+func TestGuardDiscovery_DuckDBPersistenceAndReadOnlyConfig(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tmpHome)
+
+	configPath, err := config.EnsureDefaultRuntimeConfig()
+	if err != nil {
+		t.Fatalf("EnsureDefaultRuntimeConfig failed: %v", err)
+	}
+	originalYAMLBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read config.yaml: %v", err)
+	}
+	if err := os.Chmod(configPath, 0444); err != nil {
+		t.Fatalf("failed to chmod config.yaml 0444: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configPath, 0640) })
+
+	provider := config.NewYAMLConfigProvider(configPath)
+	cfg, err := provider.Load()
+	if err != nil {
+		t.Fatalf("provider.Load failed: %v", err)
+	}
+	cfg.Telemetry.DBPath = filepath.Join(tmpHome, "wire.duckdb")
+
+	srv, err := gateway.NewServer(cfg, provider)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	body := `{"mode":"custom","ollama_url":"http://127.0.0.1:21434","docker_url":"http://127.0.0.1:18088","custom_url":"http://127.0.0.1:19000/v1","enabled":true}`
+	req := httptest.NewRequest(http.MethodPost, "/admin/guards/configure", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.AdminHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /admin/guards/configure status = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if err := srv.Reload(); err != nil {
+		t.Fatalf("srv.Reload() failed: %v", err)
+	}
+	reloadedCfg := srv.AdminServer().Config()
+	if reloadedCfg.Filters.Guard.Discovery.Mode != "custom" || reloadedCfg.Filters.Guard.Discovery.CustomURL != "http://127.0.0.1:19000/v1" {
+		t.Fatalf("expected discovery overrides preserved after Reload(), got %+v", reloadedCfg.Filters.Guard.Discovery)
+	}
+
+	_ = srv.Shutdown(context.Background())
+
+	cfg2, err := provider.Load()
+	if err != nil {
+		t.Fatalf("provider.Load on restart failed: %v", err)
+	}
+	cfg2.Telemetry.DBPath = filepath.Join(tmpHome, "wire.duckdb")
+	srv2, err := gateway.NewServer(cfg2, provider)
+	if err != nil {
+		t.Fatalf("NewServer restart failed: %v", err)
+	}
+	defer srv2.Shutdown(context.Background())
+
+	restartedCfg := srv2.AdminServer().Config()
+	if restartedCfg.Filters.Guard.Discovery.Mode != "custom" || restartedCfg.Filters.Guard.Discovery.CustomURL != "http://127.0.0.1:19000/v1" {
+		t.Fatalf("expected discovery overrides preserved across restart, got %+v", restartedCfg.Filters.Guard.Discovery)
+	}
+
+	afterYAMLBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yaml after test: %v", err)
+	}
+	if string(afterYAMLBytes) != string(originalYAMLBytes) {
+		t.Fatal("read-only config.yaml was unexpectedly mutated")
 	}
 }

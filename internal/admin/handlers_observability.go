@@ -48,7 +48,7 @@ func (a *AdminServer) handleAuditVerify(w http.ResponseWriter, r *http.Request) 
 
 	var jsonlReport *logger.JSONLVerifyReport
 	if cfg := a.Config(); cfg != nil && cfg.AuditLog.Enabled && cfg.AuditLog.Path != "" {
-		rep, err := logger.VerifyAuditJSONL(cfg.AuditLog.Path, hmacKey)
+		rep, err := logger.VerifyAuditJSONL(cfg.GetAuditLogPath(), hmacKey)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "VERIFY_JSONL_FAILED", "Failed to verify JSONL audit integrity: "+err.Error())
 			return

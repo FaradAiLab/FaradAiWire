@@ -26,15 +26,8 @@ const (
 // ErrNoConfigProvider is returned when Reload is invoked without a backing config.Provider.
 var ErrNoConfigProvider = errors.New("no configuration provider configured for reload")
 
-const (
-	// RuntimeModeStandalone indicates offline-first zero-egress operation without SaaS dependencies.
-	RuntimeModeStandalone = "STANDALONE"
-	// RuntimeModeManaged indicates corporate managed mode linked to an upstream enterprise gateway/SaaS.
-	RuntimeModeManaged = "MANAGED"
-)
-
 // Provider defines the abstract contract for loading configuration.
-// It allows FaradAiWire to read configuration locally or pull from external/SaaS APIs.
+// It allows FaradAiWire to read configuration locally or from pluggable providers.
 type Provider interface {
 	Load() (*Config, error)
 	Watch(onChange func(*Config)) error
@@ -42,70 +35,26 @@ type Provider interface {
 
 // Config is the top-level configuration structure for FaradAiWire.
 type Config struct {
-	mu                        sync.RWMutex      `yaml:"-" json:"-"`
-	RuntimeMode               string            `yaml:"runtime_mode" json:"runtime_mode"` // "STANDALONE" or "MANAGED"
-	AllowStdio                *bool             `yaml:"allow_stdio,omitempty" json:"allow_stdio,omitempty"`
-	ListenHost                string            `yaml:"listen_host" json:"listen_host"`     // Interface host to bind HTTP listeners (default 127.0.0.1)
-	ListenPort                int               `yaml:"listen_port"`                        // Multi-agent gateway listen port
-	AgentsDir                 string            `yaml:"agents_dir"`                         // Root directory containing agent subdirectories
-	ProtocolsDir              string            `yaml:"protocols_dir" json:"protocols_dir"` // Root directory containing protocol definition files (defaults to ~/.faradaiwire/protocols)
-	Mode                      string            `yaml:"mode"`                               // "stdio" or "sse"
-	Stdio                     StdioConfig       `yaml:"stdio"`
-	SSE                       SSEConfig         `yaml:"sse"`
-	Filters                   FiltersConfig     `yaml:"filters"`
-	AuditLog                  AuditLogConfig    `yaml:"audit_log"`
-	Telemetry                 TelemetryConfig   `yaml:"telemetry" json:"telemetry"`
-	Logging                   LoggingConfig     `yaml:"logging" json:"logging"`
-	HotReload                 bool              `yaml:"hot_reload"`
-	PrivateKeyPath            string            `yaml:"private_key_path"`
-	AdminHost                 string            `yaml:"admin_host" json:"admin_host"` // Interface host to bind Admin HTTP server (defaults to 127.0.0.1 per ADR-0028)
-	AdminPort                 int               `yaml:"admin_port"`
-	AdminTLS                  AdminTLSConfig    `yaml:"admin_tls"`
-	UserContext               UserContextConfig `yaml:"user_context"`
-	Security                  SecurityConfig    `yaml:"security"`
-	AutoSyncMCP               bool              `yaml:"auto_sync_mcp"`
-	AutoUpdatePolicies        bool              `yaml:"auto_update_policies"`
-	PollIntervalSeconds       int               `yaml:"poll_interval_seconds" json:"poll_interval_seconds"`
-	PolicyPollIntervalSeconds int               `yaml:"policy_poll_interval_seconds" json:"policy_poll_interval_seconds"`
-	ToolSyncIntervalSeconds   int               `yaml:"tool_sync_interval_seconds" json:"tool_sync_interval_seconds"`
-	ConfigPath                string            `yaml:"-"`
-}
-
-// GetRuntimeMode returns the active runtime mode (defaults to STANDALONE).
-func (c *Config) GetRuntimeMode() string {
-	if c == nil {
-		return RuntimeModeStandalone
-	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if strings.EqualFold(strings.TrimSpace(c.RuntimeMode), RuntimeModeManaged) {
-		return RuntimeModeManaged
-	}
-	if strings.EqualFold(strings.TrimSpace(c.RuntimeMode), RuntimeModeStandalone) {
-		return RuntimeModeStandalone
-	}
-	return RuntimeModeStandalone
-}
-
-// SetRuntimeMode thread-safely updates the runtime mode.
-func (c *Config) SetRuntimeMode(mode string) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.RuntimeMode = mode
-}
-
-// ResetToStandalone thread-safely resets the configuration to standalone mode.
-func (c *Config) ResetToStandalone() {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.RuntimeMode = RuntimeModeStandalone
-	c.PrivateKeyPath = ""
+	mu           sync.RWMutex      `yaml:"-" json:"-"`
+	AllowStdio   *bool             `yaml:"allow_stdio,omitempty" json:"allow_stdio,omitempty"`
+	ListenHost   string            `yaml:"listen_host" json:"listen_host"`     // Interface host to bind HTTP listeners (default 127.0.0.1)
+	ListenPort   int               `yaml:"listen_port"`                        // Multi-agent gateway listen port
+	AgentsDir    string            `yaml:"agents_dir"`                         // Root directory containing agent subdirectories
+	ProtocolsDir string            `yaml:"protocols_dir" json:"protocols_dir"` // Root directory containing protocol definition files (defaults to ~/.faradaiwire/protocols)
+	Mode         string            `yaml:"mode"`                               // "stdio" or "sse"
+	Stdio        StdioConfig       `yaml:"stdio"`
+	SSE          SSEConfig         `yaml:"sse"`
+	Filters      FiltersConfig     `yaml:"filters"`
+	AuditLog     AuditLogConfig    `yaml:"audit_log"`
+	Telemetry    TelemetryConfig   `yaml:"telemetry" json:"telemetry"`
+	Logging      LoggingConfig     `yaml:"logging" json:"logging"`
+	HotReload    bool              `yaml:"hot_reload"`
+	AdminHost    string            `yaml:"admin_host" json:"admin_host"` // Interface host to bind Admin HTTP server (defaults to 127.0.0.1 per ADR-0028)
+	AdminPort    int               `yaml:"admin_port"`
+	AdminTLS     AdminTLSConfig    `yaml:"admin_tls"`
+	UserContext  UserContextConfig `yaml:"user_context"`
+	Security     SecurityConfig    `yaml:"security"`
+	ConfigPath   string            `yaml:"-"`
 }
 
 func cloneBoolPtr(p *bool) *bool {
@@ -126,37 +75,29 @@ func (c *Config) Clone() *Config {
 	defer c.mu.RUnlock()
 
 	cp := &Config{
-		RuntimeMode:               c.RuntimeMode,
-		AllowStdio:                cloneBoolPtr(c.AllowStdio),
-		ListenHost:                c.ListenHost,
-		ListenPort:                c.ListenPort,
-		AgentsDir:                 c.AgentsDir,
-		ProtocolsDir:              c.ProtocolsDir,
-		Mode:                      c.Mode,
-		Stdio:                     c.Stdio,
-		SSE:                       c.SSE,
-		Filters:                   c.Filters,
-		AuditLog:                  c.AuditLog,
-		Telemetry:                 c.Telemetry,
-		Logging:                   c.Logging,
-		HotReload:                 c.HotReload,
-		PrivateKeyPath:            c.PrivateKeyPath,
-		AdminHost:                 c.AdminHost,
-		AdminPort:                 c.AdminPort,
-		AdminTLS:                  c.AdminTLS,
-		UserContext:               c.UserContext,
-		Security:                  c.Security,
-		AutoSyncMCP:               c.AutoSyncMCP,
-		AutoUpdatePolicies:        c.AutoUpdatePolicies,
-		PollIntervalSeconds:       c.PollIntervalSeconds,
-		PolicyPollIntervalSeconds: c.PolicyPollIntervalSeconds,
-		ToolSyncIntervalSeconds:   c.ToolSyncIntervalSeconds,
-		ConfigPath:                c.ConfigPath,
+		AllowStdio:   cloneBoolPtr(c.AllowStdio),
+		ListenHost:   c.ListenHost,
+		ListenPort:   c.ListenPort,
+		AgentsDir:    c.AgentsDir,
+		ProtocolsDir: c.ProtocolsDir,
+		Mode:         c.Mode,
+		Stdio:        c.Stdio,
+		SSE:          c.SSE,
+		Filters:      c.Filters,
+		AuditLog:     c.AuditLog,
+		Telemetry:    c.Telemetry,
+		Logging:      c.Logging,
+		HotReload:    c.HotReload,
+		AdminHost:    c.AdminHost,
+		AdminPort:    c.AdminPort,
+		AdminTLS:     c.AdminTLS,
+		UserContext:  c.UserContext,
+		Security:     c.Security,
+		ConfigPath:   c.ConfigPath,
 	}
 
 	cp.Stdio.Args = slices.Clone(c.Stdio.Args)
 	cp.UserContext.TrustedProxies = slices.Clone(c.UserContext.TrustedProxies)
-	cp.Security.TrustedProxies = slices.Clone(c.Security.TrustedProxies)
 	cp.Security.CORSAllowedOrigins = slices.Clone(c.Security.CORSAllowedOrigins)
 	cp.Security.SSRFProtection.AllowedDomains = slices.Clone(c.Security.SSRFProtection.AllowedDomains)
 	cp.Security.SSRFProtection.Enabled = cloneBoolPtr(c.Security.SSRFProtection.Enabled)
@@ -166,8 +107,6 @@ func (c *Config) Clone() *Config {
 
 	cp.Filters.Adaptive.FastPathTools = slices.Clone(c.Filters.Adaptive.FastPathTools)
 	cp.Filters.Adaptive.DeepPathTools = slices.Clone(c.Filters.Adaptive.DeepPathTools)
-	cp.Filters.InjectionScanner.ExcludeTools = slices.Clone(c.Filters.InjectionScanner.ExcludeTools)
-	cp.Filters.InjectionScanner.Patterns = slices.Clone(c.Filters.InjectionScanner.Patterns)
 	cp.Filters.DLP.ExcludeTools = slices.Clone(c.Filters.DLP.ExcludeTools)
 	cp.Filters.DLP.Patterns = slices.Clone(c.Filters.DLP.Patterns)
 	cp.Filters.Guard.L1Patterns = slices.Clone(c.Filters.Guard.L1Patterns)
@@ -178,16 +117,6 @@ func (c *Config) Clone() *Config {
 	cp.Filters.LoopProtection.Overrides = slices.Clone(c.Filters.LoopProtection.Overrides)
 
 	return cp
-}
-
-// IsStandalone returns true if the gateway is running in offline-first standalone mode.
-func (c *Config) IsStandalone() bool {
-	return c.GetRuntimeMode() == RuntimeModeStandalone
-}
-
-// IsManaged returns true if the gateway is operating in corporate managed mode.
-func (c *Config) IsManaged() bool {
-	return c.GetRuntimeMode() == RuntimeModeManaged
 }
 
 // IsStdioAllowed returns whether local stdio MCP subprocess execution and IDE preset onboarding are permitted.
@@ -235,7 +164,7 @@ func (c *Config) GetListenHost() string {
 
 // GetAdminHost resolves the host interface address to bind the Admin HTTP server to.
 // Precedence: explicit config.AdminHost (or CLI --admin-host) > FARADAI_WIRE_ADMIN_HOST >
-// (!IsStandalone() -> GetListenHost()) > "127.0.0.1" (preserving ADR-0028 loopback default).
+// "127.0.0.1" (preserving ADR-0028 loopback default).
 func (c *Config) GetAdminHost() string {
 	if c != nil {
 		c.mu.RLock()
@@ -247,11 +176,6 @@ func (c *Config) GetAdminHost() string {
 	}
 	if env := strings.TrimSpace(os.Getenv("FARADAI_WIRE_ADMIN_HOST")); env != "" {
 		return env
-	}
-	if c != nil && !c.IsStandalone() {
-		if h := strings.TrimSpace(c.GetListenHost()); h != "" {
-			return h
-		}
 	}
 	return "127.0.0.1"
 }
@@ -269,20 +193,16 @@ func resolvePositivePortEnv(envKeys ...string) int {
 	return 0
 }
 
-// GetListenPort resolves the gateway ingress port with backward compatibility.
-// Precedence: explicit config.ListenPort (or CLI --port) > SSE.ListenPort >
+// GetListenPort resolves the gateway ingress port.
+// Precedence: explicit config.ListenPort (or CLI --port) >
 // FARADAI_WIRE_PORT / LISTEN_PORT > DefaultListenPort (19410).
 func (c *Config) GetListenPort() int {
 	if c != nil {
 		c.mu.RLock()
 		listenPort := c.ListenPort
-		ssePort := c.SSE.ListenPort
 		c.mu.RUnlock()
 		if listenPort > 0 {
 			return listenPort
-		}
-		if ssePort > 0 {
-			return ssePort
 		}
 	}
 	if p := resolvePositivePortEnv("FARADAI_WIRE_PORT", "LISTEN_PORT"); p > 0 {
@@ -309,6 +229,23 @@ func (c *Config) GetAdminPort() int {
 	return DefaultAdminPort
 }
 
+// expandHomePath expands a leading "~", "~/", or "~\" segment using os.UserHomeDir().
+func expandHomePath(p string) string {
+	trimmed := strings.TrimSpace(p)
+	if trimmed == "" {
+		return ""
+	}
+	if trimmed == "~" || strings.HasPrefix(trimmed, "~/") || strings.HasPrefix(trimmed, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			if trimmed == "~" {
+				return home
+			}
+			return filepath.Join(home, trimmed[2:])
+		}
+	}
+	return trimmed
+}
+
 // GetAgentsDir resolves the active agents root directory.
 // Defaults to ~/.faradaiwire/agents (or FARADAI_WIRE_HOME/agents) unless explicitly configured.
 func (c *Config) GetAgentsDir() string {
@@ -316,8 +253,8 @@ func (c *Config) GetAgentsDir() string {
 		c.mu.RLock()
 		dir := c.AgentsDir
 		c.mu.RUnlock()
-		if dir != "" {
-			return dir
+		if expanded := expandHomePath(dir); expanded != "" {
+			return expanded
 		}
 	}
 	return filepath.Join(DefaultFaradAiWireDir(), "agents")
@@ -326,24 +263,84 @@ func (c *Config) GetAgentsDir() string {
 // GetProtocolsDir resolves the active protocols root directory.
 // Defaults to ~/.faradaiwire/protocols (or FARADAI_WIRE_HOME/protocols) unless explicitly configured.
 func (c *Config) GetProtocolsDir() string {
-	if c != nil && c.ProtocolsDir != "" {
-		return c.ProtocolsDir
+	if c != nil {
+		c.mu.RLock()
+		dir := c.ProtocolsDir
+		c.mu.RUnlock()
+		if expanded := expandHomePath(dir); expanded != "" {
+			return expanded
+		}
 	}
 	return filepath.Join(DefaultFaradAiWireDir(), "protocols")
+}
+
+// GetSchemasDir resolves the active schema validation directory.
+// Defaults to ~/.faradaiwire/schemas (or FARADAI_WIRE_HOME/schemas) unless explicitly configured.
+func (c *Config) GetSchemasDir() string {
+	if c != nil {
+		c.mu.RLock()
+		dir := c.Filters.SchemaValidation.SchemasDir
+		c.mu.RUnlock()
+		if expanded := expandHomePath(dir); expanded != "" {
+			return expanded
+		}
+	}
+	return filepath.Join(DefaultFaradAiWireDir(), "schemas")
+}
+
+// GetAuditLogPath resolves the active JSONL audit log file path.
+// Defaults to ~/.faradaiwire/logs/faradai_audit.jsonl (or FARADAI_WIRE_HOME/logs/faradai_audit.jsonl) unless explicitly configured.
+func (c *Config) GetAuditLogPath() string {
+	if c != nil {
+		c.mu.RLock()
+		raw := c.AuditLog.Path
+		c.mu.RUnlock()
+		if expanded := expandHomePath(raw); expanded != "" {
+			return expanded
+		}
+	}
+	return filepath.Join(DefaultFaradAiWireDir(), "logs", "faradai_audit.jsonl")
+}
+
+// GetAdminTLSCertFile resolves the configured Admin TLS certificate file path with tilde expansion.
+func (c *Config) GetAdminTLSCertFile() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.RLock()
+	raw := c.AdminTLS.CertFile
+	c.mu.RUnlock()
+	return expandHomePath(raw)
+}
+
+// GetAdminTLSKeyFile resolves the configured Admin TLS private key file path with tilde expansion.
+func (c *Config) GetAdminTLSKeyFile() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.RLock()
+	raw := c.AdminTLS.KeyFile
+	c.mu.RUnlock()
+	return expandHomePath(raw)
 }
 
 // GetAPIKeysPath resolves the storage file path for hashed API keys.
 // Defaults to ~/.faradaiwire/keys/api_keys.json (or FARADAI_WIRE_HOME/keys/api_keys.json).
 func (c *Config) GetAPIKeysPath() string {
-	if c != nil && c.Security.APIKeysPath != "" {
-		return c.Security.APIKeysPath
+	if c != nil {
+		c.mu.RLock()
+		raw := c.Security.APIKeysPath
+		c.mu.RUnlock()
+		if expanded := expandHomePath(raw); expanded != "" {
+			return expanded
+		}
 	}
 	return filepath.Join(DefaultFaradAiWireDir(), "keys", "api_keys.json")
 }
 
 // DefaultFaradAiWireDir returns the path to ~/.faradaiwire (or FARADAI_WIRE_HOME if set).
 func DefaultFaradAiWireDir() string {
-	if env := os.Getenv("FARADAI_WIRE_HOME"); env != "" {
+	if env := expandHomePath(os.Getenv("FARADAI_WIRE_HOME")); env != "" {
 		return env
 	}
 	home, err := os.UserHomeDir()
@@ -383,7 +380,6 @@ func EnsureDefaultRuntimeConfig() (string, error) {
 		listenPortStr := strconv.Itoa(DefaultListenPort)
 		adminPortStr := strconv.Itoa(DefaultAdminPort)
 		defaultYAML := `# Farad Ai Core - Offline-First Standalone Configuration
-runtime_mode: STANDALONE
 # listen_host: "127.0.0.1" # Defaults to 127.0.0.1 (or FARADAI_WIRE_HOST / LISTEN_HOST)
 listen_port: ` + listenPortStr + `
 admin_port: ` + adminPortStr + `
@@ -391,7 +387,6 @@ agents_dir: "` + agentsDir + `"
 protocols_dir: "` + protocolsDir + `"
 mode: "sse"
 security:
-  admin_auth_required: false
   ssrf_protection:
     enabled: true
     block_private_ips: false
@@ -479,8 +474,6 @@ type UserContextConfig struct {
 
 // SecurityConfig defines top-level security parameters for FaradAiWire.
 type SecurityConfig struct {
-	TrustedProxies     []string             `yaml:"trusted_proxies"`
-	ContextHMACSecret  string               `yaml:"context_hmac_secret"`
 	CORSAllowedOrigins []string             `yaml:"cors_allowed_origins"`
 	SSRFProtection     SSRFProtectionConfig `yaml:"ssrf_protection"`
 	APIKeysPath        string               `yaml:"api_keys_path"`
@@ -557,8 +550,7 @@ type StdioConfig struct {
 
 // SSEConfig configures the HTTP SSE reverse proxy.
 type SSEConfig struct {
-	ListenPort int    `yaml:"listen_port"`
-	TargetURL  string `yaml:"target_url"`
+	TargetURL string `yaml:"target_url"`
 }
 
 // FiltersConfig toggles and configures the different filter types.
@@ -566,7 +558,6 @@ type FiltersConfig struct {
 	Adaptive         AdaptiveConfig         `yaml:"adaptive" json:"adaptive"`
 	PrefillBlock     PrefillBlockConfig     `yaml:"prefill_block"`
 	SchemaValidation SchemaValidationConfig `yaml:"schema_validation"`
-	InjectionScanner InjectionScannerConfig `yaml:"injection_scanner"`
 	DLP              DLPConfig              `yaml:"dlp"`
 	Guard            GuardConfig            `yaml:"guard" json:"guard"`
 	HITL             HITLConfig             `yaml:"hitl"`
@@ -593,18 +584,6 @@ type SchemaValidationConfig struct {
 	SchemasDir      string `yaml:"schemas_dir"`
 	DynamicCapture  bool   `yaml:"dynamic_capture"`
 	BaselinePinning bool   `yaml:"baseline_pinning"`
-}
-
-// InjectionScannerConfig configures the indirect prompt injection scanner for tool outputs (ADR-0010 / TICK-003).
-type InjectionScannerConfig struct {
-	Enabled             bool     `yaml:"enabled"`
-	ExcludeTools        []string `yaml:"exclude_tools"`
-	Patterns            []string `yaml:"patterns"`
-	CustomPatternsFile  string   `yaml:"custom_patterns_file"`
-	ClassifierURL       string   `yaml:"classifier_url"`
-	ClassifierThreshold float64  `yaml:"classifier_threshold"`
-	TimeoutMs           int      `yaml:"timeout_ms" json:"timeout_ms"`     // Default 150ms per ADR-0010
-	FailureMode         string   `yaml:"failure_mode" json:"failure_mode"` // "fail_closed" (default) or "fail_open_with_alert"
 }
 
 // DLPConfig configures PII regex-based masking, auditing, or blocking.
@@ -715,20 +694,25 @@ type RateLimitingConfig struct {
 type TelemetryConfig struct {
 	Enabled         *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	DBPath          string `yaml:"db_path" json:"db_path"`
-	RetentionDays   int    `yaml:"retention_days" json:"retention_days"`       // Default: 14 days
+	RetentionDays   int    `yaml:"retention_days" json:"retention_days"`       // Default: 30 days
 	MaxSizeBytes    int64  `yaml:"max_size_bytes" json:"max_size_bytes"`       // Default: 1 GB (1073741824)
-	MaxPayloadBytes int    `yaml:"max_payload_bytes" json:"max_payload_bytes"` // Default: 64 KB (65536)
+	MaxPayloadBytes int    `yaml:"max_payload_bytes" json:"max_payload_bytes"` // Default: 512 KB (524288)
 	BufferSize      int    `yaml:"buffer_size" json:"buffer_size"`             // Default: 4096 events
 	BatchFlushMs    int    `yaml:"batch_flush_ms" json:"batch_flush_ms"`       // Default: 100 ms
 }
 
 // IsTelemetryEnabled returns whether the local DuckDB telemetry engine should be activated.
-// In standalone mode, it defaults to true unless explicitly disabled.
+// Defaults to true unless explicitly disabled.
 func (c *Config) IsTelemetryEnabled() bool {
-	if c.Telemetry.Enabled != nil {
-		return *c.Telemetry.Enabled
+	if c == nil {
+		return true
 	}
-	// By default enabled in standalone mode
+	c.mu.RLock()
+	enabledPtr := c.Telemetry.Enabled
+	c.mu.RUnlock()
+	if enabledPtr != nil {
+		return *enabledPtr
+	}
 	return true
 }
 
@@ -736,8 +720,13 @@ func (c *Config) IsTelemetryEnabled() bool {
 // Defaults to ~/.faradaiwire/wire.duckdb (or FARADAI_WIRE_HOME/wire.duckdb) per Open Core spec, ADR-0043, and ADR-0057.
 // When running in automated test suites without an explicit FARADAI_WIRE_HOME override, it defaults to an isolated temporary path.
 func (c *Config) GetTelemetryDBPath() string {
-	if c != nil && strings.TrimSpace(c.Telemetry.DBPath) != "" {
-		return c.Telemetry.DBPath
+	if c != nil {
+		c.mu.RLock()
+		raw := c.Telemetry.DBPath
+		c.mu.RUnlock()
+		if expanded := expandHomePath(raw); expanded != "" {
+			return expanded
+		}
 	}
 	if strings.TrimSpace(os.Getenv("FARADAI_WIRE_HOME")) != "" {
 		return filepath.Join(DefaultFaradAiWireDir(), "wire.duckdb")
@@ -755,10 +744,16 @@ func (c *Config) GetDBPath() string {
 
 // IsHTTPRateLimitEnabled checks if HTTP rate limiting is enabled.
 func (c *Config) IsHTTPRateLimitEnabled() bool {
-	if c == nil || c.Security.RateLimiting.Enabled == nil {
+	if c == nil {
 		return true
 	}
-	return *c.Security.RateLimiting.Enabled
+	c.mu.RLock()
+	enabledPtr := c.Security.RateLimiting.Enabled
+	c.mu.RUnlock()
+	if enabledPtr == nil {
+		return true
+	}
+	return *enabledPtr
 }
 
 // GetHTTPRateLimitConfig returns HTTP ingress rate limiting configuration with safe production defaults.
@@ -766,7 +761,10 @@ func (c *Config) GetHTTPRateLimitConfig() HTTPRateLimitConfig {
 	if c == nil {
 		return DefaultHTTPRateLimitConfig()
 	}
+	c.mu.RLock()
 	cfg := c.Security.RateLimiting
+	cfg.Enabled = cloneBoolPtr(c.Security.RateLimiting.Enabled)
+	c.mu.RUnlock()
 	if cfg.Rate <= 0 {
 		cfg.Rate = 50.0 // 50 req/sec default ingress
 	}

@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,25 +41,15 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	catalog := a.guardCatalog
 
 	var (
-		listenPort         = config.DefaultListenPort
-		listenHost         = "127.0.0.1"
-		runtimeMode        string
-		transportMode      string
-		isManaged          bool
-		injClassifierURL   string
-		autoSyncMCP        bool
-		autoUpdatePolicies bool
-		pollIntervalSec    int
+		listenPort     = config.DefaultListenPort
+		listenHost     = "127.0.0.1"
+		transportMode  string
+		guardCustomURL string
 	)
 
 	if cfg != nil {
-		injClassifierURL = cfg.Filters.InjectionScanner.ClassifierURL
-		autoSyncMCP = cfg.AutoSyncMCP
-		autoUpdatePolicies = cfg.AutoUpdatePolicies
-		pollIntervalSec = cfg.PollIntervalSeconds
-		runtimeMode = cfg.GetRuntimeMode()
+		guardCustomURL = cfg.Filters.Guard.Discovery.CustomURL
 		transportMode = cfg.Mode
-		isManaged = cfg.IsManaged()
 		if cfg.GetListenPort() > 0 {
 			listenPort = cfg.GetListenPort()
 		}
@@ -68,11 +60,11 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	filterSummary := settings.BuildFilterStatusSummary(cfg)
 	activeFilters := filterSummary.ActiveFilters
-	injScannerEnabled := filterSummary.ConfigStates["injection_scanner"]
+	guardEnabled := filterSummary.ConfigStates["guard"]
 
 	gatewayID := strings.TrimSpace(os.Getenv("GATEWAY_ID"))
 
-	classifierURL := ""
+	customURL := ""
 	guardTier := "disabled"
 	guardStatus := "standby"
 	guardModel := "L1 Static Rules (Fallback)"
@@ -100,15 +92,15 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 				guardLatencyMS = math.Round(measured*100) / 100
 			}
 		}
-		classifierURL = guardEndpoint
-	} else if injScannerEnabled {
-		// Priority 2: Check external HTTP classifier URL
-		classifierURL = strings.TrimSpace(injClassifierURL)
-		if classifierURL != "" {
+		customURL = guardEndpoint
+	} else if guardEnabled {
+		// Priority 2: Check external HTTP classifier / custom URL
+		customURL = strings.TrimSpace(guardCustomURL)
+		if customURL != "" {
 			guardTier = "neural_active"
 			guardStatus = "active"
 			guardModel = "External HTTP Classifier"
-			guardEndpoint = redactURLCredentials(classifierURL)
+			guardEndpoint = redactURLCredentials(customURL)
 			guardLatencyMS = 0
 			if lr, ok := mgr.(guard.LatencyReporter); ok && lr != nil {
 				if measured := lr.AverageLatencyMS(); measured > 0 {
@@ -123,13 +115,10 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	ingressURL := fmt.Sprintf("http://%s:%d", listenHost, listenPort)
 
-	configResp := make(map[string]interface{}, len(filterSummary.ConfigStates)+3)
+	configResp := make(map[string]interface{}, len(filterSummary.ConfigStates))
 	for name, enabled := range filterSummary.ConfigStates {
 		configResp[name] = enabled
 	}
-	configResp["auto_sync_mcp"] = autoSyncMCP
-	configResp["auto_update_policies"] = autoUpdatePolicies
-	configResp["poll_interval_seconds"] = pollIntervalSec
 
 	resp := map[string]interface{}{
 		"version":             config.GetVersion(),
@@ -139,24 +128,19 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"ingress_port":        listenPort,
 		"ingress_host":        listenHost,
 		"ingress_url":         ingressURL,
-		"mode":                runtimeMode,
-		"runtime_mode":        runtimeMode,
 		"transport_mode":      transportMode,
 		"allow_stdio":         a.isStdioAllowed(),
 		"admin_auth_required": a.isAdminAuthRequired(),
 		"has_local_overrides": false,
-		"is_managed":          isManaged,
-		"organization":        "Corporate Organization",
-		"locked_editing":      isManaged,
 		"guard_tier":          guardTier,
 		"guard_model":         guardModel,
 		"guard_endpoint":      guardEndpoint,
 		"guard_latency_ms":    guardLatencyMS,
 		"guard_status": map[string]interface{}{
-			"tier":           guardTier,
-			"classifier_url": redactURLCredentials(classifierURL),
-			"model":          guardModel,
-			"active":         guardStatus == "active",
+			"tier":       guardTier,
+			"custom_url": redactURLCredentials(customURL),
+			"model":      guardModel,
+			"active":     guardStatus == "active",
 		},
 		"config": configResp,
 	}
@@ -171,42 +155,7 @@ func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 // - Strict rejection of link-local cloud metadata (169.254.169.254 / fe80::/10)
 // - Permits loopback (127.0.0.1, ::1) and local LAN RFC1918 IPs for local developer tooling
 func validateGuardURL(rawURL string) error {
-	rawURL = strings.TrimSpace(rawURL)
-	if rawURL == "" {
-		return nil
-	}
-	if len(rawURL) > 2048 {
-		return errors.New("URL exceeds maximum length of 2048 characters")
-	}
-	u, err := url.ParseRequestURI(rawURL)
-	if err != nil {
-		return errors.New("invalid URL format: " + err.Error())
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return errors.New("unsupported scheme: only http and https are allowed")
-	}
-	host := u.Hostname()
-	if host == "" {
-		return errors.New("missing host in URL")
-	}
-
-	// Unconditional guard: Block link-local and cloud metadata (AWS/GCP/Azure/OpenStack IMDS v4 & v6)
-	if host == "169.254.169.254" || strings.HasPrefix(host, "169.254.") {
-		return errors.New("access to link-local cloud metadata is strictly prohibited")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ipv4 := ip.To4(); ipv4 != nil {
-			ip = ipv4
-		}
-		if ip.Equal(net.ParseIP("169.254.169.254")) || ip.Equal(net.ParseIP("fd00:ec2::254")) {
-			return errors.New("access to cloud metadata service is strictly prohibited")
-		}
-		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-			return errors.New("access to link-local metadata is strictly prohibited")
-		}
-	}
-
-	return nil
+	return settings.ValidateGuardDiscoveryURL(rawURL)
 }
 
 // redactURLCredentials masks sensitive userinfo passwords in URLs for diagnostic output (ADR 0027).
@@ -223,14 +172,14 @@ func redactURLCredentials(rawURL string) string {
 }
 
 func (a *AdminServer) handleGuardProbe(w http.ResponseWriter, r *http.Request) {
-	classifierURL := ""
+	customURL := ""
 	if cfg := a.Config(); cfg != nil {
-		classifierURL = cfg.Filters.InjectionScanner.ClassifierURL
+		customURL = cfg.Filters.Guard.Discovery.CustomURL
 	}
 
 	// If query param or body overrides target URL (e.g. Test Connection)
 	if target := strings.TrimSpace(r.URL.Query().Get("url")); target != "" {
-		classifierURL = target
+		customURL = target
 	} else if r.Method == http.MethodPost && r.Body != nil {
 		var payload struct {
 			URL string `json:"url"`
@@ -241,12 +190,12 @@ func (a *AdminServer) handleGuardProbe(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else if payload.URL != "" {
-			classifierURL = strings.TrimSpace(payload.URL)
+			customURL = strings.TrimSpace(payload.URL)
 		}
 	}
 
-	if classifierURL != "" {
-		if err := validateGuardURL(classifierURL); err != nil {
+	if customURL != "" {
+		if err := validateGuardURL(customURL); err != nil {
 			writeError(w, http.StatusBadRequest, "INVALID_TARGET", "Invalid probe target: "+err.Error())
 			return
 		}
@@ -287,7 +236,7 @@ func (a *AdminServer) handleGuardProbe(w http.ResponseWriter, r *http.Request) {
 		dockerURL = cfg.Filters.Guard.Discovery.GetEffectiveDockerURL()
 		ollamaURL = cfg.Filters.Guard.Discovery.GetEffectiveOllamaURL()
 	}
-	probeRes := guardprobe.ProbeWithDiscovery(ctx, classifierURL, dockerURL, ollamaURL)
+	probeRes := guardprobe.ProbeWithDiscovery(ctx, customURL, dockerURL, ollamaURL)
 	probeRes.ConfiguredURL = redactURLCredentials(probeRes.ConfiguredURL)
 
 	writeJSON(w, http.StatusOK, probeRes)
@@ -295,31 +244,48 @@ func (a *AdminServer) handleGuardProbe(w http.ResponseWriter, r *http.Request) {
 
 func (a *AdminServer) handleGuardConfigure(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ClassifierURL string `json:"classifier_url"`
-		Enabled       *bool  `json:"enabled"`
-		Mode          string `json:"mode"`
-		OllamaURL     string `json:"ollama_url"`
-		DockerURL     string `json:"docker_url"`
-		CustomURL     string `json:"custom_url"`
+		Enabled   *bool   `json:"enabled"`
+		Mode      string  `json:"mode"`
+		OllamaURL string  `json:"ollama_url"`
+		DockerURL string  `json:"docker_url"`
+		CustomURL *string `json:"custom_url"`
 	}
 	if err := decodeJSON(w, r, maxSmallAdminBodyBytes, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid request body: "+err.Error())
 		return
 	}
 
-	targetURL := strings.TrimSpace(req.ClassifierURL)
-	if targetURL == "" && req.CustomURL != "" {
-		targetURL = strings.TrimSpace(req.CustomURL)
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode != "" {
+		switch mode {
+		case "auto", "ollama", "docker", "custom":
+		default:
+			writeError(w, http.StatusBadRequest, "INVALID_MODE", "Invalid guard discovery mode: must be auto, ollama, docker, or custom")
+			return
+		}
+	}
+
+	ollamaURL := strings.TrimSpace(req.OllamaURL)
+	dockerURL := strings.TrimSpace(req.DockerURL)
+	var (
+		customURL    string
+		setCustomURL bool
+	)
+	if req.CustomURL != nil {
+		customURL = strings.TrimSpace(*req.CustomURL)
+		setCustomURL = true
+	} else if mode == "auto" || mode == "ollama" || mode == "docker" {
+		// Switching away from custom mode without providing a custom_url clears any stale endpoint.
+		setCustomURL = true
 	}
 
 	for _, field := range []struct {
 		label string
 		raw   string
 	}{
-		{"classifier URL", targetURL},
-		{"ollama URL", strings.TrimSpace(req.OllamaURL)},
-		{"docker URL", strings.TrimSpace(req.DockerURL)},
-		{"custom URL", strings.TrimSpace(req.CustomURL)},
+		{"ollama URL", ollamaURL},
+		{"docker URL", dockerURL},
+		{"custom URL", customURL},
 	} {
 		if field.raw != "" {
 			if err := validateGuardURL(field.raw); err != nil {
@@ -332,79 +298,91 @@ func (a *AdminServer) handleGuardConfigure(w http.ResponseWriter, r *http.Reques
 	a.configMutMu.Lock()
 	defer a.configMutMu.Unlock()
 
-	applyGuardMutation := func(cfg *config.Config) {
-		if req.Mode != "" {
-			cfg.Filters.Guard.Discovery.Mode = req.Mode
-		}
-		if req.OllamaURL != "" {
-			cfg.Filters.Guard.Discovery.OllamaURL = strings.TrimSpace(req.OllamaURL)
-		}
-		if req.DockerURL != "" {
-			cfg.Filters.Guard.Discovery.DockerURL = strings.TrimSpace(req.DockerURL)
-		}
-		if req.CustomURL != "" {
-			cfg.Filters.Guard.Discovery.CustomURL = strings.TrimSpace(req.CustomURL)
-		}
-		if targetURL != "" {
-			cfg.Filters.InjectionScanner.ClassifierURL = targetURL
-		}
-		if req.Enabled != nil {
-			cfg.Filters.InjectionScanner.Enabled = *req.Enabled
-			cfg.Filters.Guard.Enabled = *req.Enabled
-		} else if targetURL != "" {
-			cfg.Filters.InjectionScanner.Enabled = true
-			cfg.Filters.Guard.Enabled = true
-		}
+	ctx := r.Context()
+	sStore := a.settingsStore
+
+	pendingSettings := make(map[string]string, 5)
+	if mode != "" {
+		pendingSettings[settings.GuardDiscoveryModeKey] = mode
+	}
+	if ollamaURL != "" {
+		pendingSettings[settings.GuardDiscoveryOllamaURLKey] = ollamaURL
+	}
+	if dockerURL != "" {
+		pendingSettings[settings.GuardDiscoveryDockerURLKey] = dockerURL
+	}
+	if setCustomURL {
+		pendingSettings[settings.GuardDiscoveryCustomURLKey] = customURL
+	}
+	if req.Enabled != nil {
+		pendingSettings[settings.FilterKeyPrefix+"guard"] = strconv.FormatBool(*req.Enabled)
+	} else if customURL != "" {
+		pendingSettings[settings.FilterKeyPrefix+"guard"] = "true"
 	}
 
-	origCfg := a.Config()
-	cfgProvider := a.cfgProvider
-	reloadCfgFn := a.reloadConfigFunc
-	reloadFn := a.reloadFunc
-	var nextCfg *config.Config
-	if origCfg != nil {
-		nextCfg = origCfg.Clone()
-	}
+	var prevOverrides map[string]string
+	appliedKeys := make([]string, 0, len(pendingSettings))
+	if sStore != nil && len(pendingSettings) > 0 {
+		var getErr error
+		prevOverrides, getErr = sStore.GetAll(ctx)
+		if getErr != nil {
+			slog.ErrorContext(ctx, "Failed to read prior guard settings from DuckDB", slog.String("error", getErr.Error()))
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to read current guard configuration")
+			return
+		}
 
-	if nextCfg != nil {
-		applyGuardMutation(nextCfg)
-	}
-
-	if reloadCfgFn == nil && reloadFn != nil && nextCfg != nil && cfgProvider != nil {
-		if err := cfgProvider.Save(nextCfg); err != nil {
-			writeError(w, http.StatusInternalServerError, "SAVE_FAILED", "Failed to save configuration: "+err.Error())
-			return
+		keys := make([]string, 0, len(pendingSettings))
+		for k := range pendingSettings {
+			keys = append(keys, k)
 		}
-		if err := a.applyConfigReload(nextCfg); err != nil {
-			_ = cfgProvider.Save(origCfg)
-			writeError(w, http.StatusInternalServerError, "RELOAD_FAILED", "Failed to reload configuration: "+err.Error())
-			return
-		}
-	} else {
-		if err := a.applyConfigReload(nextCfg); err != nil {
-			writeError(w, http.StatusInternalServerError, "RELOAD_FAILED", "Failed to reload configuration: "+err.Error())
-			return
-		}
-		if nextCfg != nil && cfgProvider != nil {
-			if err := cfgProvider.Save(nextCfg); err != nil {
-				if origCfg != nil {
-					_ = a.applyConfigReload(origCfg)
-				}
-				writeError(w, http.StatusInternalServerError, "SAVE_FAILED", "Failed to save configuration: "+err.Error())
+		sort.Strings(keys)
+		for _, k := range keys {
+			if err := sStore.Set(ctx, k, pendingSettings[k]); err != nil {
+				slog.ErrorContext(ctx, "Failed to persist guard setting to DuckDB", slog.String("key", k), slog.String("error", err.Error()))
+				rollbackDuckDBSettings(ctx, sStore, appliedKeys, prevOverrides)
+				writeError(w, http.StatusInternalServerError, "SAVE_FAILED", "Failed to save guard configuration")
 				return
 			}
+			appliedKeys = append(appliedKeys, k)
 		}
 	}
 
-	a.logSecurityAudit(r, "guard_mutated", "configure", "guard", "classifier", "allowed", "AI Guard configuration updated", map[string]any{
-		"mode":           req.Mode,
-		"classifier_url": redactURLCredentials(targetURL),
+	nextCfg := a.cloneAndMutateConfig(func(c *config.Config) {
+		if mode != "" {
+			c.Filters.Guard.Discovery.Mode = mode
+		}
+		if ollamaURL != "" {
+			c.Filters.Guard.Discovery.OllamaURL = ollamaURL
+		}
+		if dockerURL != "" {
+			c.Filters.Guard.Discovery.DockerURL = dockerURL
+		}
+		if setCustomURL {
+			c.Filters.Guard.Discovery.CustomURL = customURL
+		}
+		if req.Enabled != nil {
+			c.Filters.Guard.Enabled = *req.Enabled
+		} else if customURL != "" {
+			c.Filters.Guard.Enabled = true
+		}
+	})
+
+	if err := a.applyConfigReload(nextCfg); err != nil {
+		slog.ErrorContext(ctx, "Failed to reload configuration after guard update", slog.String("error", err.Error()))
+		rollbackDuckDBSettings(ctx, sStore, appliedKeys, prevOverrides)
+		writeError(w, http.StatusInternalServerError, "RELOAD_FAILED", "Failed to reload configuration after guard update")
+		return
+	}
+
+	a.logSecurityAudit(r, "guard_mutated", "configure", "guard", "discovery", "allowed", "AI Guard configuration updated", map[string]any{
+		"mode":       mode,
+		"custom_url": redactURLCredentials(customURL),
 	})
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":         "success",
-		"classifier_url": redactURLCredentials(targetURL),
-		"mode":           req.Mode,
-		"message":        "AI Guard configuration successfully updated",
+		"status":     "success",
+		"custom_url": redactURLCredentials(customURL),
+		"mode":       mode,
+		"message":    "AI Guard configuration successfully updated",
 	})
 }

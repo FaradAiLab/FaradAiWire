@@ -675,6 +675,7 @@ func (s *Server) Reload() error {
 			return fmt.Errorf("failed to load settings overrides: %w", oErr)
 		}
 		settings.ApplyFilterOverrides(newCfg, overrides)
+		settings.ApplyGuardDiscoveryOverrides(newCfg, overrides)
 		if sCache != nil {
 			sCache.Update(settings.ResolveEffectiveSettings(newCfg, overrides))
 		}

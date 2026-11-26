@@ -58,19 +58,11 @@ func (y *YAMLConfigProvider) Load() (*Config, error) {
 		sanitized := sanitizeWindowsYAMLPaths(data)
 		if retryErr := yaml.Unmarshal(sanitized, &cfg); retryErr == nil {
 			cfg.ConfigPath = y.filePath
-			if cfg.RuntimeMode == "" {
-				cfg.RuntimeMode = RuntimeModeStandalone
-			}
 			return &cfg, nil
 		}
 		return nil, err
 	}
 	cfg.ConfigPath = y.filePath
-
-	// Ensure runtime mode defaults to STANDALONE if unspecified
-	if cfg.RuntimeMode == "" {
-		cfg.RuntimeMode = RuntimeModeStandalone
-	}
 
 	return &cfg, nil
 }
@@ -78,15 +70,6 @@ func (y *YAMLConfigProvider) Load() (*Config, error) {
 // Watch satisfies the Provider interface. Active filesystem monitoring is performed via ConfigWatcher.
 func (y *YAMLConfigProvider) Watch(onChange func(*Config)) error {
 	return nil
-}
-
-// Save writes the updated configuration back to the YAML file.
-func (y *YAMLConfigProvider) Save(cfg *Config) error {
-	data, err := yaml.Marshal(cfg)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(y.filePath, data, 0644)
 }
 
 // GetFilePath returns the path to the active configuration file.

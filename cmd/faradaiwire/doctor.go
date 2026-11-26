@@ -56,7 +56,7 @@ func executeDoctor(configPath string, out io.Writer) int {
 		fmt.Fprintf(out, "[✗] Configuration: Failed to load config (%v)\n", err)
 		return 1
 	}
-	fmt.Fprintf(out, "[✓] Configuration: %s (mode: %s)\n", cfg.ConfigPath, cfg.GetRuntimeMode())
+	fmt.Fprintf(out, "[✓] Configuration: %s\n", cfg.ConfigPath)
 
 	// 2. Port Availability / Status
 	ingressPort := cfg.GetListenPort()
@@ -96,15 +96,20 @@ func executeDoctor(configPath string, out io.Writer) int {
 	}
 
 	// 4. AI Guard Discovery & Diagnosis
-	classifierURL := ""
-	if cfg.Filters.InjectionScanner.Enabled {
-		classifierURL = cfg.Filters.InjectionScanner.ClassifierURL
+	customURL := ""
+	if cfg.Filters.Guard.Enabled {
+		customURL = cfg.Filters.Guard.Discovery.CustomURL
 	}
 
 	probeCtx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 
-	probeRes := guardprobe.Probe(probeCtx, classifierURL)
+	probeRes := guardprobe.ProbeWithDiscovery(
+		probeCtx,
+		customURL,
+		cfg.Filters.Guard.Discovery.GetEffectiveDockerURL(),
+		cfg.Filters.Guard.Discovery.GetEffectiveOllamaURL(),
+	)
 
 	// Check local DuckDB Model Catalog (GUARD-001 / DEC-01)
 	dbPath := ""
@@ -148,7 +153,7 @@ func executeDoctor(configPath string, out io.Writer) int {
 		if probeRes.ModelName != "" {
 			fmt.Fprintf(out, "    ↳ Model       : %s\n", probeRes.ModelName)
 		}
-		fmt.Fprintln(out, "    ↳ To activate : Add to your config.yaml under filters.guard:")
+		fmt.Fprintln(out, "    ↳ To activate : Add to your config.yaml under filters.guard.discovery:")
 		fmt.Fprintf(out, "                    custom_url: \"%s\"\n", probeRes.DetectedURL)
 	} else {
 		fmt.Fprintln(out, "[-] AI Guard     : Standby (Static Heuristics & Regex active)")

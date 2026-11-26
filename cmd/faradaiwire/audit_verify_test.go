@@ -148,3 +148,34 @@ func TestCLI_AuditVerify_OfflineAndTamperAndLockedDB(t *testing.T) {
 		t.Fatalf("expected exit 1 on tampered JSONL, got %d (stdout=%s)", code, out.String())
 	}
 }
+
+func TestCLI_AuditVerify_ConfigPathExpansionAndDefault(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tempHome)
+
+	jsonlPath := filepath.Join(tempHome, "logs", "faradai_audit.jsonl")
+	fl, err := logger.NewFileAuditLogger(jsonlPath)
+	if err != nil {
+		t.Fatalf("NewFileAuditLogger: %v", err)
+	}
+	fl.LogEvent(&filter.AuditEvent{
+		ID:        "cli-verify-default-1",
+		Timestamp: time.Now().UTC(),
+		AgentName: "alpha",
+		ToolName:  "read",
+		Decision:  filter.DecisionAllowed,
+	})
+	_ = fl.Close()
+
+	cfgPath := filepath.Join(tempHome, "config.yaml")
+	cfgYAML := "audit_log:\n  enabled: true\n  path: \"\"\ntelemetry:\n  enabled: false\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := runCLI([]string{"audit", "verify", "--config", cfgPath, "--json"}, strings.NewReader(""), &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("audit verify --config failed (%d): stdout=%s stderr=%s", code, out.String(), errBuf.String())
+	}
+}

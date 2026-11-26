@@ -224,13 +224,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		return nil, fmt.Errorf("configuration error: top-level mode 'stdio' is disabled when allow_stdio=false (Containerized Security Gateway mode)")
 	}
 
-	// Synchronize security and user context configurations
-	if len(cfg.UserContext.TrustedProxies) == 0 && len(cfg.Security.TrustedProxies) > 0 {
-		cfg.UserContext.TrustedProxies = cfg.Security.TrustedProxies
-	}
-	if cfg.UserContext.ContextHMACSecret == "" && cfg.Security.ContextHMACSecret != "" {
-		cfg.UserContext.ContextHMACSecret = cfg.Security.ContextHMACSecret
-	}
+	// Expand env placeholder in user context HMAC secret
 	if strings.HasPrefix(cfg.UserContext.ContextHMACSecret, "${") && strings.HasSuffix(cfg.UserContext.ContextHMACSecret, "}") {
 		cfg.UserContext.ContextHMACSecret = os.ExpandEnv(cfg.UserContext.ContextHMACSecret)
 	}
@@ -241,9 +235,9 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	}
 
 	// 1. Initialize append-only audit trail logger if enabled
-	if cfg.AuditLog.Enabled && cfg.AuditLog.Path != "" {
+	if cfg.AuditLog.Enabled && (cfg.AuditLog.Path != "" || strings.TrimSpace(os.Getenv("FARADAI_WIRE_HOME")) != "" || !testing.Testing()) {
 		auditLog, err := logger.NewFileAuditLoggerWithOptions(
-			cfg.AuditLog.Path,
+			cfg.GetAuditLogPath(),
 			logger.WithMaxSizeMB(cfg.AuditLog.MaxSizeMB),
 			logger.WithMaxFiles(cfg.AuditLog.MaxFiles),
 			logger.WithRetentionDays(cfg.Telemetry.RetentionDays),
@@ -284,6 +278,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		cancel()
 
 		settings.ApplyFilterOverrides(cfg, overrides)
+		settings.ApplyGuardDiscoveryOverrides(cfg, overrides)
 		effective := settings.ResolveEffectiveSettings(cfg, overrides)
 		settingsCache = settings.NewCache(effective)
 		settingsStore = sStore
@@ -364,7 +359,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		migratedCount, migErr := mcpconfig.MigrateLegacyProtocolIDs(migCtx, mcpconfig.MigrateOptions{
 			ProtocolsDir: cfg.GetProtocolsDir(),
 			AgentsDir:    cfg.GetAgentsDir(),
-			SchemasDir:   cfg.Filters.SchemaValidation.SchemasDir,
+			SchemasDir:   cfg.GetSchemasDir(),
 			SchemaStore:  deps.SchemaStore,
 			PolicyStore:  deps.PolicyStore,
 		})
@@ -648,7 +643,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		metricsReg.SetDroppedEventsProvider("jsonl", nil)
 	}
 
-	if cfg.AdminPort > 0 || cfg.IsStandalone() || adminPort > 0 {
+	if adminPort > 0 {
 		var safeClient *http.Client
 		if len(cb) > 0 {
 			safeClient = cb[0].SafeHTTPClient

@@ -532,9 +532,9 @@ func TestExecuteGuardInstall_HTTPSProgressAuth(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := t.TempDir()
 			cfgPath := filepath.Join(cfgDir, "config.yaml")
-			cfgYAML := "runtime_mode: MANAGED\nadmin_host: 192.0.2.10\nadmin_port: 8095\nadmin_tls:\n  enabled: false\n"
+			cfgYAML := "admin_host: 192.0.2.10\nadmin_port: 8095\nadmin_tls:\n  enabled: false\n"
 			if tc.tlsEnabled {
-				cfgYAML = "runtime_mode: MANAGED\nadmin_host: 192.0.2.10\nadmin_port: 8095\nadmin_tls:\n  enabled: true\n"
+				cfgYAML = "admin_host: 192.0.2.10\nadmin_port: 8095\nadmin_tls:\n  enabled: true\n"
 			}
 			if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0600); err != nil {
 				t.Fatalf("write config: %v", err)

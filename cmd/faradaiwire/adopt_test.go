@@ -651,9 +651,8 @@ func TestResolveAdoptProbeTimeout_ReadsChunkedSettingsResponse(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		ListenHost:  host,
-		AdminPort:   port,
+		ListenHost: host,
+		AdminPort:  port,
 	}
 	if got := resolveAdoptProbeTimeout(0, cfg, ""); got != 12*time.Second {
 		t.Fatalf("expected 12s from chunked /admin/settings response, got %v", got)
@@ -674,38 +673,26 @@ func TestResolveAdminEndpointHost_UsesAdminHost(t *testing.T) {
 			want: "127.0.0.1",
 		},
 		{
-			name: "standalone ignores public listen host and uses admin host",
+			name: "ignores public listen host and uses explicit loopback admin host",
 			cfg: &config.Config{
-				RuntimeMode: config.RuntimeModeStandalone,
-				ListenHost:  "0.0.0.0",
-				AdminHost:   "127.0.0.2",
+				ListenHost: "0.0.0.0",
+				AdminHost:  "127.0.0.2",
 			},
 			want: "127.0.0.2",
 		},
 		{
-			name: "standalone forces non-loopback admin host back to loopback",
+			name: "preserves explicit remote admin host",
 			cfg: &config.Config{
-				RuntimeMode: config.RuntimeModeStandalone,
-				ListenHost:  "127.0.0.1",
-				AdminHost:   "192.168.1.50",
-			},
-			want: "127.0.0.1",
-		},
-		{
-			name: "managed mode uses configured admin host",
-			cfg: &config.Config{
-				RuntimeMode: config.RuntimeModeManaged,
-				ListenHost:  "0.0.0.0",
-				AdminHost:   "10.0.0.5",
+				ListenHost: "0.0.0.0",
+				AdminHost:  "10.0.0.5",
 			},
 			want: "10.0.0.5",
 		},
 		{
 			name: "wildcard admin host normalizes to loopback",
 			cfg: &config.Config{
-				RuntimeMode: config.RuntimeModeManaged,
-				ListenHost:  "10.0.0.9",
-				AdminHost:   "0.0.0.0",
+				ListenHost: "10.0.0.9",
+				AdminHost:  "0.0.0.0",
 			},
 			want: "127.0.0.1",
 		},
@@ -876,7 +863,7 @@ func TestExecuteAdopt_RefusesWhenConfigYAMLDisablesStdio(t *testing.T) {
 	t.Setenv("FARADAI_WIRE_ALLOW_STDIO", "")
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte("runtime_mode: STANDALONE\nallow_stdio: false\n"), 0600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("allow_stdio: false\n"), 0600); err != nil {
 		t.Fatalf("write config.yaml: %v", err)
 	}
 

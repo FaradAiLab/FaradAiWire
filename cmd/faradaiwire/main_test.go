@@ -25,12 +25,6 @@ func TestCLI_Run_StandaloneDefaults(t *testing.T) {
 		t.Fatalf("failed to load auto-bootstrapped config: %v", err)
 	}
 
-	if cfg.GetRuntimeMode() != config.RuntimeModeStandalone {
-		t.Errorf("expected STANDALONE runtime mode, got %s", cfg.GetRuntimeMode())
-	}
-	if !cfg.IsStandalone() {
-		t.Errorf("expected IsStandalone() to be true")
-	}
 	if cfg.GetListenHost() != "127.0.0.1" {
 		t.Errorf("expected default listen host 127.0.0.1, got %s", cfg.GetListenHost())
 	}
@@ -51,18 +45,17 @@ func TestCLI_Run_StandaloneDefaults(t *testing.T) {
 }
 
 func TestCLI_UsageString(t *testing.T) {
-	usageStr := "Usage: faradaiwire run [--config <path>] [--standalone] [--host <host>] [--port <port>] [--admin-port <admin-port>] | doctor [--config <path>] | skill-audit <path> | version"
-	if !strings.Contains(usageStr, "--host <host>") {
-		t.Errorf("expected usage to mention --host <host>")
+	var stdout, stderr strings.Builder
+	code := runCLI([]string{"run", "--help"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected run --help exit 0, got %d", code)
 	}
-	if !strings.Contains(usageStr, "doctor") {
-		t.Errorf("expected usage to mention doctor")
+	usageStr := stdout.String()
+	if !strings.Contains(usageStr, "-host <host>") {
+		t.Errorf("expected usage to mention -host <host>")
 	}
-	if strings.Contains(usageStr, "link --token") {
-		t.Errorf("expected usage NOT to mention link --token")
-	}
-	if strings.Contains(usageStr, "unlink") {
-		t.Errorf("expected usage NOT to mention unlink")
+	if strings.Contains(usageStr, "-standalone") {
+		t.Errorf("expected usage NOT to mention -standalone")
 	}
 }
 
@@ -417,7 +410,7 @@ func TestParseRunFlags_AdminHost(t *testing.T) {
 		t.Fatalf("expected adminHost=0.0.0.0 and adminPort=19415, got %+v", opts)
 	}
 
-	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	cfg := &config.Config{}
 	applyRunOverrides(cfg, opts)
 	if cfg.GetAdminHost() != "0.0.0.0" {
 		t.Fatalf("expected cfg.GetAdminHost() == 0.0.0.0, got %s", cfg.GetAdminHost())

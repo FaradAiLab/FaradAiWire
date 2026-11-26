@@ -19,10 +19,9 @@ func TestGateway_GuardCatalog_BootAndAdminIntegration(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "telemetry_boot.duckdb")
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		ListenHost:  "127.0.0.1",
-		ListenPort:  8090,
-		AdminPort:   8095,
+		ListenHost: "127.0.0.1",
+		ListenPort: 8090,
+		AdminPort:  8095,
 		Telemetry: config.TelemetryConfig{
 			DBPath: dbPath,
 		},
@@ -170,10 +169,9 @@ func TestGateway_ZeroDowntimeHotSwap_Lifecycle(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "telemetry_hotswap.duckdb")
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		ListenHost:  "127.0.0.1",
-		ListenPort:  8092,
-		AdminPort:   8097,
+		ListenHost: "127.0.0.1",
+		ListenPort: 8092,
+		AdminPort:  8097,
 		Telemetry: config.TelemetryConfig{
 			DBPath: dbPath,
 		},

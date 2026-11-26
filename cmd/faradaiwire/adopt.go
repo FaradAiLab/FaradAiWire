@@ -135,11 +135,7 @@ func resolveAdminEndpointHost(cfg *config.Config) string {
 	if cfg == nil {
 		return "127.0.0.1"
 	}
-	host := normalizeGatewayHost(cfg.GetAdminHost())
-	if cfg.IsStandalone() && !isLoopbackHost(host) {
-		return "127.0.0.1"
-	}
-	return host
+	return normalizeGatewayHost(cfg.GetAdminHost())
 }
 
 func adminScheme(cfg *config.Config) string {

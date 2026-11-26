@@ -18,10 +18,6 @@ type YAMLConfigProvider = config.YAMLConfigProvider
 const (
 	// Version is the current semantic release version of FaradAiWire.
 	Version = config.Version
-	// RuntimeModeManaged indicates the gateway is orchestrated by a central enterprise control plane.
-	RuntimeModeManaged = config.RuntimeModeManaged
-	// RuntimeModeStandalone indicates offline-first, zero-egress local operation.
-	RuntimeModeStandalone = config.RuntimeModeStandalone
 	// DefaultListenPort is the canonical gateway MCP ingress port.
 	DefaultListenPort = config.DefaultListenPort
 	// DefaultAdminPort is the canonical administrative console & API port.

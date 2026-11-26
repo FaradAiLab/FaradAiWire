@@ -397,20 +397,6 @@ func (a *AdminServer) stdioProbeTimeout(command string) time.Duration {
 	return floor
 }
 
-// withMutationGuard enforces read-only access to policies and agents when running in MANAGED mode.
-// Any attempt to toggle configuration, clear schemas, sync tools, approve/discard diffs, or rollback
-// returns HTTP 403 Forbidden with {"error": "FORBIDDEN_MANAGED_MODE", "message": "Policy editing is locked: Gateway is managed by organization."}.
-func (a *AdminServer) withMutationGuard(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		cfg := a.Config()
-		if cfg != nil && cfg.IsManaged() {
-			writeError(w, http.StatusForbidden, "FORBIDDEN_MANAGED_MODE", "Policy editing is locked: Gateway is managed by organization.")
-			return
-		}
-		next(w, r)
-	}
-}
-
 // Handler builds and returns the configured HTTP handler with security headers and CORS middleware applied.
 func (a *AdminServer) Handler() http.Handler {
 	apiMux := http.NewServeMux()
@@ -439,79 +425,79 @@ func (a *AdminServer) Handler() http.Handler {
 
 	// Agent lifecycle & DLP governance routes (Go 1.22+ ServeMux method + path routing)
 	apiMux.HandleFunc("GET /admin/agents", a.handleListAgents)
-	apiMux.HandleFunc("POST /admin/agents", a.withMutationGuard(a.handleCreateAgent))
-	apiMux.HandleFunc("DELETE /admin/agents", a.withMutationGuard(a.handleDeleteAgent))
+	apiMux.HandleFunc("POST /admin/agents", a.handleCreateAgent)
+	apiMux.HandleFunc("DELETE /admin/agents", a.handleDeleteAgent)
 	registerExactMethods(apiMux, "/admin/agents/archives", a.handleAgentArchives, http.MethodGet)
-	registerExactMethods(apiMux, "/admin/agents/sync-tools", a.withMutationGuard(a.handleAgentSyncTools), http.MethodPost)
-	registerExactMethods(apiMux, "/admin/agents/rollback", a.withMutationGuard(a.handleAgentRollback), http.MethodPost)
+	registerExactMethods(apiMux, "/admin/agents/sync-tools", a.handleAgentSyncTools, http.MethodPost)
+	registerExactMethods(apiMux, "/admin/agents/rollback", a.handleAgentRollback, http.MethodPost)
 	apiMux.HandleFunc("GET /admin/agents/{name}", a.handleGetAgent)
-	apiMux.HandleFunc("PUT /admin/agents/{name}", a.withMutationGuard(a.handleUpdateAgent))
-	apiMux.HandleFunc("DELETE /admin/agents/{name}", a.withMutationGuard(a.handleDeleteAgent))
+	apiMux.HandleFunc("PUT /admin/agents/{name}", a.handleUpdateAgent)
+	apiMux.HandleFunc("DELETE /admin/agents/{name}", a.handleDeleteAgent)
 	apiMux.HandleFunc("GET /admin/agents/{name}/dlp", a.handleGetAgentDLP)
-	apiMux.HandleFunc("PUT /admin/agents/{name}/dlp", a.withMutationGuard(a.handleUpdateAgentDLP))
+	apiMux.HandleFunc("PUT /admin/agents/{name}/dlp", a.handleUpdateAgentDLP)
 
 	// Protocol catalog & probing routes
 	apiMux.HandleFunc("GET /admin/protocols", a.handleListProtocols)
-	apiMux.HandleFunc("POST /admin/protocols", a.withMutationGuard(a.handleCreateProtocol))
-	apiMux.HandleFunc("DELETE /admin/protocols", a.withMutationGuard(a.handleDeleteProtocol))
+	apiMux.HandleFunc("POST /admin/protocols", a.handleCreateProtocol)
+	apiMux.HandleFunc("DELETE /admin/protocols", a.handleDeleteProtocol)
 	registerExactMethods(apiMux, "/admin/protocols/presets", a.handleProtocolPresets, http.MethodGet)
 	registerExactMethods(apiMux, "/admin/protocols/probe", a.handleProtocolProbe, http.MethodPost)
 	apiMux.HandleFunc("GET /admin/protocols/{id}", a.handleGetProtocol)
-	apiMux.HandleFunc("PUT /admin/protocols/{id}", a.withMutationGuard(a.handleUpdateProtocol))
-	apiMux.HandleFunc("DELETE /admin/protocols/{id}", a.withMutationGuard(a.handleDeleteProtocol))
+	apiMux.HandleFunc("PUT /admin/protocols/{id}", a.handleUpdateProtocol)
+	apiMux.HandleFunc("DELETE /admin/protocols/{id}", a.handleDeleteProtocol)
 
 	// Operational settings, configuration toggles & runtime reload routes
 	apiMux.HandleFunc("GET /admin/settings", a.getSettings)
-	apiMux.HandleFunc("POST /admin/settings", a.withMutationGuard(a.updateSettings))
-	apiMux.HandleFunc("PUT /admin/settings", a.withMutationGuard(a.updateSettings))
-	registerExactMethods(apiMux, "/admin/settings/reset", a.withMutationGuard(a.handleSettingsReset), http.MethodPost)
-	registerExactMethods(apiMux, "/admin/config/toggle", a.withMutationGuard(a.handleConfigToggle), http.MethodPost)
-	registerExactMethods(apiMux, "/admin/guards/configure", a.withMutationGuard(a.handleGuardConfigure), http.MethodPost)
+	apiMux.HandleFunc("POST /admin/settings", a.updateSettings)
+	apiMux.HandleFunc("PUT /admin/settings", a.updateSettings)
+	registerExactMethods(apiMux, "/admin/settings/reset", a.handleSettingsReset, http.MethodPost)
+	registerExactMethods(apiMux, "/admin/config/toggle", a.handleConfigToggle, http.MethodPost)
+	registerExactMethods(apiMux, "/admin/guards/configure", a.handleGuardConfigure, http.MethodPost)
 	registerExactMethods(apiMux, "/api/reload", a.handleReload, http.MethodPost)
 	registerExactMethods(apiMux, "/admin/reload", a.handleReload, http.MethodPost)
 
 	// Self-service API keys
 	apiMux.HandleFunc("GET /admin/api-keys", a.handleListAPIKeys)
-	apiMux.HandleFunc("POST /admin/api-keys", a.withMutationGuard(a.handleCreateAPIKey))
-	apiMux.HandleFunc("DELETE /admin/api-keys", a.withMutationGuard(a.handleRevokeAPIKey))
+	apiMux.HandleFunc("POST /admin/api-keys", a.handleCreateAPIKey)
+	apiMux.HandleFunc("DELETE /admin/api-keys", a.handleRevokeAPIKey)
 	apiMux.HandleFunc("GET /admin/api-keys/{id}", a.handleGetAPIKey)
-	apiMux.HandleFunc("DELETE /admin/api-keys/{id}", a.withMutationGuard(a.handleRevokeAPIKey))
+	apiMux.HandleFunc("DELETE /admin/api-keys/{id}", a.handleRevokeAPIKey)
 
 	// Guard catalog, lifecycle & HITL routes
 	registerExactMethods(apiMux, "/admin/guards/status", a.handleGuardStatus, http.MethodGet)
 	registerExactMethods(apiMux, "/admin/guards/hitl/pending", a.handleHITLPending, http.MethodGet)
 	registerExactMethods(apiMux, "/admin/guards/hitl/respond", a.handleHITLRespond, http.MethodPost)
 	registerExactMethods(apiMux, "/admin/guards/models", a.handleListGuardModels, http.MethodGet)
-	registerExactMethods(apiMux, "/admin/guards/models/deactivate", a.withMutationGuard(a.handleGuardDeactivateGlobal), http.MethodPost)
+	registerExactMethods(apiMux, "/admin/guards/models/deactivate", a.handleGuardDeactivateGlobal, http.MethodPost)
 	apiMux.HandleFunc("GET /admin/guards/models/{id}", a.handleGetGuardModel)
-	apiMux.HandleFunc("DELETE /admin/guards/models/{id}", a.withMutationGuard(a.handleDeleteGuardModel))
-	registerExactMethods(apiMux, "/admin/guards/models/{id}/connect", a.withMutationGuard(a.handleGuardConnect), http.MethodPost)
-	registerExactMethods(apiMux, "/admin/guards/models/{id}/activate", a.withMutationGuard(a.handleGuardActivate), http.MethodPost)
-	registerExactMethods(apiMux, "/admin/guards/models/{id}/deactivate", a.withMutationGuard(a.handleGuardDeactivateModel), http.MethodPost)
-	registerExactMethods(apiMux, "/admin/guards/models/{id}/policy", a.withMutationGuard(a.handleGuardPolicyUpdate), http.MethodPost, http.MethodPut)
-	registerExactMethods(apiMux, "/admin/guards/models/{id}/install", a.withMutationGuard(a.handleGuardInstall), http.MethodPost)
+	apiMux.HandleFunc("DELETE /admin/guards/models/{id}", a.handleDeleteGuardModel)
+	registerExactMethods(apiMux, "/admin/guards/models/{id}/connect", a.handleGuardConnect, http.MethodPost)
+	registerExactMethods(apiMux, "/admin/guards/models/{id}/activate", a.handleGuardActivate, http.MethodPost)
+	registerExactMethods(apiMux, "/admin/guards/models/{id}/deactivate", a.handleGuardDeactivateModel, http.MethodPost)
+	registerExactMethods(apiMux, "/admin/guards/models/{id}/policy", a.handleGuardPolicyUpdate, http.MethodPost, http.MethodPut)
+	registerExactMethods(apiMux, "/admin/guards/models/{id}/install", a.handleGuardInstall, http.MethodPost)
 	registerExactMethods(apiMux, "/admin/guards/models/{id}/progress", a.handleGuardInstallProgress, http.MethodGet)
 
 	// DLP pattern rules, policy packs, recommendation & dry-run preview routes
 	apiMux.HandleFunc("GET /admin/dlp/rules", a.handleListDlpRules)
-	apiMux.HandleFunc("POST /admin/dlp/rules", a.withMutationGuard(a.handleCreateDlpRule))
+	apiMux.HandleFunc("POST /admin/dlp/rules", a.handleCreateDlpRule)
 	apiMux.HandleFunc("GET /admin/dlp/rules/{id}", a.handleGetDlpRule)
-	apiMux.HandleFunc("PUT /admin/dlp/rules/{id}", a.withMutationGuard(a.handleUpdateDlpRule))
-	apiMux.HandleFunc("DELETE /admin/dlp/rules/{id}", a.withMutationGuard(a.handleDeleteDlpRule))
+	apiMux.HandleFunc("PUT /admin/dlp/rules/{id}", a.handleUpdateDlpRule)
+	apiMux.HandleFunc("DELETE /admin/dlp/rules/{id}", a.handleDeleteDlpRule)
 	apiMux.HandleFunc("GET /admin/policy-packs", a.handleListPolicyPacks)
-	apiMux.HandleFunc("POST /admin/policy-packs", a.withMutationGuard(a.handleCreatePolicyPack))
+	apiMux.HandleFunc("POST /admin/policy-packs", a.handleCreatePolicyPack)
 	registerExactMethods(apiMux, "/admin/policy-packs/recommend", a.handlePolicyRecommend, http.MethodPost)
 	registerExactMethods(apiMux, "/admin/policy-packs/preview", a.handlePolicyPreview, http.MethodPost)
 	registerExactMethods(apiMux, "/admin/policies/preview", a.handlePolicyPreview, http.MethodPost)
 	apiMux.HandleFunc("GET /admin/policy-packs/{id}", a.handleGetPolicyPack)
-	apiMux.HandleFunc("PUT /admin/policy-packs/{id}", a.withMutationGuard(a.handleUpdatePolicyPack))
-	apiMux.HandleFunc("DELETE /admin/policy-packs/{id}", a.withMutationGuard(a.handleDeletePolicyPack))
+	apiMux.HandleFunc("PUT /admin/policy-packs/{id}", a.handleUpdatePolicyPack)
+	apiMux.HandleFunc("DELETE /admin/policy-packs/{id}", a.handleDeletePolicyPack)
 
 	// Captured tool schema baselines
 	registerExactMethods(apiMux, "/admin/schemas", a.handleListSchemas, http.MethodGet)
-	registerExactMethods(apiMux, "/admin/schemas/clear", a.withMutationGuard(a.handleClearSchemas), http.MethodPost)
+	registerExactMethods(apiMux, "/admin/schemas/clear", a.handleClearSchemas, http.MethodPost)
 	registerExactMethods(apiMux, "/admin/schemas/{tool}", a.handleGetSchema, http.MethodGet)
-	registerExactMethods(apiMux, "/admin/schemas/{tool}/pin", a.withMutationGuard(a.handlePinSchema), http.MethodPost)
+	registerExactMethods(apiMux, "/admin/schemas/{tool}/pin", a.handlePinSchema, http.MethodPost)
 
 	// blockedOnAdmin lists MCP protocol paths that must never be served on the admin port.
 	// These are strictly proxy-only endpoints; serving them here would violate port segregation.
@@ -804,7 +790,7 @@ func (a *AdminServer) Start(ctx context.Context) error {
 	if cfg != nil && cfg.AdminTLS.Enabled {
 		slog.Info("Admin UI listening on HTTPS", slog.String("host", adminHost), slog.Int("port", adminPort))
 		go func() {
-			if err := server.ListenAndServeTLS(cfg.AdminTLS.CertFile, cfg.AdminTLS.KeyFile); err != nil && err != http.ErrServerClosed {
+			if err := server.ListenAndServeTLS(cfg.GetAdminTLSCertFile(), cfg.GetAdminTLSKeyFile()); err != nil && err != http.ErrServerClosed {
 				slog.Error("HTTPS Server error", slog.String("error", err.Error()))
 				errCh <- err
 			} else {

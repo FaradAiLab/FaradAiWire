@@ -13,9 +13,9 @@ FaradAiWire supports comprehensive configuration through environment variables. 
 
 Settings are resolved in the following order (highest precedence first):
 
-1. **CLI Flags** (e.g. `--port 9000`, `--standalone`)
-2. **Environment Variables** (e.g. `LISTEN_PORT=9000`)
-3. **Configuration File** (`config.yaml` or `~/.faradaiwire/config.yaml`)
+1. **CLI Flags** (e.g. `--port 9000`, `--host 0.0.0.0`)
+2. **Configuration File** (`config.yaml` or `~/.faradaiwire/config.yaml`) for explicit host/port bindings (`listen_host`, `admin_host`, `listen_port`, `admin_port` — leave commented out when using env overrides)
+3. **Environment Variables** (also takes precedence over `config.yaml` for `FARADAI_WIRE_ALLOW_STDIO`, `FARADAI_WIRE_ALLOW_LOCAL_TARGETS`, `FARADAI_WIRE_LOG_LEVEL`, and `FARADAI_WIRE_GUARD_*_URL`)
 4. **Hardcoded Defaults** (defined in Go package `internal/config`)
 
 ---
@@ -62,7 +62,8 @@ Copy the starter template from `.env.example`:
 
 ```bash
 # Security Credentials
-API_KEY=dev-local-key
+AGENT_API_KEY=
+ADMIN_API_KEY=
 FARADAI_WIRE_HMAC_SECRET=0123456789abcdef0123456789abcdef
 
 # Network Binding

@@ -74,9 +74,7 @@ func setupTestAdminSettings(t *testing.T) (*AdminServer, *settings.DuckDBStore, 
 	}
 
 	cache := settings.NewCache(settings.DefaultOperationalSettings())
-	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-	}
+	cfg := &config.Config{}
 
 	logger := &mockAuditLogger{}
 	telemetry := &mockTelemetryWithLogger{mockAuditLogger: logger}
@@ -288,7 +286,6 @@ func TestConfigToggle_NoFileWrite(t *testing.T) {
 
 	originalYAML := `# FaradAiWire Human-Crafted Configuration
 # NOTE: DO NOT DELETE THESE COMMENTS
-runtime_mode: STANDALONE
 listen_port: 8090
 admin_port: 8095
 filters:
@@ -307,8 +304,7 @@ filters:
 	}
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		ConfigPath:  configPath,
+		ConfigPath: configPath,
 	}
 	server := NewAdminServer(AdminDependencies{
 		Config:          cfg,
@@ -376,9 +372,7 @@ func TestConfigToggle_PersistsToDuckDBAndUsesReloadConfig(t *testing.T) {
 		t.Fatalf("failed to migrate store: %v", err)
 	}
 
-	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-	}
+	cfg := &config.Config{}
 	cfg.Filters.PrefillBlock.Enabled = true
 	cfg.Filters.DLP.Enabled = true
 
@@ -391,7 +385,7 @@ func TestConfigToggle_PersistsToDuckDBAndUsesReloadConfig(t *testing.T) {
 		ReloadFunc: func() error {
 			diskReloadCalled++
 			// Simulate disk load that would revert if invoked by toggle
-			reloaded := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+			reloaded := &config.Config{}
 			reloaded.Filters.PrefillBlock.Enabled = true
 			reloaded.Filters.DLP.Enabled = true
 			server.SetConfig(reloaded)
@@ -450,7 +444,7 @@ func TestConfigToggle_PersistsToDuckDBAndUsesReloadConfig(t *testing.T) {
 func TestConfigToggle_StoreErrorFailsClosed(t *testing.T) {
 	t.Parallel()
 
-	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	cfg := &config.Config{}
 	cfg.Filters.DLP.Enabled = true
 
 	server := NewAdminServer(AdminDependencies{
@@ -483,7 +477,7 @@ func TestConfigToggle_ResetFilterToBaseline(t *testing.T) {
 		t.Fatalf("failed to migrate store: %v", err)
 	}
 
-	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	cfg := &config.Config{}
 	cfg.Filters.DLP.Enabled = true
 
 	var server *AdminServer
@@ -493,7 +487,7 @@ func TestConfigToggle_ResetFilterToBaseline(t *testing.T) {
 		ReloadFunc: func() error {
 			reloadCalled++
 			// Simulate disk load with dlp=true
-			base := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+			base := &config.Config{}
 			base.Filters.DLP.Enabled = true
 			server.SetConfig(base)
 			return nil
@@ -537,7 +531,7 @@ func TestConfigToggle_ResetFilterToBaseline(t *testing.T) {
 func TestStatus_GuardRespectsConfigFlagEvenWhenRunnerWarm(t *testing.T) {
 	t.Parallel()
 
-	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	cfg := &config.Config{}
 	cfg.Filters.Guard.Enabled = false
 
 	server := NewAdminServer(AdminDependencies{
@@ -577,7 +571,7 @@ func TestStatus_GuardRespectsConfigFlagEvenWhenRunnerWarm(t *testing.T) {
 func TestSettingsAPI_UpdateRejectsFilterKeys(t *testing.T) {
 	t.Parallel()
 
-	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	cfg := &config.Config{}
 	server := NewAdminServer(AdminDependencies{Config: cfg})
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/settings", bytes.NewReader([]byte(`{"key":"filters.dlp","value":false}`)))
@@ -595,7 +589,7 @@ func TestConfigToggle_MissingEnabledAndReloadError(t *testing.T) {
 
 	t.Run("MissingEnabledReturns400", func(t *testing.T) {
 		t.Parallel()
-		cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+		cfg := &config.Config{}
 		server := NewAdminServer(AdminDependencies{Config: cfg})
 
 		req := httptest.NewRequest(http.MethodPost, "/admin/config/toggle", bytes.NewReader([]byte(`{"filter":"dlp"}`)))
@@ -623,7 +617,7 @@ func TestConfigToggle_MissingEnabledAndReloadError(t *testing.T) {
 			t.Fatalf("seed dlp: %v", err)
 		}
 
-		cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+		cfg := &config.Config{}
 		cfg.Filters.DLP.Enabled = true
 		server := NewAdminServer(AdminDependencies{
 			Config:        cfg,
@@ -661,7 +655,7 @@ func TestConfigToggle_ConcurrentRequests_RaceFree(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+	cfg := &config.Config{}
 	var server *AdminServer
 	server = NewAdminServer(AdminDependencies{
 		Config:        cfg,
@@ -704,35 +698,7 @@ func TestConfigToggle_ConcurrentRequests_RaceFree(t *testing.T) {
 	wg.Wait()
 }
 
-func TestSettings_ManagedMode_AllowsGET_BlocksMutations(t *testing.T) {
-	t.Parallel()
-
-	cfg := &config.Config{RuntimeMode: config.RuntimeModeManaged}
-	server := NewAdminServer(AdminDependencies{
-		Config:        cfg,
-		SettingsCache: settings.NewCache(nil),
-	})
-	handler := server.Handler()
-
-	getReq := httptest.NewRequest(http.MethodGet, "/admin/settings", nil)
-	getRec := httptest.NewRecorder()
-	handler.ServeHTTP(getRec, getReq)
-	if getRec.Code != http.StatusOK {
-		t.Fatalf("expected GET /admin/settings to succeed in MANAGED mode, got %d: %s", getRec.Code, getRec.Body.String())
-	}
-
-	for _, method := range []string{http.MethodPost, http.MethodPut} {
-		mutReq := httptest.NewRequest(method, "/admin/settings", strings.NewReader(`{"key":"timeouts.probe_timeout_sec","value":12}`))
-		mutReq.Header.Set("Content-Type", "application/json")
-		mutRec := httptest.NewRecorder()
-		handler.ServeHTTP(mutRec, mutReq)
-		if mutRec.Code != http.StatusForbidden {
-			t.Fatalf("expected %s /admin/settings to return 403 in MANAGED mode, got %d", method, mutRec.Code)
-		}
-	}
-}
-
-func TestSettings_LegacyValidationAndProbeTimeoutSec(t *testing.T) {
+func TestSettings_RejectsRemovedLegacyKeysAndUpdatesProbeTimeoutSec(t *testing.T) {
 	t.Parallel()
 
 	db, err := sql.Open("duckdb", ":memory:")
@@ -745,7 +711,7 @@ func TestSettings_LegacyValidationAndProbeTimeoutSec(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone, PollIntervalSeconds: 30}
+	cfg := &config.Config{}
 	cache := settings.NewCache(settings.DefaultOperationalSettings())
 	var server *AdminServer
 	server = NewAdminServer(AdminDependencies{
@@ -759,16 +725,16 @@ func TestSettings_LegacyValidationAndProbeTimeoutSec(t *testing.T) {
 	})
 	handler := server.Handler()
 
-	// Invalid poll_interval_seconds returns 400 without mutating cfg
-	badReq := httptest.NewRequest(http.MethodPost, "/admin/settings", strings.NewReader(`{"poll_interval_seconds":0}`))
+	// Removed legacy top-level keys only payload returns 400 (no valid setting keys)
+	badReq := httptest.NewRequest(http.MethodPost, "/admin/settings", strings.NewReader(`{"poll_interval_seconds":30,"auto_sync_mcp":true}`))
 	badRec := httptest.NewRecorder()
 	handler.ServeHTTP(badRec, badReq)
 	if badRec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 on invalid poll_interval_seconds, got %d", badRec.Code)
+		t.Fatalf("expected 400 on removed legacy keys, got %d: %s", badRec.Code, badRec.Body.String())
 	}
 
-	// Valid PUT updates timeouts.probe_timeout_sec + poll_interval_seconds cleanly
-	putReq := httptest.NewRequest(http.MethodPut, "/admin/settings", strings.NewReader(`{"timeouts.probe_timeout_sec":12,"poll_interval_seconds":45}`))
+	// Valid PUT updates timeouts.probe_timeout_sec cleanly
+	putReq := httptest.NewRequest(http.MethodPut, "/admin/settings", strings.NewReader(`{"timeouts.probe_timeout_sec":12}`))
 	putRec := httptest.NewRecorder()
 	handler.ServeHTTP(putRec, putReq)
 	if putRec.Code != http.StatusOK {
@@ -811,7 +777,6 @@ func TestAgents_MaskSecrets_HydrateEnvOnPUT_AndArchivePerms(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		RuntimeMode:  config.RuntimeModeStandalone,
 		AgentsDir:    agentsDir,
 		ProtocolsDir: protosDir,
 	}
@@ -899,10 +864,9 @@ func TestAgents_MaskSecrets_HydrateEnvOnPUT_AndArchivePerms(t *testing.T) {
 
 func BenchmarkHandleStatus(b *testing.B) {
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		ListenHost:  "127.0.0.1",
-		ListenPort:  8090,
-		AdminPort:   8095,
+		ListenHost: "127.0.0.1",
+		ListenPort: 8090,
+		AdminPort:  8095,
 	}
 	server := NewAdminServer(AdminDependencies{Config: cfg})
 	handler := server.Handler()
@@ -982,7 +946,7 @@ func TestSettingsResetAndToggle_RollbackDuckDBOnReloadFailure(t *testing.T) {
 			t.Fatalf("migrate: %v", err)
 		}
 
-		cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+		cfg := &config.Config{}
 		cfg.Filters.DLP.Enabled = true
 		server := NewAdminServer(AdminDependencies{
 			Config:        cfg,
@@ -1021,7 +985,7 @@ func TestSettingsResetAndToggle_RollbackDuckDBOnReloadFailure(t *testing.T) {
 			t.Fatalf("seed dlp: %v", err)
 		}
 
-		cfg := &config.Config{RuntimeMode: config.RuntimeModeStandalone}
+		cfg := &config.Config{}
 		cfg.Filters.DLP.Enabled = false
 		server := NewAdminServer(AdminDependencies{
 			Config:        cfg,

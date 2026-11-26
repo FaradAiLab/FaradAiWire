@@ -13,9 +13,10 @@ import (
 type SettingType string
 
 const (
-	TypeInt   SettingType = "int"
-	TypeFloat SettingType = "float"
-	TypeBool  SettingType = "bool"
+	TypeInt    SettingType = "int"
+	TypeFloat  SettingType = "float"
+	TypeBool   SettingType = "bool"
+	TypeString SettingType = "string"
 )
 
 // SettingMeta encapsulates the declarative schema, labels, constraints, and descriptions
@@ -371,6 +372,24 @@ func validateMeta(key string, meta SettingMeta, val any) error {
 			return fmt.Errorf("%w: key %q expects a boolean value, got %T", ErrInvalidValue, key, val)
 		}
 
+	case TypeString:
+		s, ok := val.(string)
+		if !ok {
+			return fmt.Errorf("%w: key %q expects a string value, got %T", ErrInvalidValue, key, val)
+		}
+		switch key {
+		case GuardDiscoveryModeKey:
+			switch strings.ToLower(strings.TrimSpace(s)) {
+			case "auto", "ollama", "docker", "custom":
+			default:
+				return fmt.Errorf("%w: key %q must be one of auto, ollama, docker, custom; got %q", ErrInvalidValue, key, s)
+			}
+		case GuardDiscoveryOllamaURLKey, GuardDiscoveryDockerURLKey, GuardDiscoveryCustomURLKey:
+			if err := ValidateGuardDiscoveryURL(s); err != nil {
+				return fmt.Errorf("%w: key %q invalid URL: %v", ErrInvalidValue, key, err)
+			}
+		}
+
 	default:
 		return fmt.Errorf("%w: unhandled setting type %q for key %q", ErrInvalidValue, meta.Type, key)
 	}
@@ -408,6 +427,8 @@ func ParseAndValidate(key string, strVal string) (any, error) {
 			return nil, fmt.Errorf("%w: key %q cannot parse bool from %q: %v", ErrInvalidValue, key, strVal, err)
 		}
 		parsed = v
+	case TypeString:
+		parsed = trimmed
 	default:
 		return nil, fmt.Errorf("%w: unsupported type %q for key %q", ErrInvalidValue, meta.Type, key)
 	}

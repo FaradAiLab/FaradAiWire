@@ -10,12 +10,6 @@ func TestConfigPublicAPI(t *testing.T) {
 	if config.Version == "" {
 		t.Errorf("expected Version to be non-empty")
 	}
-	if config.RuntimeModeStandalone != "STANDALONE" {
-		t.Errorf("expected RuntimeModeStandalone 'STANDALONE', got %s", config.RuntimeModeStandalone)
-	}
-	if config.RuntimeModeManaged != "MANAGED" {
-		t.Errorf("expected RuntimeModeManaged 'MANAGED', got %s", config.RuntimeModeManaged)
-	}
 
 	dir := config.DefaultFaradAiWireDir()
 	if dir == "" {

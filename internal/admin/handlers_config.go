@@ -31,12 +31,9 @@ func (a *AdminServer) handleClearSchemas(w http.ResponseWriter, r *http.Request)
 }
 
 func (a *AdminServer) handleMCPTools(w http.ResponseWriter, r *http.Request) {
-	var schemasDir string
+	schemasDir := filepath.Join(config.DefaultFaradAiWireDir(), "schemas")
 	if cfg := a.Config(); cfg != nil {
-		schemasDir = cfg.Filters.SchemaValidation.SchemasDir
-	}
-	if schemasDir == "" {
-		schemasDir = filepath.Join(config.DefaultFaradAiWireDir(), "schemas")
+		schemasDir = cfg.GetSchemasDir()
 	}
 	mcpToolsPath := filepath.Join(schemasDir, "mcp_tools.json")
 
@@ -70,10 +67,8 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 	}
 	enabled := *req.Enabled
 
-	isFilter := settings.IsSupportedFilterName(req.FilterName)
-	isLegacyToggle := settings.IsLegacyToggleName(req.FilterName)
-	if !isFilter && !isLegacyToggle {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Unknown setting/filter: "+req.FilterName)
+	if !settings.IsSupportedFilterName(req.FilterName) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Unknown filter: "+req.FilterName)
 		return
 	}
 
@@ -89,7 +84,7 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 		prevOverride string
 		hadOverride  bool
 	)
-	if isFilter && sStore != nil {
+	if sStore != nil {
 		var getErr error
 		prevOverride, hadOverride, getErr = sStore.Get(ctx, filterKey)
 		if getErr != nil {
@@ -105,13 +100,13 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 	}
 
 	nextCfg := a.cloneAndMutateConfig(func(c *config.Config) {
-		settings.ApplyRuntimeToggle(c, req.FilterName, enabled)
+		settings.ApplyFilterToggleToConfig(c, req.FilterName, enabled)
 	})
 
 	// Trigger runtime reload in memory without touching config.yaml on disk (ADR-0053 / ADR-0054)
 	if err := a.applyConfigReload(nextCfg); err != nil {
 		slog.ErrorContext(ctx, "Failed to reload after config toggle", slog.String("filter", req.FilterName), slog.String("error", err.Error()))
-		if isFilter && sStore != nil {
+		if sStore != nil {
 			rbCtx, rbCancel := context.WithTimeout(context.Background(), 3*time.Second)
 			var rbErr error
 			if hadOverride {
@@ -153,14 +148,6 @@ func (a *AdminServer) handleConfigToggle(w http.ResponseWriter, r *http.Request)
 func (a *AdminServer) getSettings(w http.ResponseWriter, r *http.Request) {
 	sStore := a.settingsStore
 	sCache := a.settingsCache
-
-	var pollInterval int
-	var autoSyncMCP, autoUpdatePolicies bool
-	if cfg := a.Config(); cfg != nil {
-		pollInterval = cfg.PollIntervalSeconds
-		autoSyncMCP = cfg.AutoSyncMCP
-		autoUpdatePolicies = cfg.AutoUpdatePolicies
-	}
 
 	var overrides map[string]string
 	if sStore != nil {
@@ -205,12 +192,9 @@ func (a *AdminServer) getSettings(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(categories)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":                "success",
-		"categories":            categories,
-		"settings":              items,
-		"poll_interval_seconds": pollInterval,
-		"auto_sync_mcp":         autoSyncMCP,
-		"auto_update_policies":  autoUpdatePolicies,
+		"status":     "success",
+		"categories": categories,
+		"settings":   items,
 	})
 }
 
@@ -247,49 +231,7 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Validate legacy fields upfront before mutating DuckDB or runtime config.
-	var (
-		hasLegacy        bool
-		setPollInterval  bool
-		pollIntervalVal  int
-		setAutoSyncMCP   bool
-		autoSyncMCPVal   bool
-		setAutoUpdatePol bool
-		autoUpdatePolVal bool
-	)
-	if rawPoll, present := payload["poll_interval_seconds"]; present {
-		pollFloat, ok := rawPoll.(float64)
-		pollInt := int(pollFloat)
-		if !ok || float64(pollInt) != pollFloat || pollInt < 1 || pollInt > 86400 {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid poll_interval_seconds: must be an integer between 1 and 86400")
-			return
-		}
-		setPollInterval = true
-		pollIntervalVal = pollInt
-		hasLegacy = true
-	}
-	if rawSync, present := payload["auto_sync_mcp"]; present {
-		b, ok := rawSync.(bool)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid auto_sync_mcp: must be a boolean")
-			return
-		}
-		setAutoSyncMCP = true
-		autoSyncMCPVal = b
-		hasLegacy = true
-	}
-	if rawUpdatePol, present := payload["auto_update_policies"]; present {
-		b, ok := rawUpdatePol.(bool)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid auto_update_policies: must be a boolean")
-			return
-		}
-		setAutoUpdatePol = true
-		autoUpdatePolVal = b
-		hasLegacy = true
-	}
-
-	if len(toUpdate) == 0 && !hasLegacy {
+	if len(toUpdate) == 0 {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "No valid setting keys found in request payload")
 		return
 	}
@@ -355,35 +297,6 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 		oldVal, _ := settings.ExtractSetting(currentSettings, k)
 		_ = settings.ApplySetting(currentSettings, k, v)
 		audits = append(audits, pendingAudit{key: k, oldVal: oldVal, newVal: v})
-	}
-
-	if hasLegacy {
-		nextCfg := a.cloneAndMutateConfig(func(c *config.Config) {
-			if setPollInterval {
-				c.PollIntervalSeconds = pollIntervalVal
-			}
-			if setAutoSyncMCP {
-				c.AutoSyncMCP = autoSyncMCPVal
-			}
-			if setAutoUpdatePol {
-				c.AutoUpdatePolicies = autoUpdatePolVal
-			}
-		})
-		if setPollInterval {
-			toUpdate["poll_interval_seconds"] = pollIntervalVal
-		}
-		if setAutoSyncMCP {
-			toUpdate["auto_sync_mcp"] = autoSyncMCPVal
-		}
-		if setAutoUpdatePol {
-			toUpdate["auto_update_policies"] = autoUpdatePolVal
-		}
-		if err := a.applyConfigReload(nextCfg); err != nil {
-			slog.ErrorContext(ctx, "Failed to reload config after legacy settings update", slog.String("error", err.Error()))
-			rollbackPersisted()
-			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to reload configuration after settings update: %v", err))
-			return
-		}
 	}
 
 	for _, aEv := range audits {

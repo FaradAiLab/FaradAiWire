@@ -53,6 +53,12 @@ func ResolveEffectiveSettings(base *config.Config, overrides map[string]string) 
 		if base.Telemetry.MaxPayloadBytes >= 65536 && base.Telemetry.MaxPayloadBytes <= 4194304 {
 			effective.Limits.MaxPreviewBytes = base.Telemetry.MaxPayloadBytes
 		}
+		if base.AuditLog.MaxSizeMB >= 1 && base.AuditLog.MaxSizeMB <= 100 {
+			effective.Maintenance.AuditJSONLMaxSizeMB = base.AuditLog.MaxSizeMB
+		}
+		if base.AuditLog.MaxFiles >= 1 && base.AuditLog.MaxFiles <= 100 {
+			effective.Maintenance.AuditJSONLMaxFiles = base.AuditLog.MaxFiles
+		}
 	}
 
 	// Overlay sparse DuckDB overrides

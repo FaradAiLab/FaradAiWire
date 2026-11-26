@@ -46,7 +46,7 @@ func printStartupBanner(cfg *config.Config, out io.Writer) {
 	if cfg != nil && !cfg.IsStdioAllowed() {
 		transportDesc = "MCP HTTP / SSE Only (Containerized)"
 	}
-	fmt.Fprintf(out, "\nFaradAiWire v%s (%s Mode)\n", strings.TrimPrefix(version, "v"), cfg.GetRuntimeMode())
+	fmt.Fprintf(out, "\nFaradAiWire v%s\n", strings.TrimPrefix(version, "v"))
 	fmt.Fprintf(out, "├── Ingress Proxy   : http://%s (%s)\n", net.JoinHostPort(cfg.GetListenHost(), strconv.Itoa(cfg.GetListenPort())), transportDesc)
 	fmt.Fprintf(out, "├── Admin Console   : %s://%s\n", adminScheme, net.JoinHostPort(cfg.GetAdminHost(), strconv.Itoa(cfg.GetAdminPort())))
 	if adminKeyPrefix := lookupBannerAdminKeyPrefix(cfg); adminKeyPrefix != "" || (cfg != nil && !cfg.IsStdioAllowed()) {
@@ -73,19 +73,19 @@ func printStartupBanner(cfg *config.Config, out io.Writer) {
 	fmt.Fprintf(out, "    ├── Loop & Rate Protection   : %s\n", statusTag(loopOrRate))
 
 	// AI Guard Discovery Hint
-	if !cfg.Filters.InjectionScanner.Enabled {
+	if !cfg.Filters.Guard.Enabled {
 		fmt.Fprintln(out, "    └── AI Guard                 : [DISABLED]")
 		fmt.Fprintln(out)
 		return
 	}
 
-	classifierURL := strings.TrimSpace(cfg.Filters.InjectionScanner.ClassifierURL)
+	customURL := strings.TrimSpace(cfg.Filters.Guard.Discovery.CustomURL)
 	probeCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
 	probeRes := guardprobe.ProbeWithDiscovery(
 		probeCtx,
-		classifierURL,
+		customURL,
 		cfg.Filters.Guard.Discovery.GetEffectiveDockerURL(),
 		cfg.Filters.Guard.Discovery.GetEffectiveOllamaURL(),
 	)

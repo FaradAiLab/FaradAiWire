@@ -3,7 +3,6 @@ export interface GatewayStatus {
   status: string
   active_filters: string[]
   active_filters_count: number
-  runtime_mode: string
   gateway_id?: string
   ingress_port?: number
   ingress_host?: string
@@ -11,14 +10,13 @@ export interface GatewayStatus {
   guard_tier?: string
   guard_status?: {
     tier?: string
-    classifier_url?: string
+    custom_url?: string
     model?: string
     active?: boolean
   }
   guard_model?: string
   guard_endpoint?: string
   guard_latency_ms?: number
-  auto_sync_mcp?: boolean
   hot_reload?: boolean
   allow_stdio?: boolean
   admin_auth_required?: boolean
@@ -50,9 +48,6 @@ export interface SettingsResponse {
   status: string
   categories: string[]
   settings: SettingItem[]
-  poll_interval_seconds?: number
-  auto_sync_mcp?: boolean
-  auto_update_policies?: boolean
 }
 
 export interface SecurityFiltersConfig {
@@ -62,7 +57,6 @@ export interface SecurityFiltersConfig {
   schema_validation: boolean
   dlp: boolean
   guard: boolean
-  injection_scanner?: boolean
   hitl: boolean
 }
 

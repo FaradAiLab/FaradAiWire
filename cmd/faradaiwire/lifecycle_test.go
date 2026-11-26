@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
+	"gopkg.in/yaml.v3"
 )
 
 func getDistinctLifecyclePorts(t *testing.T) (int, int) {
@@ -48,10 +49,9 @@ func writeLifecycleTestConfig(t *testing.T, tempHome string, withAuditAndDB bool
 	listenPort, adminPort := getDistinctLifecyclePorts(t)
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		ListenPort:  listenPort,
-		AdminPort:   adminPort,
-		Mode:        "stdio",
+		ListenPort: listenPort,
+		AdminPort:  adminPort,
+		Mode:       "stdio",
 		Stdio: config.StdioConfig{
 			Command:     "sleep",
 			Args:        []string{"60"},
@@ -72,8 +72,11 @@ func writeLifecycleTestConfig(t *testing.T, tempHome string, withAuditAndDB bool
 		}
 	}
 
-	provider := config.NewYAMLConfigProvider(cfgPath)
-	if err := provider.Save(cfg); err != nil {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("failed to marshal test config: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
 		t.Fatalf("failed to save test config: %v", err)
 	}
 	return cfgPath, auditPath, dbPath

@@ -13,11 +13,11 @@ FaradAiWire uses YAML for its primary configuration file (`config.yaml`). The fi
 # ==============================================================================
 
 # Network Port Bindings
-listen_host: "127.0.0.1"           # Ingress listener host (default 127.0.0.1)
+# listen_host: "127.0.0.1"         # Ingress listener host (default 127.0.0.1; keep commented to allow FARADAI_WIRE_HOST override)
 listen_port: 19410                 # Ingress Proxy port (Fail-Closed Bearer Auth)
-admin_host: "127.0.0.1"            # Admin Console host (default 127.0.0.1; non-loopback requires an active Admin key in keys/api_keys.json)
+# admin_host: "127.0.0.1"          # Admin Console host (default 127.0.0.1; non-loopback requires an active Admin key in keys/api_keys.json)
 admin_port: 19415                  # Admin Console & REST API port (Loopback by default)
-agents_dir: "./agents"             # Directory containing per-agent configurations
+agents_dir: "~/.faradaiwire/agents" # Directory containing per-agent configurations
 
 # Security & Access Guardrails
 security:
@@ -27,9 +27,6 @@ security:
     - "http://localhost:19418"
     - "http://localhost:19410"
     - "http://localhost:19415"
-  trusted_proxies:
-    - "127.0.0.1/32"
-    - "10.0.0.0/8"
   ssrf_protection:
     enabled: true                  # Block requests to private/link-local IP addresses
     block_private_ips: true        # Disallow RFC 1918 and loopback upstream destinations
@@ -119,9 +116,15 @@ filters:
 # Audit Telemetry Log File
 audit_log:
   enabled: true
-  path: "./logs/faradai_audit.jsonl"
-                                   # Rotates into hash-chained segments (default 10 MB x 10 files, 30 days);
-                                   # tune live via maintenance.* runtime settings
+  path: "~/.faradaiwire/logs/faradai_audit.jsonl"
+  max_size_mb: 10                  # Baseline segment size (1-100 MB, live override via maintenance.audit_jsonl_max_size_mb)
+  max_files: 10                    # Baseline rotated files (1-100, live override via maintenance.audit_jsonl_max_files)
+
+# Local DuckDB Telemetry & Analytics
+telemetry:
+  enabled: true
+  retention_days: 30               # Default: 30 days
+  max_payload_bytes: 524288        # Default: 512 KB
 
 # Structured Runtime Logging
 logging:

@@ -19,7 +19,6 @@ func TestGateway_RealObservabilityWiringAndDrainingTransition(t *testing.T) {
 	t.Setenv("FARADAI_WIRE_HOME", tempDir)
 
 	cfg := &config.Config{
-		RuntimeMode:  config.RuntimeModeStandalone,
 		ListenHost:   "127.0.0.1",
 		ListenPort:   19490,
 		AdminHost:    "127.0.0.1",

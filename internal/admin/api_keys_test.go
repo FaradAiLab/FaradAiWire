@@ -14,8 +14,7 @@ import (
 
 func setupTestAdminServerWithKeyStore() (*AdminServer, auth.KeyStore) {
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		AdminPort:   8090,
+		AdminPort: 8090,
 	}
 	keyStore := auth.NewMemoryKeyStore()
 	server := NewAdminServer(AdminDependencies{

@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,20 +17,16 @@ func TestConfigDefaults(t *testing.T) {
 		t.Errorf("expected default listen host '127.0.0.1', got %s", host)
 	}
 
+	if host := cfg.GetAdminHost(); host != "127.0.0.1" {
+		t.Errorf("expected default admin host '127.0.0.1', got %s", host)
+	}
+
 	if port := cfg.GetListenPort(); port != 19410 {
 		t.Errorf("expected default listen port 19410, got %d", port)
 	}
 
 	if adminPort := cfg.GetAdminPort(); adminPort != 19415 {
 		t.Errorf("expected default admin port 19415, got %d", adminPort)
-	}
-
-	if mode := cfg.GetRuntimeMode(); mode != config.RuntimeModeStandalone {
-		t.Errorf("expected default runtime mode STANDALONE, got %s", mode)
-	}
-
-	if !cfg.IsStandalone() {
-		t.Errorf("expected IsStandalone() to be true by default")
 	}
 
 	expectedAgentsDir := filepath.Join(config.DefaultFaradAiWireDir(), "agents")
@@ -41,10 +38,13 @@ func TestConfigDefaults(t *testing.T) {
 	cfg.ListenPort = 9000
 	cfg.AdminPort = 9095
 	cfg.AgentsDir = "/custom/agents"
-	cfg.RuntimeMode = config.RuntimeModeManaged
 
 	if host := cfg.GetListenHost(); host != "0.0.0.0" {
 		t.Errorf("expected custom listen host '0.0.0.0', got %s", host)
+	}
+
+	if host := cfg.GetAdminHost(); host != "127.0.0.1" {
+		t.Errorf("expected admin host to remain '127.0.0.1' regardless of ListenHost, got %s", host)
 	}
 
 	if port := cfg.GetListenPort(); port != 9000 {
@@ -55,26 +55,8 @@ func TestConfigDefaults(t *testing.T) {
 		t.Errorf("expected custom admin port 9095, got %d", adminPort)
 	}
 
-	if mode := cfg.GetRuntimeMode(); mode != config.RuntimeModeManaged {
-		t.Errorf("expected runtime mode MANAGED, got %s", mode)
-	}
-
-	if cfg.IsStandalone() {
-		t.Errorf("expected IsStandalone() to be false for MANAGED mode")
-	}
-
 	if dir := cfg.GetAgentsDir(); dir != "/custom/agents" {
 		t.Errorf("expected custom agents dir /custom/agents, got %s", dir)
-	}
-
-	// Fallback to SSE.ListenPort
-	cfg2 := &config.Config{
-		SSE: config.SSEConfig{
-			ListenPort: 8888,
-		},
-	}
-	if port := cfg2.GetListenPort(); port != 8888 {
-		t.Errorf("expected fallback listen port 8888, got %d", port)
 	}
 }
 
@@ -128,9 +110,6 @@ func TestEnsureDefaultRuntimeConfig(t *testing.T) {
 		t.Fatalf("failed to load generated default config: %v", err)
 	}
 
-	if cfg.GetRuntimeMode() != config.RuntimeModeStandalone {
-		t.Errorf("expected generated config mode to be STANDALONE, got %s", cfg.GetRuntimeMode())
-	}
 	if cfg.GetListenHost() != "127.0.0.1" {
 		t.Errorf("expected generated config listen host '127.0.0.1', got %s", cfg.GetListenHost())
 	}
@@ -206,8 +185,6 @@ listen_port: 8090
 agents_dir: "./agents"
 mode: "sse"
 hot_reload: true
-security:
-  admin_auth_required: true
 user_context:
   fallback_role: "Developer"
 filters:
@@ -339,10 +316,9 @@ func TestConfig_Clone(t *testing.T) {
 	httpEnabled := true
 	telemetryEnabled := true
 	orig := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		ListenHost:  "127.0.0.1",
-		ListenPort:  8090,
-		AdminPort:   8095,
+		ListenHost: "127.0.0.1",
+		ListenPort: 8090,
+		AdminPort:  8095,
 		Security: config.SecurityConfig{
 			CORSAllowedOrigins: []string{"http://localhost:8095"},
 			RateLimiting: config.HTTPRateLimitConfig{
@@ -527,4 +503,185 @@ func TestConfig_IsStdioAllowed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConfig_TildeExpansionAndPathDefaults(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("user home dir unavailable")
+	}
+
+	t.Run("FARADAI_WIRE_HOME expands tilde", func(t *testing.T) {
+		t.Setenv("FARADAI_WIRE_HOME", "~/.faradaiwire-custom")
+		want := filepath.Join(home, ".faradaiwire-custom")
+		if got := config.DefaultFaradAiWireDir(); got != want {
+			t.Errorf("DefaultFaradAiWireDir() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("config path getters expand tilde and default cleanly", func(t *testing.T) {
+		tempHome := t.TempDir()
+		t.Setenv("FARADAI_WIRE_HOME", tempHome)
+
+		cfg := &config.Config{
+			AgentsDir:    "~/custom-agents",
+			ProtocolsDir: "~/custom-protocols",
+			AuditLog:     config.AuditLogConfig{Enabled: true, Path: "~/.faradaiwire/logs/audit.jsonl"},
+			Telemetry:    config.TelemetryConfig{DBPath: "~/db/wire.duckdb"},
+			Security:     config.SecurityConfig{APIKeysPath: "~/keys/api.json"},
+			AdminTLS:     config.AdminTLSConfig{CertFile: "~/certs/cert.pem", KeyFile: "~/certs/key.pem"},
+			Filters: config.FiltersConfig{
+				SchemaValidation: config.SchemaValidationConfig{SchemasDir: "~/schemas"},
+			},
+		}
+
+		cases := []struct {
+			name string
+			got  string
+			want string
+		}{
+			{"AgentsDir", cfg.GetAgentsDir(), filepath.Join(home, "custom-agents")},
+			{"ProtocolsDir", cfg.GetProtocolsDir(), filepath.Join(home, "custom-protocols")},
+			{"AuditLogPath", cfg.GetAuditLogPath(), filepath.Join(home, ".faradaiwire", "logs", "audit.jsonl")},
+			{"TelemetryDBPath", cfg.GetTelemetryDBPath(), filepath.Join(home, "db", "wire.duckdb")},
+			{"APIKeysPath", cfg.GetAPIKeysPath(), filepath.Join(home, "keys", "api.json")},
+			{"SchemasDir", cfg.GetSchemasDir(), filepath.Join(home, "schemas")},
+			{"AdminTLSCertFile", cfg.GetAdminTLSCertFile(), filepath.Join(home, "certs", "cert.pem")},
+			{"AdminTLSKeyFile", cfg.GetAdminTLSKeyFile(), filepath.Join(home, "certs", "key.pem")},
+		}
+		for _, tc := range cases {
+			if tc.got != tc.want {
+				t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+			}
+		}
+
+		emptyCfg := &config.Config{}
+		if got, want := emptyCfg.GetAuditLogPath(), filepath.Join(tempHome, "logs", "faradai_audit.jsonl"); got != want {
+			t.Errorf("empty GetAuditLogPath() = %q, want %q", got, want)
+		}
+		if got, want := emptyCfg.GetSchemasDir(), filepath.Join(tempHome, "schemas"); got != want {
+			t.Errorf("empty GetSchemasDir() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestConfig_NilAndPointerSafety(t *testing.T) {
+	t.Parallel()
+
+	var nilCfg *config.Config
+	if !nilCfg.IsTelemetryEnabled() {
+		t.Error("expected nil Config.IsTelemetryEnabled() to default to true")
+	}
+
+	origEnabled := false
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			RateLimiting: config.HTTPRateLimitConfig{
+				Enabled: &origEnabled,
+			},
+		},
+	}
+	got := cfg.GetHTTPRateLimitConfig()
+	if got.Enabled == nil || *got.Enabled {
+		t.Fatalf("expected cloned Enabled=false, got %v", got.Enabled)
+	}
+	*got.Enabled = true
+	if *cfg.Security.RateLimiting.Enabled {
+		t.Error("mutating GetHTTPRateLimitConfig().Enabled must not mutate original Config")
+	}
+}
+
+func TestEnsureDefaultRuntimeConfig_NoInvalidAdminAuthKey(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("FARADAI_WIRE_HOME", tempHome)
+
+	cfgPath, err := config.EnsureDefaultRuntimeConfig()
+	if err != nil {
+		t.Fatalf("EnsureDefaultRuntimeConfig: %v", err)
+	}
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read generated config: %v", err)
+	}
+	if strings.Contains(string(raw), "admin_auth_required") {
+		t.Errorf("expected generated config not to contain invalid admin_auth_required key")
+	}
+	if strings.Contains(string(raw), "runtime_mode") {
+		t.Errorf("expected generated config not to contain removed runtime_mode key")
+	}
+}
+
+func TestYAMLConfigProvider_NonStrictIgnoresLegacyFields(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	legacyYAML := `runtime_mode: STANDALONE
+admin_auth_required: false
+private_key_path: /tmp/legacy.pem
+auto_sync_mcp: true
+auto_update_policies: true
+poll_interval_seconds: 30
+policy_poll_interval_seconds: 60
+tool_sync_interval_seconds: 120
+listen_port: 19411
+admin_port: 19416
+sse:
+  listen_port: 8888
+  target_url: "http://127.0.0.1:9000/sse"
+security:
+  trusted_proxies:
+    - "127.0.0.1"
+  context_hmac_secret: "legacy-secret"
+filters:
+  injection_scanner:
+    enabled: true
+  dlp:
+    enabled: true
+`
+	if err := os.WriteFile(cfgPath, []byte(legacyYAML), 0o600); err != nil {
+		t.Fatalf("write legacy yaml: %v", err)
+	}
+
+	provider := config.NewYAMLConfigProvider(cfgPath)
+	cfg, err := provider.Load()
+	if err != nil {
+		t.Fatalf("expected non-strict Load to ignore removed legacy fields cleanly, got: %v", err)
+	}
+	if cfg.GetListenPort() != 19411 {
+		t.Errorf("GetListenPort() = %d, want 19411", cfg.GetListenPort())
+	}
+	if cfg.GetAdminPort() != 19416 {
+		t.Errorf("GetAdminPort() = %d, want 19416", cfg.GetAdminPort())
+	}
+	if cfg.SSE.TargetURL != "http://127.0.0.1:9000/sse" {
+		t.Errorf("SSE.TargetURL = %q, want http://127.0.0.1:9000/sse", cfg.SSE.TargetURL)
+	}
+	if !cfg.Filters.DLP.Enabled {
+		t.Error("expected Filters.DLP.Enabled to be true")
+	}
+}
+
+func TestConfig_GetAdminHost_Precedence(t *testing.T) {
+	t.Run("ignores ListenHost and respects AdminHost over env and default", func(t *testing.T) {
+		t.Setenv("FARADAI_WIRE_ADMIN_HOST", "10.0.0.5")
+
+		cfg := &config.Config{ListenHost: "0.0.0.0"}
+		if got := cfg.GetAdminHost(); got != "10.0.0.5" {
+			t.Errorf("GetAdminHost() with env = %q, want 10.0.0.5", got)
+		}
+
+		cfg.AdminHost = "127.0.0.2"
+		if got := cfg.GetAdminHost(); got != "127.0.0.2" {
+			t.Errorf("GetAdminHost() with explicit AdminHost = %q, want 127.0.0.2", got)
+		}
+	})
+
+	t.Run("defaults to 127.0.0.1 when both AdminHost and env are empty", func(t *testing.T) {
+		t.Setenv("FARADAI_WIRE_ADMIN_HOST", "")
+		cfg := &config.Config{ListenHost: "192.168.1.50"}
+		if got := cfg.GetAdminHost(); got != "127.0.0.1" {
+			t.Errorf("GetAdminHost() = %q, want 127.0.0.1", got)
+		}
+	})
 }

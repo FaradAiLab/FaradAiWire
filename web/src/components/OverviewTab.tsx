@@ -236,7 +236,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh }) =
             <Server className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
           </div>
           <div className="text-xl font-bold font-mono text-indigo-700 dark:text-indigo-300 tracking-tight">
-            {status?.runtime_mode === 'MANAGED' ? 'Managed Mode' : 'Standalone Core'}
+            Standalone Core
           </div>
           <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">100% Offline-First / Zero-Egress Boundary</p>
         </div>

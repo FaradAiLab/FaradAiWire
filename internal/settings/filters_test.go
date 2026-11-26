@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"slices"
+	"strings"
 	"testing"
 
 	_ "github.com/marcboeker/go-duckdb"
@@ -22,7 +23,6 @@ func TestFilterRegistry_AllExpectedFiltersPresent(t *testing.T) {
 		"filters.hitl",
 		"filters.loop_protection",
 		"filters.rate_limiting",
-		"filters.injection_scanner",
 	}
 
 	for _, key := range expectedKeys {
@@ -153,17 +153,6 @@ func TestApplyFilterToggleToConfig(t *testing.T) {
 			},
 		},
 		{
-			name:       "enable injection_scanner",
-			filterName: "injection_scanner",
-			enabled:    true,
-			wantOK:     true,
-			check: func(t *testing.T, cfg *config.Config) {
-				if !cfg.Filters.InjectionScanner.Enabled {
-					t.Error("expected injection_scanner enabled")
-				}
-			},
-		},
-		{
 			name:       "unknown filter returns false",
 			filterName: "unknown_filter",
 			enabled:    true,
@@ -223,6 +212,134 @@ func TestApplyFilterOverrides(t *testing.T) {
 	}
 	if cfg.Filters.HITL.Enabled {
 		t.Error("expected corrupted boolean override for hitl to be ignored")
+	}
+}
+
+func TestApplyGuardDiscoveryOverrides(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		overrides map[string]string
+		wantMode  string
+		wantOll   string
+		wantDoc   string
+		wantCust  string
+	}{
+		{
+			name: "applies valid discovery keys",
+			overrides: map[string]string{
+				GuardDiscoveryModeKey:      "custom",
+				GuardDiscoveryOllamaURLKey: "http://127.0.0.1:21434",
+				GuardDiscoveryDockerURLKey: "http://127.0.0.1:18088",
+				GuardDiscoveryCustomURLKey: "http://127.0.0.1:9000/v1",
+			},
+			wantMode: "custom",
+			wantOll:  "http://127.0.0.1:21434",
+			wantDoc:  "http://127.0.0.1:18088",
+			wantCust: "http://127.0.0.1:9000/v1",
+		},
+		{
+			name: "ignores invalid mode and preserves existing URLs",
+			overrides: map[string]string{
+				GuardDiscoveryModeKey:      "bogus_mode",
+				GuardDiscoveryCustomURLKey: "http://127.0.0.1:9999/v1",
+			},
+			wantMode: "auto",
+			wantOll:  "http://127.0.0.1:11434",
+			wantDoc:  "http://127.0.0.1:8088",
+			wantCust: "http://127.0.0.1:9999/v1",
+		},
+		{
+			name: "skips invalid discovery URLs and allows empty clear override",
+			overrides: map[string]string{
+				GuardDiscoveryModeKey:      "auto",
+				GuardDiscoveryOllamaURLKey: "ftp://invalid.local",
+				GuardDiscoveryDockerURLKey: "http://169.254.169.254/latest",
+				GuardDiscoveryCustomURLKey: "",
+			},
+			wantMode: "auto",
+			wantOll:  "http://127.0.0.1:11434",
+			wantDoc:  "http://127.0.0.1:8088",
+			wantCust: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &config.Config{
+				Filters: config.FiltersConfig{
+					Guard: config.GuardConfig{
+						Discovery: config.DiscoveryConfig{
+							Mode:      "auto",
+							OllamaURL: "http://127.0.0.1:11434",
+							DockerURL: "http://127.0.0.1:8088",
+							CustomURL: "http://127.0.0.1:9000/v1",
+						},
+					},
+				},
+			}
+			ApplyGuardDiscoveryOverrides(cfg, tc.overrides)
+			if cfg.Filters.Guard.Discovery.Mode != tc.wantMode {
+				t.Errorf("Mode = %q, want %q", cfg.Filters.Guard.Discovery.Mode, tc.wantMode)
+			}
+			if cfg.Filters.Guard.Discovery.OllamaURL != tc.wantOll {
+				t.Errorf("OllamaURL = %q, want %q", cfg.Filters.Guard.Discovery.OllamaURL, tc.wantOll)
+			}
+			if cfg.Filters.Guard.Discovery.DockerURL != tc.wantDoc {
+				t.Errorf("DockerURL = %q, want %q", cfg.Filters.Guard.Discovery.DockerURL, tc.wantDoc)
+			}
+			if cfg.Filters.Guard.Discovery.CustomURL != tc.wantCust {
+				t.Errorf("CustomURL = %q, want %q", cfg.Filters.Guard.Discovery.CustomURL, tc.wantCust)
+			}
+		})
+	}
+}
+
+func TestValidateGuardDiscoveryURL_AndDuckDBPersistence(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"empty clear allowed", "", false},
+		{"localhost http allowed", "http://127.0.0.1:11434", false},
+		{"https remote allowed", "https://guard.internal:8443/v1", false},
+		{"file scheme rejected", "file:///etc/passwd", true},
+		{"imds v4 rejected", "http://169.254.169.254/latest/meta-data", true},
+		{"metadata google rejected", "http://metadata.google.internal/computeMetadata/v1", true},
+		{"link-local ipv6 rejected", "http://[fe80::1]:8080/v1", true},
+		{"oversized rejected", "http://127.0.0.1/" + strings.Repeat("a", 2050), true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateGuardDiscoveryURL(tc.url)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("ValidateGuardDiscoveryURL(%q) err=%v, wantErr=%v", tc.url, err, tc.wantErr)
+			}
+		})
+	}
+
+	db, err := sql.Open("duckdb", ":memory:")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	defer db.Close()
+	store := NewDuckDBStore(db)
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	if err := store.Set(context.Background(), GuardDiscoveryCustomURLKey, "http://169.254.169.254/latest"); err == nil {
+		t.Fatal("expected DuckDBStore.Set to reject link-local metadata URL")
+	}
+	if err := store.Set(context.Background(), GuardDiscoveryCustomURLKey, ""); err != nil {
+		t.Fatalf("expected DuckDBStore.Set to accept empty string clear override, got: %v", err)
 	}
 }
 
@@ -331,14 +448,13 @@ func TestBuildFilterStatusSummary(t *testing.T) {
 		}
 	})
 
-	t.Run("tracks pipeline filters in active_filters and excludes injection_scanner", func(t *testing.T) {
+	t.Run("tracks pipeline filters in active_filters and config_states", func(t *testing.T) {
 		t.Parallel()
 		cfg := &config.Config{
 			Filters: config.FiltersConfig{
-				PrefillBlock:     config.PrefillBlockConfig{Enabled: true},
-				DLP:              config.DLPConfig{Enabled: true},
-				Guard:            config.GuardConfig{Enabled: true},
-				InjectionScanner: config.InjectionScannerConfig{Enabled: true},
+				PrefillBlock: config.PrefillBlockConfig{Enabled: true},
+				DLP:          config.DLPConfig{Enabled: true},
+				Guard:        config.GuardConfig{Enabled: true},
 			},
 		}
 		summary := BuildFilterStatusSummary(cfg)
@@ -346,28 +462,12 @@ func TestBuildFilterStatusSummary(t *testing.T) {
 		if !slices.Equal(summary.ActiveFilters, wantActive) {
 			t.Fatalf("ActiveFilters = %v, want %v", summary.ActiveFilters, wantActive)
 		}
-		if !summary.ConfigStates["injection_scanner"] {
-			t.Fatal("expected ConfigStates[injection_scanner] = true")
+		for _, f := range wantActive {
+			if !summary.ConfigStates[f] {
+				t.Fatalf("expected ConfigStates[%s] = true", f)
+			}
 		}
 	})
-}
-
-func TestApplyRuntimeToggle(t *testing.T) {
-	t.Parallel()
-
-	cfg := &config.Config{}
-	if isFilter, ok := ApplyRuntimeToggle(cfg, "dlp", true); !isFilter || !ok || !cfg.Filters.DLP.Enabled {
-		t.Fatalf("expected dlp filter toggle to succeed: isFilter=%v ok=%v enabled=%v", isFilter, ok, cfg.Filters.DLP.Enabled)
-	}
-	if isFilter, ok := ApplyRuntimeToggle(cfg, "auto_sync_mcp", true); isFilter || !ok || !cfg.AutoSyncMCP {
-		t.Fatalf("expected auto_sync_mcp legacy toggle to succeed: isFilter=%v ok=%v val=%v", isFilter, ok, cfg.AutoSyncMCP)
-	}
-	if isFilter, ok := ApplyRuntimeToggle(cfg, "auto_update_policies", true); isFilter || !ok || !cfg.AutoUpdatePolicies {
-		t.Fatalf("expected auto_update_policies legacy toggle to succeed: isFilter=%v ok=%v val=%v", isFilter, ok, cfg.AutoUpdatePolicies)
-	}
-	if isFilter, ok := ApplyRuntimeToggle(cfg, "unknown_setting", true); isFilter || ok {
-		t.Fatalf("expected unknown key to fail: isFilter=%v ok=%v", isFilter, ok)
-	}
 }
 
 func BenchmarkApplyFilterOverrides(b *testing.B) {
@@ -377,7 +477,7 @@ func BenchmarkApplyFilterOverrides(b *testing.B) {
 		"filters.dlp":               "true",
 		"filters.schema_validation": "true",
 		"filters.hitl":              "false",
-		"filters.injection_scanner": "true",
+		"filters.guard":             "true",
 		"guard.threshold_score":     "0.75",
 	}
 

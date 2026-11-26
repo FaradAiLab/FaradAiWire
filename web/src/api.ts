@@ -188,10 +188,10 @@ export const api = {
 
   // AI Guard Probe & Configuration
   probeGuard: (signal?: AbortSignal) => request<Record<string, unknown>>('/admin/guards/probe', { signal }),
-  configureGuard: (params: { classifier_url?: string; mode?: string; ollama_url?: string; docker_url?: string; custom_url?: string } | string) =>
+  configureGuard: (params: { mode?: string; ollama_url?: string; docker_url?: string; custom_url?: string } | string) =>
     request<{ status: string; message: string }>('/admin/guards/configure', {
       method: 'POST',
-      body: JSON.stringify(typeof params === 'string' ? { classifier_url: params } : params),
+      body: JSON.stringify(typeof params === 'string' ? { custom_url: params } : params),
     }),
 
   // API Keys

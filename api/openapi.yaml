@@ -47,7 +47,7 @@ paths:
   /admin/settings:
     get:
       summary: Retrieve Active Gateway Settings
-      description: Returns self-describing operational settings metadata (including timeouts.probe_timeout_sec), active values, categories, and override flags. Accessible in both STANDALONE and MANAGED modes.
+      description: Returns self-describing operational settings metadata (including timeouts.probe_timeout_sec), active values, categories, and override flags.
       responses:
         '200':
           description: Active gateway settings
@@ -62,9 +62,6 @@ paths:
                     items: { type: string }
                     example: ["guard", "limits", "maintenance", "timeouts"]
                   settings: { type: array, items: { type: object } }
-                  poll_interval_seconds: { type: integer, example: 30 }
-                  auto_sync_mcp: { type: boolean }
-                  auto_update_policies: { type: boolean }
     post:
       summary: Update Operational Gateway Settings
       description: Validates and persists operational setting overrides to the DuckDB system_settings sparse overlay without modifying config.yaml.
@@ -78,16 +75,11 @@ paths:
                 key: { type: string, example: "guard.threshold_score" }
                 value: {}
                 settings: { type: object }
-                poll_interval_seconds: { type: integer, minimum: 1, maximum: 86400 }
-                auto_sync_mcp: { type: boolean }
-                auto_update_policies: { type: boolean }
       responses:
         '200':
           description: Settings updated successfully
         '400':
           description: Validation failed or invalid payload
-        '403':
-          description: Forbidden in MANAGED runtime mode
         '500':
           description: Failed to persist setting to DuckDB or reload runtime config
     put:
@@ -103,16 +95,11 @@ paths:
                 key: { type: string, example: "timeouts.probe_timeout_sec" }
                 value: {}
                 settings: { type: object }
-                poll_interval_seconds: { type: integer, minimum: 1, maximum: 86400 }
-                auto_sync_mcp: { type: boolean }
-                auto_update_policies: { type: boolean }
       responses:
         '200':
           description: Settings updated successfully
         '400':
           description: Validation failed or invalid payload
-        '403':
-          description: Forbidden in MANAGED runtime mode
         '500':
           description: Failed to persist setting to DuckDB or reload runtime config
 
@@ -136,8 +123,6 @@ paths:
           description: Setting reset to baseline default successfully
         '400':
           description: Unknown or missing setting key
-        '403':
-          description: Forbidden in MANAGED runtime mode
         '500':
           description: Failed to delete override from DuckDB
 
@@ -160,11 +145,11 @@ paths:
               properties:
                 filter:
                   type: string
-                  enum: [prefill_block, dlp, rate_limiting, loop_protection, guard, hitl, schema_validation, injection_scanner, auto_sync_mcp, auto_update_policies]
+                  enum: [prefill_block, dlp, rate_limiting, loop_protection, guard, hitl, schema_validation]
                   example: "dlp"
                 filter_name:
                   type: string
-                  enum: [prefill_block, dlp, rate_limiting, loop_protection, guard, hitl, schema_validation, injection_scanner, auto_sync_mcp, auto_update_policies]
+                  enum: [prefill_block, dlp, rate_limiting, loop_protection, guard, hitl, schema_validation]
                   example: "dlp"
                 enabled: { type: boolean }
       responses:
@@ -172,8 +157,6 @@ paths:
           description: Filter setting persisted and reloaded in memory successfully
         '400':
           description: Invalid request body or unknown filter name
-        '403':
-          description: Forbidden in MANAGED runtime mode
         '500':
           description: Failed to persist filter toggle to DuckDB or reload runtime pipeline (fail-closed)
 
@@ -187,8 +170,6 @@ paths:
       responses:
         '200':
           description: Baselines cleared successfully
-        '403':
-          description: Forbidden in MANAGED runtime mode
 
   /admin/audit-logs:
     get:
@@ -336,8 +317,6 @@ paths:
           description: Agent profile created
         '400':
           description: Validation error (INVALID_IDENTIFIER, INVALID_GOVERNANCE_MODE, INVALID_RETAINED_GOVERNANCE_MODE, INVALID_RATE_LIMIT, INVALID_LOOP_PROTECTION, INVALID_SCHEMA_VALIDATION, INVALID_GUARD_OVERRIDE)
-        '403':
-          description: Forbidden in managed runtime mode (FORBIDDEN_MANAGED_MODE)
         '409':
           description: Agent already exists (AGENT_ALREADY_EXISTS)
 
@@ -413,8 +392,6 @@ paths:
       responses:
         '200':
           description: Tools synchronized successfully
-        '403':
-          description: Forbidden in MANAGED runtime mode
 
   /admin/api-keys:
     get:
@@ -551,7 +528,7 @@ paths:
   /admin/guards/configure:
     post:
       summary: Configure AI Guard Discovery & Endpoint
-      description: Updates AI Guard discovery settings (`mode`, `ollama_url`, `docker_url`, `custom_url`, `classifier_url`, `enabled`) and atomically reloads the gateway configuration.
+      description: Updates AI Guard discovery settings (`mode`, `ollama_url`, `docker_url`, `custom_url`, `enabled`) in DuckDB system_settings and atomically reloads the gateway configuration without modifying config.yaml.
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
@@ -562,19 +539,16 @@ paths:
             schema:
               type: object
               properties:
-                classifier_url: { type: string, example: "http://127.0.0.1:11434" }
                 enabled: { type: boolean, example: true }
                 mode: { type: string, enum: [auto, ollama, docker, custom], example: "auto" }
                 ollama_url: { type: string, example: "http://127.0.0.1:11434" }
                 docker_url: { type: string, example: "http://127.0.0.1:8088" }
-                custom_url: { type: string }
+                custom_url: { type: string, example: "http://127.0.0.1:11434" }
       responses:
         '200':
           description: AI Guard configuration updated
         '400':
           description: Invalid request body or disallowed URL
-        '403':
-          description: Forbidden in MANAGED runtime mode
 
   /admin/guards/status:
     get:
@@ -905,16 +879,11 @@ components:
       properties:
         status: { type: string, example: "Ready" }
         gateway_id: { type: string, example: "farad-ai-gw-01" }
-        mode: { type: string, enum: [STANDALONE, MANAGED], example: "STANDALONE" }
-        runtime_mode: { type: string, enum: [STANDALONE, MANAGED], example: "STANDALONE" }
         transport_mode: { type: string, enum: [sse, stdio], example: "sse" }
         ingress_host: { type: string, example: "127.0.0.1" }
         ingress_port: { type: integer, example: 19410 }
         ingress_url: { type: string, example: "http://127.0.0.1:19410" }
         has_local_overrides: { type: boolean }
-        is_managed: { type: boolean }
-        organization: { type: string, example: "Corporate Organization" }
-        locked_editing: { type: boolean }
         guard_tier: { type: string, example: "disabled" }
         guard_model: { type: string, example: "L1 Static Rules (Fallback)" }
         guard_endpoint: { type: string, example: "In-Memory Precompiled Regex" }
@@ -923,7 +892,7 @@ components:
           type: object
           properties:
             tier: { type: string }
-            classifier_url: { type: string }
+            custom_url: { type: string }
             model: { type: string }
             active: { type: boolean }
         active_filters:
@@ -935,15 +904,11 @@ components:
           properties:
             prefill_block: { type: boolean }
             schema_validation: { type: boolean }
-            injection_scanner: { type: boolean }
             guard: { type: boolean }
             dlp: { type: boolean }
             hitl: { type: boolean }
             loop_protection: { type: boolean }
             rate_limiting: { type: boolean }
-            auto_sync_mcp: { type: boolean }
-            auto_update_policies: { type: boolean }
-            poll_interval_seconds: { type: integer }
 
     AuditLogsResponse:
       type: object

@@ -36,9 +36,7 @@ func setupTestAdminServerWithGuards(t *testing.T, opts ...func(*AdminDependencie
 		t.Fatalf("failed to seed catalog: %v", err)
 	}
 
-	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-	}
+	cfg := &config.Config{}
 
 	deps := AdminDependencies{
 		Config:          cfg,
@@ -189,9 +187,7 @@ func TestGuardEndpoints_MethodNotAllowed(t *testing.T) {
 }
 
 func TestGuardEndpoints_ServiceUnavailable(t *testing.T) {
-	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-	}
+	cfg := &config.Config{}
 	// Admin server with nil catalog
 	server := NewAdminServer(AdminDependencies{
 		Config:          cfg,

@@ -1,6 +1,9 @@
 package settings
 
 import (
+	"errors"
+	"net"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -17,11 +20,55 @@ var orderedFilterNames = []string{
 	"dlp",
 	"hitl",
 	"guard",
-	"injection_scanner",
 }
 
 // FilterKeyPrefix is the canonical DuckDB system_settings key prefix for security filter toggles.
 const FilterKeyPrefix = "filters."
+
+// GuardDiscovery sparse overlay keys persisted in DuckDB system_settings (ADR-0053 / ADR-0060).
+const (
+	GuardDiscoveryModeKey      = "guard.discovery.mode"
+	GuardDiscoveryOllamaURLKey = "guard.discovery.ollama_url"
+	GuardDiscoveryDockerURLKey = "guard.discovery.docker_url"
+	GuardDiscoveryCustomURLKey = "guard.discovery.custom_url"
+)
+
+// GuardDiscoveryRegistry catalogs sparse DuckDB overlay keys for AI Guard discovery settings.
+// Kept separate from Registry so GET /admin/settings retains its 4 operational parameter categories.
+var GuardDiscoveryRegistry = map[string]SettingMeta{
+	GuardDiscoveryModeKey: {
+		Key:         GuardDiscoveryModeKey,
+		Label:       "Guard Discovery Mode",
+		Description: "AI Guard provider discovery mode (auto, ollama, docker, custom)",
+		Category:    "guard",
+		Type:        TypeString,
+		DefaultVal:  "auto",
+	},
+	GuardDiscoveryOllamaURLKey: {
+		Key:         GuardDiscoveryOllamaURLKey,
+		Label:       "Guard Ollama URL",
+		Description: "Override Ollama endpoint URL for AI Guard discovery",
+		Category:    "guard",
+		Type:        TypeString,
+		DefaultVal:  "http://127.0.0.1:11434",
+	},
+	GuardDiscoveryDockerURLKey: {
+		Key:         GuardDiscoveryDockerURLKey,
+		Label:       "Guard Docker URL",
+		Description: "Override FaradAiGuard Docker sidecar endpoint URL",
+		Category:    "guard",
+		Type:        TypeString,
+		DefaultVal:  "http://127.0.0.1:8088",
+	},
+	GuardDiscoveryCustomURLKey: {
+		Key:         GuardDiscoveryCustomURLKey,
+		Label:       "Guard Custom Endpoint URL",
+		Description: "Explicit OpenAI-compatible or custom HTTP AI Guard classifier URL",
+		Category:    "guard",
+		Type:        TypeString,
+		DefaultVal:  "",
+	},
+}
 
 // FilterRegistry catalogs all runtime-toggleable security filters stored in the DuckDB
 // system_settings sparse overlay. Kept separate from Registry so GET /admin/settings preserves
@@ -83,14 +130,6 @@ var FilterRegistry = map[string]SettingMeta{
 		Type:        TypeBool,
 		DefaultVal:  true,
 	},
-	"filters.injection_scanner": {
-		Key:         "filters.injection_scanner",
-		Label:       "Indirect Injection Scanner",
-		Description: "Scans tool outputs for indirect prompt injection payloads",
-		Category:    "filters",
-		Type:        TypeBool,
-		DefaultVal:  false,
-	},
 }
 
 // IsFilterKey returns true if key identifies a registered security filter overlay entry (e.g. "filters.dlp").
@@ -99,12 +138,15 @@ func IsFilterKey(key string) bool {
 	return ok
 }
 
-// LookupMeta resolves metadata from either the operational Registry or FilterRegistry.
+// LookupMeta resolves metadata from Registry, FilterRegistry, or GuardDiscoveryRegistry.
 func LookupMeta(key string) (SettingMeta, bool) {
 	if meta, ok := Registry[key]; ok {
 		return meta, true
 	}
-	meta, ok := FilterRegistry[key]
+	if meta, ok := FilterRegistry[key]; ok {
+		return meta, true
+	}
+	meta, ok := GuardDiscoveryRegistry[key]
 	return meta, ok
 }
 
@@ -123,8 +165,6 @@ func ExtractFilterEnabled(cfg *config.Config, filterName string) (bool, bool) {
 		return cfg.Filters.PrefillBlock.Enabled, true
 	case "schema_validation":
 		return cfg.Filters.SchemaValidation.Enabled, true
-	case "injection_scanner":
-		return cfg.Filters.InjectionScanner.Enabled, true
 	case "dlp":
 		return cfg.Filters.DLP.Enabled, true
 	case "hitl":
@@ -164,8 +204,6 @@ func ApplyFilterToggleToConfig(cfg *config.Config, filterName string, enabled bo
 				cfg.Filters.SchemaValidation.BaselinePinning = true
 			}
 		}
-	case "injection_scanner":
-		cfg.Filters.InjectionScanner.Enabled = enabled
 	case "dlp":
 		cfg.Filters.DLP.Enabled = enabled
 	case "hitl":
@@ -229,6 +267,77 @@ func ApplyFilterOverrides(cfg *config.Config, overrides map[string]string) {
 	}
 }
 
+// ValidateGuardDiscoveryURL enforces standalone AI Guard discovery URL safety constraints.
+// Empty strings are permitted so callers can explicitly clear a persisted override.
+func ValidateGuardDiscoveryURL(rawURL string) error {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return nil
+	}
+	if len(rawURL) > 2048 {
+		return errors.New("URL exceeds maximum length of 2048 characters")
+	}
+	u, err := url.ParseRequestURI(rawURL)
+	if err != nil {
+		return errors.New("invalid URL format: " + err.Error())
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("unsupported scheme: only http and https are allowed")
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if host == "" {
+		return errors.New("missing host in URL")
+	}
+	if host == "169.254.169.254" || strings.HasPrefix(host, "169.254.") || host == "metadata.google.internal" {
+		return errors.New("access to link-local cloud metadata is strictly prohibited")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			ip = ipv4
+		}
+		if ip.Equal(net.ParseIP("169.254.169.254")) || ip.Equal(net.ParseIP("fd00:ec2::254")) {
+			return errors.New("access to cloud metadata service is strictly prohibited")
+		}
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return errors.New("access to link-local metadata is strictly prohibited")
+		}
+	}
+	return nil
+}
+
+// ApplyGuardDiscoveryOverrides overlays persisted DuckDB "guard.discovery.*" values onto cfg.
+// Corrupted or disallowed persisted URLs are skipped so startup and reload remain safe.
+func ApplyGuardDiscoveryOverrides(cfg *config.Config, overrides map[string]string) {
+	if cfg == nil || len(overrides) == 0 {
+		return
+	}
+	if rawMode, ok := overrides[GuardDiscoveryModeKey]; ok {
+		mode := strings.ToLower(strings.TrimSpace(rawMode))
+		switch mode {
+		case "auto", "ollama", "docker", "custom":
+			cfg.Filters.Guard.Discovery.Mode = mode
+		}
+	}
+	if rawOllama, ok := overrides[GuardDiscoveryOllamaURLKey]; ok {
+		trimmed := strings.TrimSpace(rawOllama)
+		if ValidateGuardDiscoveryURL(trimmed) == nil {
+			cfg.Filters.Guard.Discovery.OllamaURL = trimmed
+		}
+	}
+	if rawDocker, ok := overrides[GuardDiscoveryDockerURLKey]; ok {
+		trimmed := strings.TrimSpace(rawDocker)
+		if ValidateGuardDiscoveryURL(trimmed) == nil {
+			cfg.Filters.Guard.Discovery.DockerURL = trimmed
+		}
+	}
+	if rawCustom, ok := overrides[GuardDiscoveryCustomURLKey]; ok {
+		trimmed := strings.TrimSpace(rawCustom)
+		if ValidateGuardDiscoveryURL(trimmed) == nil {
+			cfg.Filters.Guard.Discovery.CustomURL = trimmed
+		}
+	}
+}
+
 // OrderedFilterNames returns all registered security filter names in canonical display order.
 func OrderedFilterNames() []string {
 	return slices.Clone(orderedFilterNames)
@@ -244,40 +353,15 @@ type FilterStatusSummary struct {
 // using the canonical ordered filter registry.
 func BuildFilterStatusSummary(cfg *config.Config) FilterStatusSummary {
 	summary := FilterStatusSummary{
-		ConfigStates: make(map[string]bool, len(orderedFilterNames)),
+		ActiveFilters: make([]string, 0, len(orderedFilterNames)),
+		ConfigStates:  make(map[string]bool, len(orderedFilterNames)),
 	}
 	for _, name := range orderedFilterNames {
 		enabled, _ := ExtractFilterEnabled(cfg, name)
 		summary.ConfigStates[name] = enabled
-		// injection_scanner is surfaced via ConfigStates and guard_status rather than active_filters.
-		if enabled && name != "injection_scanner" {
+		if enabled {
 			summary.ActiveFilters = append(summary.ActiveFilters, name)
 		}
 	}
 	return summary
-}
-
-// IsLegacyToggleName reports whether name is a supported top-level runtime gateway boolean toggle.
-func IsLegacyToggleName(name string) bool {
-	return name == "auto_sync_mcp" || name == "auto_update_policies"
-}
-
-// ApplyRuntimeToggle applies a boolean toggle for either a registered security filter or a legacy gateway toggle.
-func ApplyRuntimeToggle(cfg *config.Config, name string, enabled bool) (isFilter bool, ok bool) {
-	if IsSupportedFilterName(name) {
-		return true, ApplyFilterToggleToConfig(cfg, name, enabled)
-	}
-	if cfg == nil {
-		return false, false
-	}
-	switch name {
-	case "auto_sync_mcp":
-		cfg.AutoSyncMCP = enabled
-		return false, true
-	case "auto_update_policies":
-		cfg.AutoUpdatePolicies = enabled
-		return false, true
-	default:
-		return false, false
-	}
 }

@@ -23,10 +23,9 @@ func TestGateway_DuckDBTelemetry_Integration(t *testing.T) {
 	dbPath := filepath.Join(tempDir, "test_gateway_telemetry.duckdb")
 
 	cfg := &config.Config{
-		RuntimeMode: config.RuntimeModeStandalone,
-		Mode:        "sse",
-		ListenPort:  8080,
-		AdminPort:   8095,
+		Mode:       "sse",
+		ListenPort: 8080,
+		AdminPort:  8095,
 		Telemetry: config.TelemetryConfig{
 			DBPath:          dbPath,
 			RetentionDays:   14,

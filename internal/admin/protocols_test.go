@@ -34,12 +34,11 @@ func newTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	return ts
 }
 
-func setupTestAdminServerWithProtocols(t *testing.T, runtimeMode string, opts ...func(*AdminDependencies)) (*AdminServer, string, string) {
+func setupTestAdminServerWithProtocols(t *testing.T, opts ...func(*AdminDependencies)) (*AdminServer, string, string) {
 	tmpProtocolsDir := t.TempDir()
 	tmpAgentsDir := t.TempDir()
 
 	cfg := &config.Config{
-		RuntimeMode:  runtimeMode,
 		ProtocolsDir: tmpProtocolsDir,
 		AgentsDir:    tmpAgentsDir,
 	}
@@ -87,7 +86,7 @@ func setupTestAdminServerWithProtocols(t *testing.T, runtimeMode string, opts ..
 }
 
 func TestProtocolEndpoints_Presets(t *testing.T) {
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, _ := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	// 1. GET /admin/protocols/presets returns 200 OK and presets list
@@ -135,7 +134,7 @@ func TestProtocolEndpoints_Presets(t *testing.T) {
 }
 
 func TestProtocolEndpoints_CRUD_Lifecycle(t *testing.T) {
-	server, protoDir, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, protoDir, _ := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	// 1. GET /admin/protocols initially empty
@@ -296,7 +295,7 @@ func TestProtocolEndpoints_CRUD_Lifecycle(t *testing.T) {
 }
 
 func TestProtocolEndpoints_ReferentialIntegrity(t *testing.T) {
-	server, protoDir, agentsDir := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, protoDir, agentsDir := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	// 1. Create a protocol directly on disk
@@ -357,53 +356,8 @@ func TestProtocolEndpoints_ReferentialIntegrity(t *testing.T) {
 	}
 }
 
-func TestProtocolEndpoints_ManagedMode(t *testing.T) {
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeManaged)
-	handler := server.Handler()
-
-	// 1. GET /admin/protocols is allowed (read-only)
-	getReq := httptest.NewRequest(http.MethodGet, "/admin/protocols", nil)
-	getRec := httptest.NewRecorder()
-	handler.ServeHTTP(getRec, getReq)
-	if getRec.Code != http.StatusOK {
-		t.Errorf("expected 200 OK for GET in managed mode, got %d", getRec.Code)
-	}
-
-	// 2. GET /admin/protocols/presets is allowed
-	presetReq := httptest.NewRequest(http.MethodGet, "/admin/protocols/presets", nil)
-	presetRec := httptest.NewRecorder()
-	handler.ServeHTTP(presetRec, presetReq)
-	if presetRec.Code != http.StatusOK {
-		t.Errorf("expected 200 OK for presets in managed mode, got %d", presetRec.Code)
-	}
-
-	// 3. POST /admin/protocols is blocked (403 Forbidden)
-	postReq := httptest.NewRequest(http.MethodPost, "/admin/protocols", bytes.NewBufferString(`{"id":"p1","name":"P1","type":"stdio","command":"ls"}`))
-	postRec := httptest.NewRecorder()
-	handler.ServeHTTP(postRec, postReq)
-	if postRec.Code != http.StatusForbidden {
-		t.Errorf("expected 403 Forbidden for POST in managed mode, got %d", postRec.Code)
-	}
-
-	// 4. PUT /admin/protocols/p1 is blocked (403 Forbidden)
-	putReq := httptest.NewRequest(http.MethodPut, "/admin/protocols/p1", bytes.NewBufferString(`{"name":"P1 Updated","type":"stdio","command":"ls"}`))
-	putRec := httptest.NewRecorder()
-	handler.ServeHTTP(putRec, putReq)
-	if putRec.Code != http.StatusForbidden {
-		t.Errorf("expected 403 Forbidden for PUT in managed mode, got %d", putRec.Code)
-	}
-
-	// 5. DELETE /admin/protocols/p1 is blocked (403 Forbidden)
-	delReq := httptest.NewRequest(http.MethodDelete, "/admin/protocols/p1", nil)
-	delRec := httptest.NewRecorder()
-	handler.ServeHTTP(delRec, delReq)
-	if delRec.Code != http.StatusForbidden {
-		t.Errorf("expected 403 Forbidden for DELETE in managed mode, got %d", delRec.Code)
-	}
-}
-
 func TestProtocolEndpoints_Probe_SSRF_Protection(t *testing.T) {
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, _ := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	blockedURLs := []string{
@@ -444,7 +398,7 @@ func TestProtocolEndpoints_Probe_SSRF_Protection(t *testing.T) {
 }
 
 func TestProtocolEndpoints_Probe_Validation(t *testing.T) {
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, _ := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	tests := []struct {
@@ -508,7 +462,7 @@ func TestProtocolEndpoints_Probe_Validation(t *testing.T) {
 }
 
 func TestProtocolEndpoints_Probe_Stdio_Live(t *testing.T) {
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone)
+	server, _, _ := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	// A mock MCP server script running via sh that handles initialize and tools/list
@@ -562,7 +516,7 @@ echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"probed_tool","descript
 }
 
 func TestAdminServer_ProtocolsCRUD_AuthTokenAndHeaders(t *testing.T) {
-	server, protocolsDir, _ := setupTestAdminServerWithProtocols(t, "standalone")
+	server, protocolsDir, _ := setupTestAdminServerWithProtocols(t)
 	handler := server.Handler()
 
 	// 1. Create a remote protocol with AuthToken and custom Headers
@@ -702,7 +656,7 @@ func TestAdminServer_ProtocolProbe_WithAuthTokenAndCustomHeaders(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
+	server, _, _ := setupTestAdminServerWithProtocols(t, withLoopbackProbeAllowed())
 	handler := server.Handler()
 
 	probeReq := ProbeProtocolRequest{
@@ -791,7 +745,7 @@ func TestAdminServer_ProtocolProbe_MaskedTokenHydration(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
+	server, _, _ := setupTestAdminServerWithProtocols(t, withLoopbackProbeAllowed())
 
 	// Save real protocol to store
 	_ = server.getProtocolStore().Save(&protocol.Protocol{
@@ -849,7 +803,7 @@ func TestAdminServer_Probe_UpstreamHTTPError_StatusCodes(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
+			server, _, _ := setupTestAdminServerWithProtocols(t, withLoopbackProbeAllowed())
 			handler := server.Handler()
 
 			probeReq := ProbeProtocolRequest{
@@ -903,7 +857,7 @@ func TestAdminServer_Probe_UpstreamHTTPError_WithCredentials(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
+	server, _, _ := setupTestAdminServerWithProtocols(t, withLoopbackProbeAllowed())
 	handler := server.Handler()
 
 	probeReq := ProbeProtocolRequest{
@@ -1093,7 +1047,7 @@ func TestAutoNegotiation_SSE_Success(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
+	server, _, _ := setupTestAdminServerWithProtocols(t, withLoopbackProbeAllowed())
 	handler := server.Handler()
 
 	probeReq := ProbeProtocolRequest{Type: "sse", URL: upstream.URL + "/sse"}
@@ -1167,7 +1121,7 @@ func TestAutoNegotiation_StreamableHTTP_Success(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
+	server, _, _ := setupTestAdminServerWithProtocols(t, withLoopbackProbeAllowed())
 	handler := server.Handler()
 
 	probeReq := ProbeProtocolRequest{Type: "http", URL: upstream.URL + "/mcp"}
@@ -1238,7 +1192,7 @@ func TestAutoNegotiation_SSE_NoEndpoint_FallbackToStreamableHTTP(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
+	server, _, _ := setupTestAdminServerWithProtocols(t, withLoopbackProbeAllowed())
 	handler := server.Handler()
 
 	probeReq := ProbeProtocolRequest{Type: "sse", URL: upstream.URL + "/mcp"}
@@ -1272,7 +1226,7 @@ func TestAutoNegotiation_FatalHTTPError_NoFallback(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
+	server, _, _ := setupTestAdminServerWithProtocols(t, withLoopbackProbeAllowed())
 	handler := server.Handler()
 
 	probeReq := ProbeProtocolRequest{Type: "sse", URL: upstream.URL + "/mcp"}
@@ -1312,7 +1266,7 @@ func TestAdminServer_ProtocolProbe_RejectsDestinationMismatchSecretExfiltration(
 	}
 	defer attacker.Close()
 
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, withLoopbackProbeAllowed())
+	server, _, _ := setupTestAdminServerWithProtocols(t, withLoopbackProbeAllowed())
 
 	_ = server.getProtocolStore().Save(&protocol.Protocol{
 		ID:           "trusted-remote",
@@ -1343,7 +1297,7 @@ func TestAdminServer_ProtocolProbe_RejectsDestinationMismatchSecretExfiltration(
 
 func TestAdminServer_AllowStdioFalse_FailClosedAcrossAllPaths(t *testing.T) {
 	boolPtr := func(v bool) *bool { return &v }
-	server, _, _ := setupTestAdminServerWithProtocols(t, config.RuntimeModeStandalone, func(d *AdminDependencies) {
+	server, _, _ := setupTestAdminServerWithProtocols(t, func(d *AdminDependencies) {
 		d.Config.AllowStdio = boolPtr(false)
 	})
 	handler := server.Handler()

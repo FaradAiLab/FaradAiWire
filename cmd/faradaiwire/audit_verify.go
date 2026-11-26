@@ -76,7 +76,7 @@ func executeAuditVerify(args []string, stdout, stderr io.Writer) int {
 				dbPath = cfg.GetTelemetryDBPath()
 			}
 			if !explicitJSONL && cfg.AuditLog.Enabled {
-				jsonlPath = cfg.AuditLog.Path
+				jsonlPath = cfg.GetAuditLogPath()
 			}
 		}
 	}

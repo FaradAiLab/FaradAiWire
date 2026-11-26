@@ -30,12 +30,12 @@ init-config: ## Initialize default configuration file if missing
 		cp config.example.yaml $(CONFIG_FILE); \
 	fi
 
-run: build init-config ## Build and run gateway in standalone mode (Single-Command Start)
+run: build init-config ## Build and run gateway (Single-Command Start)
 	@echo "==> Starting FaradAiWire on Ingress (:19410) and Admin (:19415)..."
-	./$(BINARY_NAME) run --config $(CONFIG_FILE) --standalone
+	./$(BINARY_NAME) run --config $(CONFIG_FILE)
 
 dev: init-config ## Run directly with go run (quick developer iteration)
-	go run ./cmd/faradaiwire run --config $(CONFIG_FILE) --standalone
+	go run ./cmd/faradaiwire run --config $(CONFIG_FILE)
 
 dev-web: ## Run the Vite development server with Hot Module Reloading (HMR)
 	@echo "==> Starting Vite development server on :$${FARADAI_WIRE_WEB_DEV_PORT:-19418}..."
