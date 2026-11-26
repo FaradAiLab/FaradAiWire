@@ -132,7 +132,7 @@ FaradAiWire can be configured via `config.yaml` or overridden through environmen
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `AGENT_API_KEY` | *(None)* | Optional client-side MCP Ingress Bearer token override for `faradaiwire connect` (scrubbed from child MCP subprocesses). |
-| `ADMIN_API_KEY` | *(None)* | Optional client-side Admin Bearer token for remote HTTPS CLI commands (`faradaiwire adopt`, `faradaiwire guard`). Server Admin auth uses `keys/api_keys.json` exclusively (`faradaiwire token [--rotate]`). |
+| `ADMIN_API_KEY` | *(None)* | Optional client-side Admin Bearer token for remote HTTPS CLI commands (`faradaiwire adopt`, `faradaiwire export`, `faradaiwire guard`). Server Admin auth uses `keys/api_keys.json` exclusively (`faradaiwire token [--rotate]`). |
 | `GATEWAY_ID` | `faradaiwire-gw-local-01` | Unique node identifier recorded in audit telemetry. |
 | `FARADAI_WIRE_HOST` | `127.0.0.1` | Network interface to bind the proxy ingress listener (`0.0.0.0` for containers). |
 | `FARADAI_WIRE_ADMIN_HOST` | `127.0.0.1` | Network interface to bind the Admin Console listener (defaults to strict loopback). |

@@ -31,6 +31,35 @@ import {
   ReadyzResponse,
 } from './types'
 
+export interface ExportNativeMCPRequest {
+  client: string
+  scope?: 'global' | 'project'
+  client_os?: 'darwin' | 'linux' | 'windows'
+}
+
+export interface ExportWarning {
+  code: string
+  severity: 'warning' | 'info' | string
+  server?: string
+  message: string
+}
+
+export interface ExportCompanionFile {
+  path_hint: string
+  merge_hazard: boolean
+  content: Record<string, unknown>
+}
+
+export interface ExportNativeMCPResponse {
+  client: string
+  scope: string
+  target_path_hint: string
+  merge_hazard: boolean
+  config: Record<string, unknown>
+  companion_files?: ExportCompanionFile[]
+  warnings: ExportWarning[]
+}
+
 // ProbeError extends Error with structured diagnostic fields from the server.
 export class ProbeError extends Error {
   errorCode?: string
@@ -357,6 +386,16 @@ export const api = {
     request<{ status: string; message: string }>('/admin/agents/rollback', {
       method: 'POST',
       body: JSON.stringify({ agent: agentName, timestamp }),
+    }),
+  exportAgentNativeMCP: (
+    agentName: string,
+    payload: { client: string; scope?: 'global' | 'project'; client_os?: 'darwin' | 'linux' | 'windows' },
+    signal?: AbortSignal
+  ) =>
+    request<ExportNativeMCPResponse>(`/admin/agents/${encodeURIComponent(agentName)}/export`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
     }),
 
   // MCP Tools

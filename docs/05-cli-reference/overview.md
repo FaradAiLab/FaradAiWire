@@ -18,6 +18,7 @@ Commands:
   run       Start the FaradAiWire PEP gateway daemon
   connect   Register a downstream stdio or SSE MCP server in faradaiwire.yaml
   adopt     Discover and securely wrap local MCP clients to route through FaradAiWire
+  export    Export a Security Profile's Tool Sources to native client MCP JSON (zero-leak placeholders)
   doctor       Diagnose system health, port bindings, and discover local AI Guard inference engines
   skill-audit  Perform static security analysis on agent skill directories or MCP packages
   audit        Audit log tooling (`audit verify` checks tamper-evident integrity of DuckDB and JSONL audit stores)

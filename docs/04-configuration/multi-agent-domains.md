@@ -93,3 +93,16 @@ If an incoming request does not provide an `X-Farad-Agent` header:
 - FaradAiWire applies the fallback profile defined by `FARADAI_WIRE_DEFAULT_AGENT` (default: `default`).
 - If no `agents/default.yaml` exists, global rules defined in `config.yaml` apply.
 
+---
+
+## 4. Exporting a Security Profile to Native MCP Config
+
+If you want to migrate a curated Security Profile's MCP servers back to direct client execution (or temporarily bypass FaradAiWire), you can export the profile into native client JSON with dynamic `[KEY_NAME]` secret placeholders:
+
+- **Studio UI:** Open **Security Profiles** on the Admin Console (`http://127.0.0.1:19415/admin/dashboard`), click **Export Native MCP** on the profile card, select your Target Client and Scope, review any degradation or merge-hazard warnings, and copy or download the JSON.
+- **CLI:** Run `faradaiwire export --profile <name> --client <target> [--out ./export.json]`.
+
+Clients that cannot enforce per-tool allowlists natively emit fail-open or denylist-drift warnings, Claude Desktop omits remote SSE/HTTP Tool Sources (which must be added under Claude Desktop **Settings → Connectors**), and Claude Code generates an optional `.claude/settings.json` `permissions.deny` companion snippet when tools are restricted.
+
+For full target support, companion files, and step-by-step instructions on disconnecting FaradAiWire, see [`faradaiwire export`](/docs/wire/05-cli-reference/export/).
+

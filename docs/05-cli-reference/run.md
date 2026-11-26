@@ -22,7 +22,6 @@ faradaiwire run [flags]
 | Flag | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | **`--config`** | `string` | *(Auto-discovered)* | Explicit path to a YAML configuration file. |
-| **`--standalone`**| `bool` | `false` | Force offline-first standalone mode (zero-egress, disables any cloud telemetry). |
 | **`--host`** | `string` | `127.0.0.1` | Network interface address to bind the proxy ingress listener (`0.0.0.0` in containers). |
 | **`--port`** | `int` | `19410` | Ingress proxy port for agent tool traffic (`/sse`, `/message`, `/mcp`). |
 | **`--admin-host`**| `string` | `127.0.0.1` | Network interface address to bind the Admin Console listener. Non-loopback bindings require an active `Admin` key in `keys/api_keys.json` (auto-provisioned on first boot; inspect/rotate via `faradaiwire token [--rotate]`). |
@@ -67,6 +66,6 @@ faradaiwire run --port 19420 --admin-port 19425
 
 ### 3. Container Mode (Bind All Interfaces):
 ```bash
-faradaiwire run --host 0.0.0.0 --standalone
+faradaiwire run --host 0.0.0.0
 ```
 

@@ -31,7 +31,7 @@ curl -s http://127.0.0.1:19415/admin/status
 {
   "status": "Ready",
   "version": "v0.1.7",
-  "runtime_mode": "STANDALONE",
+  "transport_mode": "sse",
   "ingress_port": 19410,
   "ingress_host": "127.0.0.1",
   "ingress_url": "http://127.0.0.1:19410",
@@ -139,28 +139,28 @@ data: {"id":"evt-109","timestamp":"2026-10-30T21:00:00Z","verdict":"BLOCKED","ru
 Probes configured or locally available AI Guard inference backends (Ollama, FaradAiGuard Docker sidecar, or custom URL). Any embedded URL credentials in `configured_url` are redacted before returning the JSON payload.
 
 ### `POST /admin/guards/configure`
-Updates AI Guard discovery settings and atomically reloads configuration across the admin server and live gateway.
+Updates AI Guard discovery settings (`mode`, `ollama_url`, `docker_url`, `custom_url`) and filter toggle state (`enabled`) in DuckDB `system_settings` (`guard.discovery.*` and `filters.guard`) and atomically reloads configuration across the admin server and live gateway without modifying `config.yaml`. Passing `"custom_url": ""` (or switching `mode` to `auto`, `ollama`, or `docker`) clears any previously saved custom endpoint URL.
 
 **Request (`Content-Type: application/json`):**
 ```json
 {
-  "classifier_url": "http://127.0.0.1:11434",
+  "custom_url": "http://127.0.0.1:11434",
   "enabled": true,
-  "mode": "auto"
+  "mode": "custom"
 }
 ```
-Supported optional fields: `classifier_url`, `enabled`, `mode`, `ollama_url`, `docker_url`, `custom_url`.
+Supported optional fields: `enabled`, `mode` (`auto` | `ollama` | `docker` | `custom`), `ollama_url`, `docker_url`, `custom_url`.
 
 **Response (`200 OK`):**
 ```json
 {
   "status": "success",
-  "classifier_url": "http://127.0.0.1:11434",
-  "mode": "auto",
+  "custom_url": "http://127.0.0.1:11434",
+  "mode": "custom",
   "message": "AI Guard configuration successfully updated"
 }
 ```
-*(Embedded credentials in `classifier_url` are redacted in the response.)*
+*(Embedded credentials in `custom_url` are redacted in the response.)*
 
 ### Model Catalog, Lifecycle & HITL Endpoints
 - `GET /admin/guards/status`: Runtime status, PID, and health of the active AI Guard process.
@@ -215,3 +215,53 @@ In-process integrity verification of DuckDB audit tables and the JSONL hash chai
 
 ### `GET /admin/audit-logs/events` · `GET /api/v1/logs/events`
 SSE live stream of audit verdicts (the Web Console auto-pauses it when the tab is hidden).
+
+---
+
+## 8. Security Profile Native MCP Export
+
+### `POST /admin/agents/{name}/export`
+Serializes a Security Profile's attached Tool Sources into a Target Client's native MCP JSON format with dynamic `[KEY_NAME]` secret placeholders (never plaintext secrets) and Selected Tools degradation warnings. Sets `Cache-Control: no-store` and records a control-plane `agent_native_export` security audit event.
+
+**Request (`Content-Type: application/json`):**
+```bash
+curl -X POST http://127.0.0.1:19415/admin/agents/cursor/export \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client": "cursor",
+    "scope": "global",
+    "client_os": "darwin"
+  }'
+```
+Supported optional fields: `scope` (`global` | `project`), `client_os` (`darwin` | `linux` | `windows`; defaults to `linux` when omitted).
+
+**Response (`200 OK`):**
+```json
+{
+  "client": "cursor",
+  "scope": "global",
+  "target_path_hint": "~/.cursor/mcp.json",
+  "merge_hazard": false,
+  "config": {
+    "mcpServers": {
+      "github": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": {
+          "GITHUB_PERSONAL_ACCESS_TOKEN": "[GITHUB_PERSONAL_ACCESS_TOKEN]"
+        }
+      }
+    }
+  },
+  "warnings": [
+    {
+      "code": "SECURITY_POLICIES_EXCLUDED",
+      "severity": "info",
+      "message": "FaradAiWire DLP rules, Policy Packs, AI Guard, Rate Limits, Loop Protection, and HITL policies are not exported."
+    }
+  ]
+}
+```
+When `client` is `claude-code` and per-tool restrictions exist, `companion_files` includes a `.claude/settings.json` (or `~/.claude/settings.json`) `permissions.deny` snippet with `merge_hazard: true`.
+
+**Errors:** `400 Bad Request` (`INVALID_IDENTIFIER`, `BAD_REQUEST`, `INVALID_EXPORT_TARGET`, `EXPORT_FAILED`), `404 Not Found` (`NOT_FOUND`), `408 Request Timeout` (`REQUEST_TIMEOUT`).

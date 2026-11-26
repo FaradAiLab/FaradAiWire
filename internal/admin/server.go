@@ -435,6 +435,7 @@ func (a *AdminServer) Handler() http.Handler {
 	apiMux.HandleFunc("DELETE /admin/agents/{name}", a.handleDeleteAgent)
 	apiMux.HandleFunc("GET /admin/agents/{name}/dlp", a.handleGetAgentDLP)
 	apiMux.HandleFunc("PUT /admin/agents/{name}/dlp", a.handleUpdateAgentDLP)
+	apiMux.HandleFunc("POST /admin/agents/{name}/export", a.handleExportAgentNativeMCP)
 
 	// Protocol catalog & probing routes
 	apiMux.HandleFunc("GET /admin/protocols", a.handleListProtocols)

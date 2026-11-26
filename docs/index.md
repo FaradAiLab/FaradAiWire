@@ -65,5 +65,5 @@ The open-source FaradAiWire Core binary is 100% offline-first and contains zero 
 - 📦 **[Installation](/docs/wire/01-getting-started/installation/):** Homebrew, curl shell installer, PowerShell, or building from source.
 - 🤖 **[Agent Integration](/docs/wire/01-getting-started/agent-setup/):** Connect Claude Code, Cursor, Windsurf, or custom LLM runners.
 - 🛡️ **[Security Filters](/docs/wire/03-security-filters/overview/):** Configure DLP, Neural Prompt Guard, and Schema Validation.
-- 📖 **[CLI Reference](/docs/wire/05-cli-reference/overview/):** Master `faradaiwire run`, `doctor`, `skill-audit`, `audit verify`, and `guard`.
+- 📖 **[CLI Reference](/docs/wire/05-cli-reference/overview/):** Master `faradaiwire run`, `adopt`, `export`, `doctor`, `skill-audit`, `audit verify`, and `guard`.
 

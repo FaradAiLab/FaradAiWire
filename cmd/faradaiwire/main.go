@@ -183,6 +183,9 @@ func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return executeConnect(*profile, *host, *port, *token, *noSpawn, stdin, stdout)
 
+	case "export":
+		return executeExport(args[1:], stdout, stderr)
+
 	case "doctor":
 		if len(args) > 1 && isHelpArg(args[1]) {
 			printDoctorUsage(stdout)

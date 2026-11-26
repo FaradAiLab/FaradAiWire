@@ -18,6 +18,7 @@ func printRootUsage(out io.Writer) {
 	fmt.Fprintln(w, "  run\tStart the FaradAiWire security gateway proxy and admin console")
 	fmt.Fprintln(w, "  connect\tSpawn or attach an interactive client session to the gateway")
 	fmt.Fprintln(w, "  adopt\tDiscover and securely import client IDE configurations")
+	fmt.Fprintln(w, "  export\tExport a Security Profile's Tool Sources into native client MCP JSON")
 	fmt.Fprintln(w, "  token\tDisplay the active Bootstrap Master Key and one-click Admin Magic Link")
 	w.Flush()
 	fmt.Fprintln(out)
@@ -283,5 +284,25 @@ func printVersionUsage(out io.Writer) {
 	fmt.Fprintln(out, "Flags:")
 	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(w, "  -h, --help\tShow help for version command")
+	w.Flush()
+}
+
+// printExportUsage prints usage documentation for 'faradaiwire export'.
+func printExportUsage(out io.Writer) {
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  faradaiwire export --profile <name> --client <client> [flags]")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Exports a Security Profile's Tool Sources into a Target Client's native MCP JSON without raw secrets or overwriting existing client configs.")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Flags:")
+	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "  --profile <name>\tSecurity Profile name to export (required)")
+	fmt.Fprintln(w, "  --client <id>\tTarget Client (claude-code, claude-desktop, cursor, cursor-workspace, windsurf, cline, roo-code, antigravity, generic)")
+	fmt.Fprintln(w, "  --scope <scope>\tTarget scope (global or project)")
+	fmt.Fprintln(w, "  --out <new-file>\tWrite primary MCP JSON to a new file (0600); refuses existing or protected client paths")
+	fmt.Fprintln(w, "  --companion-out <file>\tWrite optional companion snippet (e.g. Claude Code settings) to a new file")
+	fmt.Fprintln(w, "  --admin-url <url>\tQuery a remote Admin API (https:// required for non-loopback; uses ADMIN_API_KEY env)")
+	fmt.Fprintln(w, "  --config <path>\tPath to YAML configuration file")
+	fmt.Fprintln(w, "  -h, --help\tShow help for export command")
 	w.Flush()
 }

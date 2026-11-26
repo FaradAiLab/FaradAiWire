@@ -9,6 +9,7 @@ import { AgentStudioModal } from './agents/AgentStudioModal'
 import { AgentRollbackModal } from './agents/AgentRollbackModal'
 import { SessionConflictModal } from './agents/SessionConflictModal'
 import { ClientConfigModal } from './ClientConfigModal'
+import { ExportNativeMcpModal } from './agents/ExportNativeMcpModal'
 
 export interface AgentsTabProps {
   status?: GatewayStatus | null
@@ -42,6 +43,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({ status: propStatus }) => {
   const [studioMode, setStudioMode] = useState<'create' | 'edit'>('create')
   const [selectedAgentForEdit, setSelectedAgentForEdit] = useState<AgentItem | null>(null)
   const [rollbackAgentName, setRollbackAgentName] = useState<string | null>(null)
+  const [exportAgentName, setExportAgentName] = useState<string | null>(null)
   const [sessionConflictAlert, setSessionConflictAlert] = useState<{
     agentName: string
     message: string
@@ -243,6 +245,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({ status: propStatus }) => {
               onRollback={handleOpenRollback}
               onDelete={handleDeleteAgent}
               onConnectClient={handleConnectClient}
+              onExportNative={setExportAgentName}
             />
           ))}
         </div>
@@ -294,6 +297,13 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({ status: propStatus }) => {
         ingressPort={ingressPort}
         ingressHost={ingressHost}
         allowStdio={allowStdio}
+      />
+
+      {/* Direct Native MCP Export Modal */}
+      <ExportNativeMcpModal
+        isOpen={Boolean(exportAgentName)}
+        agentName={exportAgentName}
+        onClose={() => setExportAgentName(null)}
       />
     </div>
   )

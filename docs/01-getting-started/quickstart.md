@@ -62,13 +62,12 @@ curl -s http://127.0.0.1:19415/admin/status | jq .
 Expected JSON response:
 ```json
 {
-  "status": "healthy",
-  "version": "v0.1.3",
-  "runtime_mode": "standalone",
+  "status": "Ready",
+  "version": "v0.1.7",
+  "transport_mode": "sse",
   "ingress_port": 19410,
-  "admin_port": 19415,
-  "uptime_seconds": 12,
-  "active_sessions": 0
+  "ingress_host": "127.0.0.1",
+  "ingress_url": "http://127.0.0.1:19410"
 }
 ```
 

@@ -32,7 +32,7 @@ Over 95% of developer MCP tools (e.g. filesystem access, git, sqlite, local scri
 ---
 
 ### Can I run FaradAiWire in containerized environments?
-Yes. If you are deploying in headless Linux environments or container clusters, you can build the container from `deploy/docker/` and bind listeners with `faradaiwire run --host 0.0.0.0 --standalone`.
+Yes. If you are deploying in headless Linux environments or container clusters, you can build the container from `Dockerfile` and bind listeners with `faradaiwire run --host 0.0.0.0`.
 
 ---
 

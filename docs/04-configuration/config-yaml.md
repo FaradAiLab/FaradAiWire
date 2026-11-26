@@ -7,6 +7,10 @@ description: "Full schema reference and field descriptions for FaradAiWire's YAM
 
 FaradAiWire uses YAML for its primary configuration file (`config.yaml`). The file is automatically generated with sensible defaults on first run if missing.
 
+> [!NOTE]
+> - **Read-only at runtime:** FaradAiWire treats `config.yaml` as a read-only baseline after startup. Changes made via the Web Console or Admin API (such as filter toggles under `filters.*`, AI Guard discovery under `guard.discovery.*`, and runtime tuning) persist in the local DuckDB `system_settings` overlay rather than rewriting `config.yaml`.
+> - **Home-directory (`~/`) expansion:** All path fields (`agents_dir`, `protocols_dir`, `filters.schema_validation.schemas_dir`, `audit_log.path`, `telemetry.db_path`, `security.api_keys_path`, `admin_tls.cert_file`, `admin_tls.key_file`) and `FARADAI_WIRE_HOME` expand leading `~/` automatically.
+
 ```yaml
 # ==============================================================================
 # FaradAiWire Zero-Trust Gateway Configuration

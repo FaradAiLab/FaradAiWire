@@ -12,6 +12,7 @@ import {
   Sparkles,
   Repeat,
   AlertTriangle,
+  Download,
 } from 'lucide-react'
 import { AgentItem } from '../../types'
 import { DEFAULT_INGRESS_PORT } from '../../constants'
@@ -28,6 +29,7 @@ export interface AgentCardProps {
   onRollback: (name: string) => void
   onDelete: (name: string) => void
   onConnectClient?: (agentName: string) => void
+  onExportNative?: (agentName: string) => void
 }
 
 export const AgentCard: React.FC<AgentCardProps> = React.memo(
@@ -42,6 +44,7 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(
     onRollback,
     onDelete,
     onConnectClient,
+    onExportNative,
   }) => {
     const [copied, setCopied] = useState(false)
 
@@ -216,6 +219,18 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(
             >
               <History className="w-3.5 h-3.5" />
             </button>
+
+            {onExportNative && (
+              <button
+                type="button"
+                onClick={() => onExportNative(agent.name)}
+                className="p-1.5 rounded-lg text-muted hover:text-accent hover:bg-accent/10 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent shadow-xs border border-subtle"
+                title="Export Native MCP Config"
+                aria-label="Export Native MCP Config"
+              >
+                <Download className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
 
           <button
