@@ -55,7 +55,7 @@ Filters execute in strict ascending numerical order. If a lower-numbered filter 
 | `OrderPrefill` | `5` | `prefill_block` | Blocks requests whose message history ends with an assistant message (sockpuppeting) |
 | `OrderRateLimit` | `10` | `rate_limiting` | Token-bucket limiter for tool calls |
 | `OrderLoopProtection` | `15` | `loop_protection` | Detects repeated identical tool calls inside a sliding window |
-| `OrderPolicy` | `20` | `policy` | Enterprise ABAC or custom policy hook |
+| `OrderPolicy` | `20` | `policy` | Custom policy hook |
 | `OrderSchemaValidation` | `30` | `schema_validation` | JSON schema validation of tool arguments and schema baseline tracking |
 | `OrderDLP` | `50` | `dlp` | Regex scanner for credentials, private keys and PII |
 | `OrderGuard` | `55` | `guard` | Regex tier plus local AI Guard model for prompt injection |

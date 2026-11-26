@@ -92,7 +92,7 @@ Filters execute in strict order defined by `OrderPolicy` precedence constants:
 3. Loop Protection          (Order: 15)  ── Halts repeated identical tool calls
       │
       ▼
-4. Extension / Policy Hook  (Order: 20)  ── Enterprise or custom rules
+4. Extension / Policy Hook  (Order: 20)  ── Custom policy rules
       │
       ▼
 5. JSON Schema Validation   (Order: 30)  ── Validates arguments; tracks schema changes

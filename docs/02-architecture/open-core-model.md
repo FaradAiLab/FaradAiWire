@@ -26,8 +26,6 @@ graph TD
         E4["Real-time SIEM Audit Streaming (Splunk, Datadog)"]
         E5["Corporate Compliance Baselines (KVKK, GDPR, SOC-2)"]
     end
-
-    OpenCore -->|"Extension Slot (OrderPolicy = 20)"| Enterprise
 ```
 
 ---
@@ -37,7 +35,7 @@ graph TD
 | Capability | FaradAiWire Core (Open Source) | FaradAiWireEE (Commercial) |
 | :--- | :--- | :--- |
 | **License** | **Apache 2.0** (Permissive Open Source) | Commercial Subscription |
-| **Primary Identity** | Host-native workstation daemon (Single-Tenant) | Distributed cluster gateway & cloud SaaS |
+| **Primary Identity** | Host-native workstation daemon (Single-Tenant) | Distributed cluster gateway (Multi-Tenant) |
 | **Target Users** | Individual developers, AI researchers, teams | Enterprise security teams, CISOs, compliance officers |
 | **Network Egress** | **Zero Egress:** 100% offline-first | Synchronizes policies with fleet control plane |
 | **Authentication** | Bearer token / Local loopback auth | Enterprise SSO (SAML 2.0, OIDC, Okta, Azure AD) |
@@ -50,13 +48,13 @@ graph TD
 
 ---
 
-## Open Core Policy Decoupling (OPA Purge)
+## Standalone Policy Architecture
 
-FaradAiWire Core formally decouples Open Policy Agent (OPA) and enterprise SaaS governance from the open-source gateway:
+FaradAiWire Core is designed as a self-contained, offline-first security gateway:
 
-1. **Protocol Generalization:** The JSON-RPC error code `-32003` was generalized from `ErrOPAPolicyDenied` to `mcp.ErrPolicyDenied` ("Policy authorization denied").
-2. **Clean Pipeline Extension Point:** The constant `OrderOPA = 20` was replaced with `OrderPolicy = 20`. This reserves a vendor-neutral hook where enterprise distributions or custom policy engines can inject authorization logic without polluting the open-source codebase.
-3. **Zero Phantom Artifacts:** FaradAiWire Core contains zero references to OPA, Rego, or remote SaaS control plane APIs.
+1. **Standardized Policy Errors:** Policy denials return the JSON-RPC error code `-32003` (`mcp.ErrPolicyDenied`, `"Policy authorization denied"`).
+2. **Vendor-Neutral Extension Point:** The pipeline reserves `OrderPolicy = 20` as a clean hook for custom policy engines without coupling Core to external services.
+3. **Zero External Dependencies:** FaradAiWire Core operates completely offline with no external control-plane dependencies or outbound telemetry.
 
 ---
 
