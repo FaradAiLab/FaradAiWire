@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
@@ -278,11 +279,36 @@ func BuildTargetMessageURL(protoURL, backendMsgPath string) (string, error) {
 }
 
 // StdioDialer establishes and manages local stdio subprocess MCP backends.
-type StdioDialer struct{}
+type StdioDialer struct {
+	mu            sync.RWMutex
+	settingsCache *settings.Cache
+}
 
 // NewStdioDialer creates a new StdioDialer.
 func NewStdioDialer() *StdioDialer {
 	return &StdioDialer{}
+}
+
+// SetSettingsCache binds the dynamic atomic operational settings cache.
+func (d *StdioDialer) SetSettingsCache(c *settings.Cache) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.settingsCache = c
+}
+
+func (d *StdioDialer) getSettingsCache() *settings.Cache {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.settingsCache
+}
+
+func (d *StdioDialer) getMaxScannerBufferBytes() int {
+	if c := d.getSettingsCache(); c != nil {
+		if active := c.Get(); active != nil && active.Limits.MaxScannerBufferMB > 0 {
+			return active.Limits.MaxScannerBufferMB * 1024 * 1024
+		}
+	}
+	return 10 * 1024 * 1024
 }
 
 // Dial spawns the configured local command and attaches stdin/stdout pipes for JSON-RPC communication.
@@ -296,8 +322,9 @@ func (d *StdioDialer) Dial(parentCtx context.Context, proto agent.ProtocolConfig
 		AuthToken:    proto.AuthToken,
 		Status:       "CONNECTING",
 		LastPing:     time.Now(),
-		pendingCalls: make(map[string]chan *mcp.Response),
-		procExitCh:   make(chan struct{}),
+		pendingCalls:  make(map[string]chan *mcp.Response),
+		procExitCh:    make(chan struct{}),
+		settingsCache: d.getSettingsCache(),
 	}
 
 	command := proto.GetCommand()
@@ -401,7 +428,7 @@ func (d *StdioDialer) Dial(parentCtx context.Context, proto agent.ProtocolConfig
 
 		scanner := bufio.NewScanner(stdoutPipe)
 		buf := make([]byte, 64*1024)
-		scanner.Buffer(buf, 10*1024*1024)
+		scanner.Buffer(buf, d.getMaxScannerBufferBytes())
 
 		for scanner.Scan() {
 			lineBytes := bytes.TrimSpace(scanner.Bytes())
@@ -529,6 +556,16 @@ func (d *CompositeDialer) SetStdioAllowed(allowed bool) {
 		return
 	}
 	d.stdioDisabled.Store(!allowed)
+}
+
+// SetSettingsCache forwards the operational settings cache to child dialers that support it.
+func (d *CompositeDialer) SetSettingsCache(c *settings.Cache) {
+	if d == nil {
+		return
+	}
+	if sd, ok := d.stdioDialer.(*StdioDialer); ok && sd != nil {
+		sd.SetSettingsCache(c)
+	}
 }
 
 // IsStdioAllowed reports whether CompositeDialer permits stdio subprocess dialing.

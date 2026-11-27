@@ -22,16 +22,17 @@ const (
 // SettingMeta encapsulates the declarative schema, labels, constraints, and descriptions
 // for a single operational setting.
 type SettingMeta struct {
-	Key         string      `json:"key"`
-	Label       string      `json:"label"`
-	Description string      `json:"description"`
-	Category    string      `json:"category"` // "limits", "timeouts", "guard", "maintenance"
-	Type        SettingType `json:"type"`
-	DefaultVal  any         `json:"default_value"`
-	Min         float64     `json:"min,omitempty"`
-	Max         float64     `json:"max,omitempty"`
-	Step        float64     `json:"step,omitempty"`
-	Unit        string      `json:"unit,omitempty"`
+	Key             string      `json:"key"`
+	Label           string      `json:"label"`
+	Description     string      `json:"description"`
+	Category        string      `json:"category"` // "limits", "timeouts", "guard", "maintenance"
+	Type            SettingType `json:"type"`
+	DefaultVal      any         `json:"default_value"`
+	Min             float64     `json:"min,omitempty"`
+	Max             float64     `json:"max,omitempty"`
+	Step            float64     `json:"step,omitempty"`
+	Unit            string      `json:"unit,omitempty"`
+	RequiresRestart bool        `json:"requires_restart,omitempty"`
 }
 
 // SettingItem is returned by the self-describing Settings API, merging static metadata
@@ -58,15 +59,16 @@ var Registry = map[string]SettingMeta{
 		Unit:        "bytes",
 	},
 	"limits.max_scanner_buffer_mb": {
-		Key:         "limits.max_scanner_buffer_mb",
-		Label:       "Scanner Buffer Size",
-		Description: "Maximum line scanning and token extraction buffer size in megabytes",
-		Category:    "limits",
-		Type:        TypeInt,
-		DefaultVal:  10,
-		Min:         1,
-		Max:         64,
-		Unit:        "MB",
+		Key:             "limits.max_scanner_buffer_mb",
+		Label:           "Scanner Buffer Size",
+		Description:     "Maximum line scanning and token extraction buffer size in megabytes for MCP/SSE streams (applies to newly opened scanners; running stdio proxy requires restart)",
+		Category:        "limits",
+		Type:            TypeInt,
+		DefaultVal:      10,
+		Min:             1,
+		Max:             100,
+		Unit:            "MB",
+		RequiresRestart: true,
 	},
 	"limits.max_preview_bytes": {
 		Key:         "limits.max_preview_bytes",
@@ -93,26 +95,28 @@ var Registry = map[string]SettingMeta{
 		Unit:        "seconds",
 	},
 	"timeouts.idle_timeout_sec": {
-		Key:         "timeouts.idle_timeout_sec",
-		Label:       "Connection Idle Timeout",
-		Description: "Maximum duration an idle HTTP keep-alive connection remains open",
-		Category:    "timeouts",
-		Type:        TypeInt,
-		DefaultVal:  90,
-		Min:         5,
-		Max:         600,
-		Unit:        "seconds",
+		Key:             "timeouts.idle_timeout_sec",
+		Label:           "Connection Idle Timeout",
+		Description:     "Maximum duration an idle outbound HTTP upstream transport connection remains open (requires restart)",
+		Category:        "timeouts",
+		Type:            TypeInt,
+		DefaultVal:      90,
+		Min:             5,
+		Max:             600,
+		Unit:            "seconds",
+		RequiresRestart: true,
 	},
 	"timeouts.read_header_timeout_sec": {
-		Key:         "timeouts.read_header_timeout_sec",
-		Label:       "Read Header Timeout",
-		Description: "Maximum duration allowed for reading incoming HTTP request headers",
-		Category:    "timeouts",
-		Type:        TypeInt,
-		DefaultVal:  5,
-		Min:         1,
-		Max:         60,
-		Unit:        "seconds",
+		Key:             "timeouts.read_header_timeout_sec",
+		Label:           "Read Header Timeout",
+		Description:     "Maximum duration allowed for reading incoming HTTP request headers (requires restart)",
+		Category:        "timeouts",
+		Type:            TypeInt,
+		DefaultVal:      5,
+		Min:             1,
+		Max:             60,
+		Unit:            "seconds",
+		RequiresRestart: true,
 	},
 	"timeouts.probe_timeout_sec": {
 		Key:         "timeouts.probe_timeout_sec",
@@ -122,7 +126,7 @@ var Registry = map[string]SettingMeta{
 		Type:        TypeInt,
 		DefaultVal:  5,
 		Min:         1,
-		Max:         60,
+		Max:         300,
 		Unit:        "seconds",
 	},
 
@@ -242,8 +246,8 @@ var Registry = map[string]SettingMeta{
 		Description: "Time-to-live retention window in minutes for request correlation tracking",
 		Category:    "maintenance",
 		Type:        TypeInt,
-		DefaultVal:  60,
-		Min:         10,
+		DefaultVal:  5,
+		Min:         5,
 		Max:         1440,
 		Unit:        "minutes",
 	},
@@ -540,6 +544,7 @@ func ApplySetting(s *OperationalSettings, key string, val any) error {
 		default:
 			return fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
 		}
+		s.Guard.ThresholdScoreOverridden = true
 	case "guard.timeout_ms":
 		switch v := val.(type) {
 		case int:
@@ -551,6 +556,7 @@ func ApplySetting(s *OperationalSettings, key string, val any) error {
 		default:
 			return fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
 		}
+		s.Guard.TimeoutMSOverridden = true
 	case "guard.cold_timeout_ms":
 		switch v := val.(type) {
 		case int:
@@ -562,6 +568,7 @@ func ApplySetting(s *OperationalSettings, key string, val any) error {
 		default:
 			return fmt.Errorf("%w: invalid type %T for %s", ErrInvalidValue, val, key)
 		}
+		s.Guard.ColdTimeoutMSOverridden = true
 	case "guard.hitl_timeout_sec":
 		v, err := coerceIntSetting(key, val)
 		if err != nil {

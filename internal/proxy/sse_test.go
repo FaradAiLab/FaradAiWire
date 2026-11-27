@@ -21,6 +21,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
@@ -1199,5 +1200,39 @@ func TestDirectMode_ScopedKey_MessageCallbackPreserved(t *testing.T) {
 
 	if backendCalls != 1 {
 		t.Errorf("expected 1 backend call, got %d", backendCalls)
+	}
+}
+
+func TestSSEProxy_ReadRequestBody_HonorsLiveMaxPayloadBytes(t *testing.T) {
+	t.Parallel()
+
+	sCache := settings.NewCache(nil)
+	eff := sCache.Get().Clone()
+	eff.Limits.MaxPayloadBytes = 1024
+	sCache.Update(eff)
+
+	p := NewSSEProxyWithCoordinator(0, "", nil)
+	p.SetSettingsCache(sCache)
+
+	// 2048-byte body exceeds 1024-byte limit
+	oversizeReq := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(strings.Repeat("a", 2048)))
+	oversizeRec := httptest.NewRecorder()
+	if _, ok := p.readRequestBody(oversizeRec, oversizeReq); ok {
+		t.Fatal("expected readRequestBody to reject 2048-byte body when MaxPayloadBytes=1024")
+	}
+	if oversizeRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request, got %d", oversizeRec.Code)
+	}
+
+	// Updating settingsCache live allows the 2048-byte body without restart
+	eff2 := eff.Clone()
+	eff2.Limits.MaxPayloadBytes = 4096
+	sCache.Update(eff2)
+
+	okReq := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(strings.Repeat("a", 2048)))
+	okRec := httptest.NewRecorder()
+	body, ok := p.readRequestBody(okRec, okReq)
+	if !ok || len(body) != 2048 {
+		t.Fatalf("expected readRequestBody to accept 2048-byte body after live limit bump, got ok=%v len=%d", ok, len(body))
 	}
 }

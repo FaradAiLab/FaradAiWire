@@ -15,6 +15,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
@@ -32,9 +33,29 @@ type StdioProxy struct {
 	out   io.Writer
 	outMu sync.Mutex
 
-	mu          sync.Mutex
-	isStopped   bool
-	currSession *session.UpstreamSession
+	mu            sync.Mutex
+	isStopped     bool
+	currSession   *session.UpstreamSession
+	settingsCache *settings.Cache
+}
+
+// SetSettingsCache binds the dynamic atomic operational settings cache to StdioProxy.
+func (s *StdioProxy) SetSettingsCache(c *settings.Cache) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settingsCache = c
+}
+
+func (s *StdioProxy) getMaxScannerBufferBytes() int {
+	s.mu.Lock()
+	c := s.settingsCache
+	s.mu.Unlock()
+	if c != nil {
+		if active := c.Get(); active != nil && active.Limits.MaxScannerBufferMB > 0 {
+			return active.Limits.MaxScannerBufferMB * 1024 * 1024
+		}
+	}
+	return 10 * 1024 * 1024
 }
 
 // NewStdioProxy initializes a new StdioProxy using default OS stdio streams and StdioDialer.
@@ -91,7 +112,7 @@ func (s *StdioProxy) Start(ctx context.Context) error {
 		defer close(linesCh)
 		scanner := bufio.NewScanner(s.in)
 		buf := make([]byte, 0, 64*1024)
-		scanner.Buffer(buf, 10*1024*1024) // 10MB limit
+		scanner.Buffer(buf, s.getMaxScannerBufferBytes())
 
 		for scanner.Scan() {
 			line := scanner.Bytes()

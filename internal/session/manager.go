@@ -67,8 +67,12 @@ func (m *Manager) SetStdioAllowed(allowed bool) {
 // SetSettingsCache binds the dynamic atomic operational settings cache.
 func (m *Manager) SetSettingsCache(c *settings.Cache) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.settingsCache = c
+	dialer := m.dialer
+	m.mu.Unlock()
+	if cd, ok := dialer.(*CompositeDialer); ok && cd != nil {
+		cd.SetSettingsCache(c)
+	}
 }
 
 func (m *Manager) getMaxIdleTimeout() (time.Duration, bool) {
@@ -211,6 +215,12 @@ func (m *Manager) dialBridge(parentCtx context.Context, agentName, clientSession
 		go func(p agent.ProtocolConfig) {
 			defer dialWg.Done()
 			upSess := m.dialer.Dial(bridgeCtx, p, bridge.EventCh, clientSessionID, headers)
+			m.mu.RLock()
+			sCache := m.settingsCache
+			m.mu.RUnlock()
+			if upSess != nil && sCache != nil {
+				upSess.SetSettingsCache(sCache)
+			}
 			dialMu.Lock()
 			canonicalKey := p.ID
 			if canonicalKey == "" {

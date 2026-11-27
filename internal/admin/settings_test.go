@@ -1009,3 +1009,35 @@ func TestSettingsResetAndToggle_RollbackDuckDBOnReloadFailure(t *testing.T) {
 		}
 	})
 }
+
+func TestAdminServer_UpdateSettings_GuardColdTimeoutInvariant(t *testing.T) {
+	t.Parallel()
+
+	db, err := sql.Open("duckdb", ":memory:")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	defer db.Close()
+	store := settings.NewDuckDBStore(db)
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	cache := settings.NewCache(nil)
+	server := NewAdminServer(AdminDependencies{
+		Config:        &config.Config{},
+		SettingsStore: store,
+		SettingsCache: cache,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/settings", bytes.NewReader([]byte(`{"settings":{"guard.timeout_ms":5000,"guard.cold_timeout_ms":1000}}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request when cold_timeout_ms < timeout_ms, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, exists, _ := store.Get(context.Background(), "guard.timeout_ms"); exists {
+		t.Fatal("expected rejected cross-field payload not to persist guard.timeout_ms")
+	}
+}

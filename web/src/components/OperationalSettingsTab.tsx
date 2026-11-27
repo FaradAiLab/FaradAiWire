@@ -144,9 +144,10 @@ export const OperationalSettingsTab: React.FC = () => {
     try {
       setSavingKey(key)
       await api.updateSetting(key, val)
+      const restartNote = target.requires_restart ? ' Restart required to take effect.' : ''
       setNotification({
         type: 'success',
-        text: `Setting ${key} persisted to DuckDB and loaded into zero-I/O cache.`,
+        text: `Setting ${key} persisted to DuckDB and loaded into zero-I/O cache.${restartNote}`,
       })
       await fetchSettings()
     } catch (err: unknown) {
@@ -158,12 +159,14 @@ export const OperationalSettingsTab: React.FC = () => {
   }
 
   const handleReset = async (key: string) => {
+    const target = settings.find((s) => s.key === key)
     try {
       setResettingKey(key)
       await api.resetSetting(key)
+      const restartNote = target?.requires_restart ? ' Restart required to take effect.' : ''
       setNotification({
         type: 'success',
-        text: `Setting ${key} reset to config.yaml baseline.`,
+        text: `Setting ${key} reset to config.yaml baseline.${restartNote}`,
       })
       await fetchSettings()
     } catch (err: unknown) {
@@ -451,6 +454,12 @@ export const OperationalSettingsTab: React.FC = () => {
                               ) : (
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono text-muted bg-surface-muted/60 border border-subtle">
                                   YAML Default
+                                </span>
+                              )}
+
+                              {item.requires_restart && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                                  Requires restart
                                 </span>
                               )}
 

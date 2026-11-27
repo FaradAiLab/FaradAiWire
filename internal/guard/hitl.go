@@ -16,6 +16,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/console"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard/hitltypes"
 	"github.com/FaradAiLab/FaradAiWire/internal/notify"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 )
 
 var (
@@ -69,6 +70,7 @@ type HITLDispatcherConfig struct {
 	AllowRESTOnly   bool
 	WSHub           WebSocketHub
 	DesktopNotifier notify.DesktopNotifier
+	SettingsCache   *settings.Cache
 	OnResolved      func(hitltypes.HITLResolutionInfo)
 }
 
@@ -81,11 +83,12 @@ func DefaultHITLDispatcherConfig() HITLDispatcherConfig {
 
 // HITLDispatcher coordinates dual-channel human verification across terminal TTY and Web Console.
 type HITLDispatcher struct {
-	cfg        HITLDispatcherConfig
-	pending    map[string]*pendingApproval
-	mu         sync.RWMutex
-	ttySemOnce sync.Once
-	ttySem     chan struct{}
+	cfg           HITLDispatcherConfig
+	settingsCache *settings.Cache
+	pending       map[string]*pendingApproval
+	mu            sync.RWMutex
+	ttySemOnce    sync.Once
+	ttySem        chan struct{}
 }
 
 // NewHITLDispatcher constructs an initialized HITLDispatcher.
@@ -94,10 +97,31 @@ func NewHITLDispatcher(cfg HITLDispatcherConfig) *HITLDispatcher {
 		cfg.Timeout = 60 * time.Second
 	}
 	return &HITLDispatcher{
-		cfg:     cfg,
-		pending: make(map[string]*pendingApproval),
-		ttySem:  make(chan struct{}, 1),
+		cfg:           cfg,
+		settingsCache: cfg.SettingsCache,
+		pending:       make(map[string]*pendingApproval),
+		ttySem:        make(chan struct{}, 1),
 	}
+}
+
+// SetSettingsCache binds the dynamic atomic operational settings cache.
+func (d *HITLDispatcher) SetSettingsCache(c *settings.Cache) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.settingsCache = c
+}
+
+func resolveHITLTimeout(baseTimeout time.Duration, sCache *settings.Cache) time.Duration {
+	timeout := baseTimeout
+	if sCache != nil {
+		if s := sCache.Get(); s != nil && s.Guard.HITLTimeoutSec > 0 {
+			timeout = time.Duration(s.Guard.HITLTimeoutSec) * time.Second
+		}
+	}
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	return timeout
 }
 
 func (d *HITLDispatcher) acquireTTYSem(ctx context.Context) (func(), bool) {
@@ -181,7 +205,8 @@ func (d *HITLDispatcher) RequestApproval(ctx context.Context, req *HITLRequest) 
 	}
 
 	d.mu.RLock()
-	timeout := d.cfg.Timeout
+	baseTimeout := d.cfg.Timeout
+	sCache := d.settingsCache
 	allowRESTOnly := d.cfg.AllowRESTOnly
 	wsHub := d.cfg.WSHub
 	ttyIn := d.cfg.TTYIn
@@ -189,6 +214,7 @@ func (d *HITLDispatcher) RequestApproval(ctx context.Context, req *HITLRequest) 
 	disableTTY := d.cfg.DisableTTY
 	desktopNotifier := d.cfg.DesktopNotifier
 	d.mu.RUnlock()
+	timeout := resolveHITLTimeout(baseTimeout, sCache)
 
 	isTTYAvail := isTTYAvailable(disableTTY, ttyIn != nil && ttyOut != nil)
 	hasChannel := isTTYAvail || (wsHub != nil && wsHub.ClientCount() > 0)

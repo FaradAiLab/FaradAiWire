@@ -133,6 +133,18 @@ func (u *UpstreamSession) getMaxPayloadBytes() int64 {
 	return 10 << 20 // Default 10MB
 }
 
+func (u *UpstreamSession) getMaxScannerBufferBytes() int {
+	u.mu.RLock()
+	c := u.settingsCache
+	u.mu.RUnlock()
+	if c != nil {
+		if s := c.Get(); s != nil && s.Limits.MaxScannerBufferMB > 0 {
+			return s.Limits.MaxScannerBufferMB * 1024 * 1024
+		}
+	}
+	return 10 * 1024 * 1024
+}
+
 // IsStdio returns true if the session manages a local stdio subprocess.
 func (u *UpstreamSession) IsStdio() bool {
 	u.mu.RLock()
@@ -312,7 +324,7 @@ func (u *UpstreamSession) CallToolHTTP(ctx context.Context, httpClient *http.Cli
 	}
 
 	// Handle SSE-wrapped responses (Content-Type: text/event-stream with "data:" prefix)
-	body = extractJSONFromSSEOrDirect(body)
+	body = extractJSONFromSSEOrDirectWithMaxBytes(body, u.getMaxScannerBufferBytes())
 
 	var rpcResp mcp.Response
 	if err := json.Unmarshal(body, &rpcResp); err != nil {
@@ -330,13 +342,26 @@ func (u *UpstreamSession) CallToolHTTP(ctx context.Context, httpClient *http.Cli
 // extractJSONFromSSEOrDirect handles responses that may be either plain JSON or
 // SSE-wrapped (text/event-stream with multi-line "data:" prefix chunks).
 func extractJSONFromSSEOrDirect(body []byte) []byte {
+	return extractJSONFromSSEOrDirectWithMaxBytes(body, 10*1024*1024)
+}
+
+func extractJSONFromSSEOrDirectWithMaxBytes(body []byte, maxScannerBytes int) []byte {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
 		return trimmed
 	}
 
+	initBuf := min(len(body)+1, 64*1024)
+	if initBuf < 64 {
+		initBuf = 64
+	}
+	if maxScannerBytes < initBuf {
+		maxScannerBytes = initBuf
+	}
+
 	var dataLines []string
 	scanner := bufio.NewScanner(bytes.NewReader(body))
+	scanner.Buffer(make([]byte, 0, initBuf), maxScannerBytes)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if strings.HasPrefix(line, "data:") {

@@ -83,6 +83,38 @@ func TestResolveEffectiveSettings(t *testing.T) {
 	}
 }
 
+func TestResolveEffectiveSettings_HITLYAMLBoundsAndColdSLAInvariant(t *testing.T) {
+	t.Parallel()
+
+	// Out-of-bounds YAML HITL timeout values are ignored (fail-closed to 60s default)
+	lowYAML := &config.Config{}
+	lowYAML.Filters.HITL.TimeoutSeconds = 1
+	if got := ResolveEffectiveSettings(lowYAML, nil).Guard.HITLTimeoutSec; got != 60 {
+		t.Fatalf("expected low YAML HITL timeout 1s to fall back to 60s, got %d", got)
+	}
+
+	highYAML := &config.Config{}
+	highYAML.Filters.HITL.TimeoutSeconds = 99999
+	if got := ResolveEffectiveSettings(highYAML, nil).Guard.HITLTimeoutSec; got != 60 {
+		t.Fatalf("expected high YAML HITL timeout 99999s to fall back to 60s, got %d", got)
+	}
+
+	validYAML := &config.Config{}
+	validYAML.Filters.HITL.TimeoutSeconds = 120
+	if got := ResolveEffectiveSettings(validYAML, nil).Guard.HITLTimeoutSec; got != 120 {
+		t.Fatalf("expected valid YAML HITL timeout 120s to apply, got %d", got)
+	}
+
+	// ColdTimeoutMS < TimeoutMS from corrupted DB rows is clamped to >= TimeoutMS
+	eff := ResolveEffectiveSettings(nil, map[string]string{
+		"guard.timeout_ms":      "5000",
+		"guard.cold_timeout_ms": "1000",
+	})
+	if eff.Guard.ColdTimeoutMS < eff.Guard.TimeoutMS {
+		t.Fatalf("expected ColdTimeoutMS >= TimeoutMS, got cold=%d warm=%d", eff.Guard.ColdTimeoutMS, eff.Guard.TimeoutMS)
+	}
+}
+
 func TestResolveEffectiveSettings_AuditLogBaselines(t *testing.T) {
 	t.Parallel()
 

@@ -15,6 +15,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/internal/notify"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/pkg/filter"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
@@ -1755,5 +1756,35 @@ func TestGuardFilter_DesktopAlert_OfflineAndCancellation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGuardFilter_ThresholdScoreOverride_BlocksLowCalibratedBenign(t *testing.T) {
+	mgr := &mockGuardManager{}
+	mgr.running.Store(true)
+	mgr.callInspectFn = func(ctx context.Context, req *InspectionRequest) (*InspectionResult, error) {
+		return &InspectionResult{
+			Verdict:              "BENIGN",
+			MaliciousProbability: 0.40,
+			DecisionEngine:       "SystemOneEngine",
+		}, nil
+	}
+
+	sCache := settings.NewCache(nil)
+	eff := sCache.Get().Clone()
+	_ = settings.ApplySetting(eff, "guard.threshold_score", 0.30)
+	sCache.Update(eff)
+
+	gf := NewFilter(FilterConfig{CriticalBlocks: []string{"exec_cmd"}}, mgr)
+	gf.SetSettingsCache(sCache)
+
+	req := &mcp.Request{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name": "exec_cmd", "arguments": {"cmd": "id"}}`),
+	}
+	if _, reqErr := gf.FilterRequest(context.Background(), req); reqErr == nil {
+		t.Fatal("expected overridden guard.threshold_score=0.30 to block 0.40 malicious probability")
 	}
 }

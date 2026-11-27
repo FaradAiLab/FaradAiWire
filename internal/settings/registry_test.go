@@ -277,14 +277,14 @@ func TestProbeTimeoutSec_RegistrationAndBounds(t *testing.T) {
 		t.Fatalf("expected default ProbeTimeoutSec=5, got %d", s.Timeouts.ProbeTimeoutSec)
 	}
 
-	if err := Validate("timeouts.probe_timeout_sec", 10); err != nil {
-		t.Fatalf("expected 10s probe timeout to be valid, got: %v", err)
+	if err := Validate("timeouts.probe_timeout_sec", 125); err != nil {
+		t.Fatalf("expected 125s probe timeout to be valid, got: %v", err)
 	}
 	if err := Validate("timeouts.probe_timeout_sec", 0); err == nil {
 		t.Fatal("expected 0s probe timeout to fail Min validation")
 	}
-	if err := Validate("timeouts.probe_timeout_sec", 61); err == nil {
-		t.Fatal("expected 61s probe timeout to fail Max validation")
+	if err := Validate("timeouts.probe_timeout_sec", 301); err == nil {
+		t.Fatal("expected 301s probe timeout to fail Max validation")
 	}
 
 	parsed, err := ParseAndValidate("timeouts.probe_timeout_sec", "15")
@@ -539,5 +539,61 @@ func TestAuditJSONLAndExportSettings(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRegistry_RequiresRestartAndAlignedBounds(t *testing.T) {
+	t.Parallel()
+
+	for _, key := range []string{
+		"timeouts.read_header_timeout_sec",
+		"timeouts.idle_timeout_sec",
+		"limits.max_scanner_buffer_mb",
+	} {
+		meta, ok := Registry[key]
+		if !ok {
+			t.Fatalf("missing key %q", key)
+		}
+		if !meta.RequiresRestart {
+			t.Errorf("expected RequiresRestart=true on %q", key)
+		}
+	}
+
+	if err := Validate("limits.max_scanner_buffer_mb", 100); err != nil {
+		t.Fatalf("expected max_scanner_buffer_mb=100 to be valid: %v", err)
+	}
+	if err := Validate("limits.max_scanner_buffer_mb", 101); err == nil {
+		t.Fatal("expected max_scanner_buffer_mb=101 to fail Max validation")
+	}
+
+	if err := Validate("maintenance.correlation_ttl_min", 5); err != nil {
+		t.Fatalf("expected correlation_ttl_min=5 to be valid: %v", err)
+	}
+	if err := Validate("maintenance.correlation_ttl_min", 4); err == nil {
+		t.Fatal("expected correlation_ttl_min=4 to fail Min validation")
+	}
+	if DefaultOperationalSettings().Maintenance.CorrelationTTLMin != 5 {
+		t.Fatalf("expected default CorrelationTTLMin=5, got %d", DefaultOperationalSettings().Maintenance.CorrelationTTLMin)
+	}
+
+	s := DefaultOperationalSettings()
+	if s.Guard.ThresholdScoreOverridden || s.Guard.TimeoutMSOverridden || s.Guard.ColdTimeoutMSOverridden {
+		t.Fatal("expected override flags false by default")
+	}
+	if err := ApplySetting(s, "guard.threshold_score", 0.35); err != nil {
+		t.Fatalf("apply threshold_score: %v", err)
+	}
+	if err := ApplySetting(s, "guard.timeout_ms", 800); err != nil {
+		t.Fatalf("apply timeout_ms: %v", err)
+	}
+	if err := ApplySetting(s, "guard.cold_timeout_ms", 2000); err != nil {
+		t.Fatalf("apply cold_timeout_ms: %v", err)
+	}
+	if !s.Guard.ThresholdScoreOverridden || !s.Guard.TimeoutMSOverridden || !s.Guard.ColdTimeoutMSOverridden {
+		t.Fatal("expected override flags to be set after ApplySetting")
+	}
+	cloned := s.Clone()
+	if !cloned.Guard.ThresholdScoreOverridden || !cloned.Guard.TimeoutMSOverridden || !cloned.Guard.ColdTimeoutMSOverridden {
+		t.Fatal("expected Clone to preserve guard override flags")
 	}
 }

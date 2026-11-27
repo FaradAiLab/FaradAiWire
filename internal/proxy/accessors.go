@@ -362,8 +362,17 @@ func (s *SSEProxy) onDirectEndpoint(targetURLStr string) func(string, string) {
 	}
 }
 
+func (s *SSEProxy) getMaxPayloadBytes() int64 {
+	if c := s.settingsCache.Load(); c != nil {
+		if active := c.Get(); active != nil && active.Limits.MaxPayloadBytes > 0 {
+			return active.Limits.MaxPayloadBytes
+		}
+	}
+	return 10 << 20
+}
+
 func (s *SSEProxy) readRequestBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, s.getMaxPayloadBytes())
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Request body too large or unreadable: "+err.Error(), http.StatusBadRequest)

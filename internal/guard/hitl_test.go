@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/notify"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 )
 
 type mockWSHub struct {
@@ -564,4 +565,47 @@ func TestHITLDispatcher_DesktopNotifier_StrictADR0054(t *testing.T) {
 			t.Errorf("expected tool name in message, got %q", ev.Message)
 		}
 	})
+}
+
+func TestHITLDispatcher_SettingsCacheTimeout(t *testing.T) {
+	wsHub := &mockWSHub{clientCount: 1}
+	sCache := settings.NewCache(nil)
+	updated := sCache.Get().Clone()
+	updated.Guard.HITLTimeoutSec = 120
+	sCache.Update(updated)
+
+	d := NewHITLDispatcher(HITLDispatcherConfig{
+		Timeout:       60 * time.Second,
+		WSHub:         wsHub,
+		DisableTTY:    true,
+		SettingsCache: sCache,
+	})
+
+	var expiresAt time.Time
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = d.RequestApproval(context.Background(), &HITLRequest{
+			CallID:   "hitl-cache-120",
+			ToolName: "delete_file",
+		})
+	}()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if req, ok := d.GetPending("hitl-cache-120"); ok {
+			expiresAt = req.ExpiresAt
+			d.Resolve("hitl-cache-120", true)
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	<-done
+
+	if expiresAt.IsZero() {
+		t.Fatal("expected pending request to register before deadline")
+	}
+	if ttl := time.Until(expiresAt); ttl < 110*time.Second {
+		t.Fatalf("expected ExpiresAt to reflect live 120s settingsCache timeout, got remaining %v", ttl)
+	}
 }

@@ -29,10 +29,12 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/schema"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/internal/gateway"
+	"github.com/FaradAiLab/FaradAiWire/internal/gateway/bootstrap"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/notify"
 	"github.com/FaradAiLab/FaradAiWire/internal/proxy"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/internal/telemetry/duckdb"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
@@ -2293,4 +2295,58 @@ func TestServer_DesktopNotifierWiringAndHotReload(t *testing.T) {
 	if reloadedGF.DesktopNotifier() != dn {
 		t.Fatal("expected hot-reloaded GuardFilter to retain shared DesktopNotifier")
 	}
+}
+
+func TestGateway_MaintenanceCoordinator_LiveCorrelationTTL(t *testing.T) {
+	cStore := proxy.NewMemoryCorrelationStore()
+	cStore.Put(proxy.NewCorrelationKey("sess-1", "corr-old"), &proxy.PendingRequest{
+		ToolName:  "read_file",
+		Timestamp: time.Now().Add(-10 * time.Minute),
+	})
+
+	sCache := settings.NewCache(nil)
+	eff := sCache.Get().Clone()
+	eff.Maintenance.CorrelationTTLMin = 30
+	sCache.Update(eff)
+
+	coord := session.NewInboundCoordinator(nil, nil, nil, nil, nil, cStore, nil, "")
+	sseP := proxy.NewSSEProxyWithCoordinator(0, "", coord)
+	srv, err := gateway.NewServerWithDependencies(&bootstrap.Dependencies{
+		Config:        &config.Config{AdminDisabled: true},
+		SettingsCache: sCache,
+		SSEProxy:      sseP,
+		Coordinator:   coord,
+	})
+	if err != nil {
+		t.Fatalf("NewServerWithDependencies: %v", err)
+	}
+	srv.SetMaintenanceIntervals(20*time.Millisecond, 30*time.Minute, 0, 2*time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Start(ctx) }()
+	defer func() {
+		cancel()
+		<-errCh
+	}()
+
+	// With CorrelationTTLMin=30m, a 10-minute-old correlation entry must be retained across ticks
+	time.Sleep(80 * time.Millisecond)
+	if cStore.Count() != 1 {
+		t.Fatalf("expected 10m-old correlation entry retained under 30m TTL, got count=%d", cStore.Count())
+	}
+
+	// Lower CorrelationTTLMin live to 5m; next maintenance tick must evict the 10-minute-old entry
+	eff2 := eff.Clone()
+	eff2.Maintenance.CorrelationTTLMin = 5
+	sCache.Update(eff2)
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if cStore.Count() == 0 {
+			return
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatalf("expected correlation entry to be evicted after live CorrelationTTLMin update to 5m, count=%d", cStore.Count())
 }

@@ -182,16 +182,21 @@ func (f *GuardFilter) SettingsCache() *settings.Cache {
 	return f.settingsCache
 }
 
-func (f *GuardFilter) getThresholdScore() float64 {
+func (f *GuardFilter) getThresholdSettings() (float64, bool) {
 	f.mu.RLock()
 	c := f.settingsCache
 	f.mu.RUnlock()
 	if c != nil {
 		if s := c.Get(); s != nil && s.Guard.ThresholdScore > 0 {
-			return s.Guard.ThresholdScore
+			return s.Guard.ThresholdScore, s.Guard.ThresholdScoreOverridden
 		}
 	}
-	return 0.50
+	return 0.50, false
+}
+
+func (f *GuardFilter) getThresholdScore() float64 {
+	score, _ := f.getThresholdSettings()
+	return score
 }
 
 func (f *GuardFilter) getHITLTimeout() time.Duration {

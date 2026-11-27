@@ -142,6 +142,9 @@ func WireFilterDependencies(pipe *filter.Pipeline, cfg *config.Config, deps Filt
 		if deps.GuardHITL != nil {
 			hitlFilter.SetHITLDispatcher(deps.GuardHITL)
 		}
+		if deps.SettingsCache != nil {
+			hitlFilter.SetSettingsCache(deps.SettingsCache)
+		}
 		if cb := hitlResolutionSecurityCallback(deps.SecurityAuditLogger); cb != nil {
 			hitlFilter.SetOnResolved(cb)
 		}
@@ -452,6 +455,11 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 
 	runtimeSSRFOpts := transport.OptionsFromConfig(cfg.Security.SSRFProtection)
 	runtimeSSRFOpts.BlockPrivateIPs = cfg.Security.SSRFProtection.ShouldBlockPrivateIPs(false)
+	if deps.SettingsCache != nil {
+		if active := deps.SettingsCache.Get(); active != nil && active.Timeouts.IdleTimeoutSec > 0 {
+			runtimeSSRFOpts.IdleConnTimeout = time.Duration(active.Timeouts.IdleTimeoutSec) * time.Second
+		}
+	}
 	runtimeHTTPClient := transport.NewSafeStreamingHTTPClient(runtimeSSRFOpts, 10*time.Second)
 
 	sessionMgr := session.NewManager(agentRepo, runtimeHTTPClient)
@@ -497,6 +505,9 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	var guardManager guard.Manager
 	if len(cb) > 0 && cb[0].GuardManager != nil {
 		guardManager = cb[0].GuardManager
+		if httpProv, ok := guardManager.(*guard.HTTPProvider); ok && httpProv != nil && deps.SettingsCache != nil {
+			httpProv.SetSettingsCache(deps.SettingsCache)
+		}
 	} else {
 		httpCfg := guard.DefaultHTTPProviderConfig()
 		if cfg.Filters.Guard.Discovery.CustomURL != "" {
@@ -506,7 +517,11 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		} else {
 			httpCfg.BaseURL = cfg.Filters.Guard.Discovery.GetEffectiveOllamaURL()
 		}
-		guardManager = guard.NewHTTPProvider(httpCfg)
+		httpProv := guard.NewHTTPProvider(httpCfg)
+		if deps.SettingsCache != nil {
+			httpProv.SetSettingsCache(deps.SettingsCache)
+		}
+		guardManager = httpProv
 	}
 	deps.GuardManager = guardManager
 
@@ -525,6 +540,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	// 11. Dual-Channel HITL Safety Dispatcher (GUARD-005)
 	hitlCfg := guard.DefaultHITLDispatcherConfig()
 	hitlCfg.DesktopNotifier = desktopNotifier
+	hitlCfg.SettingsCache = deps.SettingsCache
 	if combinedSecLogger != nil {
 		hitlCfg.OnResolved = hitlResolutionSecurityCallback(combinedSecLogger)
 	}
@@ -584,7 +600,11 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	deps.Coordinator = coordinator
 
 	if cfg.Mode == "stdio" {
-		deps.StdioProxy = proxy.NewStdioProxy(cfg.Stdio.Command, cfg.Stdio.Args, cfg.Stdio.AutoRestart, pipe)
+		stdioP := proxy.NewStdioProxy(cfg.Stdio.Command, cfg.Stdio.Args, cfg.Stdio.AutoRestart, pipe)
+		if deps.SettingsCache != nil {
+			stdioP.SetSettingsCache(deps.SettingsCache)
+		}
+		deps.StdioProxy = stdioP
 	} else {
 		listenHost := cfg.GetListenHost()
 		secCfg := cfg.Security
@@ -594,6 +614,9 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		sseP := proxy.NewSSEProxyWithCoordinator(listenPort, cfg.SSE.TargetURL, coordinator, secCfg)
 		sseP.SetHost(listenHost)
 		sseP.SetKeyValidator(keyStore)
+		if deps.SettingsCache != nil {
+			sseP.SetSettingsCache(deps.SettingsCache)
+		}
 		if combinedSecLogger != nil {
 			sseP.SetSecurityAuditLogger(combinedSecLogger)
 		}

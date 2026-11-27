@@ -96,6 +96,7 @@ type SafeTransportOptions struct {
 	AllowedDomains     []string
 	CustomBlockedCIDRs []*net.IPNet
 	DialTimeout        time.Duration
+	IdleConnTimeout    time.Duration
 	Resolver           *net.Resolver
 }
 
@@ -121,6 +122,7 @@ func DefaultSafeOptions() SafeTransportOptions {
 		Enabled:         true,
 		BlockPrivateIPs: blockPrivate,
 		DialTimeout:     10 * time.Second,
+		IdleConnTimeout: 90 * time.Second,
 	}
 }
 
@@ -261,6 +263,11 @@ func NewSafeTransport(opts SafeTransportOptions) *http.Transport {
 		dialTimeout = 10 * time.Second
 	}
 
+	idleConnTimeout := opts.IdleConnTimeout
+	if idleConnTimeout <= 0 {
+		idleConnTimeout = 90 * time.Second
+	}
+
 	resolver := opts.Resolver
 	if resolver == nil {
 		resolver = net.DefaultResolver
@@ -331,7 +338,7 @@ func NewSafeTransport(opts SafeTransportOptions) *http.Transport {
 		DisableKeepAlives:     false,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
+		IdleConnTimeout:       idleConnTimeout,
 		ExpectContinueTimeout: 1 * time.Second,
 		ResponseHeaderTimeout: dialTimeout,
 	}

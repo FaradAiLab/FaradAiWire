@@ -317,6 +317,7 @@ func (s *Server) startMaintenanceCoordinator(ctx context.Context) {
 	s.mu.RLock()
 	cfg := s.maintenanceCfg
 	sseProxy := s.sseProxy
+	sCache := s.settingsCache
 	s.mu.RUnlock()
 
 	cleanupInterval := cfg.cleanupInterval
@@ -328,9 +329,6 @@ func (s *Server) startMaintenanceCoordinator(ctx context.Context) {
 		sessionIdleTimeout = 30 * time.Minute
 	}
 	correlationMaxAge := cfg.correlationMaxAge
-	if correlationMaxAge <= 0 {
-		correlationMaxAge = 5 * time.Minute
-	}
 	targetMaxAge := cfg.targetMaxAge
 	if targetMaxAge <= 0 {
 		targetMaxAge = 2 * time.Hour
@@ -354,7 +352,16 @@ func (s *Server) startMaintenanceCoordinator(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					sseProxy.CleanupStaleSessions(correlationMaxAge, targetMaxAge)
+					effectiveCorrMaxAge := correlationMaxAge
+					if effectiveCorrMaxAge <= 0 {
+						effectiveCorrMaxAge = 5 * time.Minute
+						if sCache != nil {
+							if snap := sCache.Get(); snap != nil && snap.Maintenance.CorrelationTTLMin > 0 {
+								effectiveCorrMaxAge = time.Duration(snap.Maintenance.CorrelationTTLMin) * time.Minute
+							}
+						}
+					}
+					sseProxy.CleanupStaleSessions(effectiveCorrMaxAge, targetMaxAge)
 				}
 			}
 		}()

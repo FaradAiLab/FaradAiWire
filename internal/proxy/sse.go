@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
@@ -17,6 +18,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/middleware"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
@@ -40,12 +42,18 @@ type SSEProxy struct {
 	keyValidator        auth.KeyValidator
 	securityAuditLogger filter.SecurityAuditLogger
 	drainingMiddleware  func(http.Handler) http.Handler
+	settingsCache       atomic.Pointer[settings.Cache]
 	shutdownOnce        sync.Once
 	closed              bool
 	baseCtx             context.Context
 	baseCancel          context.CancelFunc
 
 	coordinator *session.InboundCoordinator
+}
+
+// SetSettingsCache binds the dynamic atomic operational settings cache to SSEProxy.
+func (s *SSEProxy) SetSettingsCache(c *settings.Cache) {
+	s.settingsCache.Store(c)
 }
 
 // SetHTTPClient updates the underlying HTTP transport client.

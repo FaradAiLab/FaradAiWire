@@ -47,6 +47,12 @@ type GuardSettings struct {
 	AlertOnAudit bool `json:"alert_on_audit"`
 	// AlertCooldownSec defines the per-category cooldown window in seconds for non-HITL desktop alerts.
 	AlertCooldownSec int `json:"alert_cooldown_sec"`
+	// ThresholdScoreOverridden tracks whether guard.threshold_score was explicitly overridden via DB/settings.
+	ThresholdScoreOverridden bool `json:"-"`
+	// TimeoutMSOverridden tracks whether guard.timeout_ms was explicitly overridden via DB/settings.
+	TimeoutMSOverridden bool `json:"-"`
+	// ColdTimeoutMSOverridden tracks whether guard.cold_timeout_ms was explicitly overridden via DB/settings.
+	ColdTimeoutMSOverridden bool `json:"-"`
 }
 
 // MaintenanceSettings defines session retention and background cleanup intervals.
@@ -105,7 +111,7 @@ func DefaultOperationalSettings() *OperationalSettings {
 		},
 		Maintenance: MaintenanceSettings{
 			SessionIdleTimeoutMin: 30,
-			CorrelationTTLMin:     60,
+			CorrelationTTLMin:     5,
 			AuditRetentionDays:    30,
 			RetainLocalPayloads:   true,
 			AuditJSONLMaxSizeMB:   10,
@@ -142,8 +148,11 @@ func (s *OperationalSettings) Clone() *OperationalSettings {
 			AlertOnGuardOffline:  s.Guard.AlertOnGuardOffline,
 			AlertOnHITLPending:   s.Guard.AlertOnHITLPending,
 			AlertOnBlock:         s.Guard.AlertOnBlock,
-			AlertOnAudit:         s.Guard.AlertOnAudit,
-			AlertCooldownSec:     s.Guard.AlertCooldownSec,
+			AlertOnAudit:            s.Guard.AlertOnAudit,
+			AlertCooldownSec:        s.Guard.AlertCooldownSec,
+			ThresholdScoreOverridden: s.Guard.ThresholdScoreOverridden,
+			TimeoutMSOverridden:     s.Guard.TimeoutMSOverridden,
+			ColdTimeoutMSOverridden: s.Guard.ColdTimeoutMSOverridden,
 		},
 		Maintenance: MaintenanceSettings{
 			SessionIdleTimeoutMin: s.Maintenance.SessionIdleTimeoutMin,

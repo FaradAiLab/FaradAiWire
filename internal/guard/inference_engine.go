@@ -137,7 +137,9 @@ func extractNoulProb(ans systemOneAnswer) float64 {
 
 // SystemOneEngine handles decision-model inference via /v1/systemone (e.g. ModernBERT, Laya, Mica).
 type SystemOneEngine struct {
-	ContextWindow int
+	ContextWindow       int
+	ThresholdScore      float64
+	ThresholdOverridden bool
 }
 
 func (e *SystemOneEngine) EndpointPath() string {
@@ -180,8 +182,15 @@ func (e *SystemOneEngine) ParseResponse(body []byte, latencyMS float64, modelNam
 		threatProb = misalignProb
 	}
 
-	isExploit := exploitProb >= DefaultExploitThreshold
-	isMisaligned := misalignProb >= DefaultMisalignmentThreshold
+	exploitThresh := DefaultExploitThreshold
+	misalignThresh := DefaultMisalignmentThreshold
+	if e.ThresholdOverridden && e.ThresholdScore > 0 {
+		exploitThresh = e.ThresholdScore
+		misalignThresh = e.ThresholdScore
+	}
+
+	isExploit := exploitProb >= exploitThresh
+	isMisaligned := misalignProb >= misalignThresh
 
 	var verdict string
 	var cwe string

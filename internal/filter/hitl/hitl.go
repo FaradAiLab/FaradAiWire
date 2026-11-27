@@ -18,6 +18,7 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/console"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard/hitltypes"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 	"github.com/FaradAiLab/FaradAiWire/pkg/filter"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
@@ -44,6 +45,7 @@ type HITLFilter struct {
 	cliIn            io.Reader
 	cliOut           io.Writer
 	hitlDispatcher   HITLApprover
+	settingsCache    *settings.Cache
 	onResolved       func(hitltypes.HITLResolutionInfo)
 	mu               sync.RWMutex
 }
@@ -63,11 +65,11 @@ func NewHITLFilterWithSSRF(enabled bool, destructiveTools []string, approvalMode
 	}
 
 	if timeoutSeconds <= 0 {
-		timeoutSeconds = 300 // 5 minutes default
+		timeoutSeconds = 60 // 60 seconds default aligned with guard.hitl_timeout_sec
 	}
 
 	timeout := time.Duration(timeoutSeconds) * time.Second
-	client := transport.NewSafeHTTPClient(ssrfOpts, timeout)
+	client := transport.NewSafeStreamingHTTPClient(ssrfOpts, 10*time.Second)
 
 	return &HITLFilter{
 		enabled:          enabled,
@@ -93,6 +95,29 @@ func (h *HITLFilter) SetHITLDispatcher(dispatcher HITLApprover) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.hitlDispatcher = dispatcher
+}
+
+// SetSettingsCache binds the dynamic atomic operational settings cache.
+func (h *HITLFilter) SetSettingsCache(c *settings.Cache) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.settingsCache = c
+}
+
+func (h *HITLFilter) getTimeout() time.Duration {
+	h.mu.RLock()
+	c := h.settingsCache
+	fallback := h.timeout
+	h.mu.RUnlock()
+	if c != nil {
+		if s := c.Get(); s != nil && s.Guard.HITLTimeoutSec > 0 {
+			return time.Duration(s.Guard.HITLTimeoutSec) * time.Second
+		}
+	}
+	if fallback > 0 {
+		return fallback
+	}
+	return 60 * time.Second
 }
 
 // SetOnResolved registers a callback fired when direct CLI or webhook channels resolve HITL.
@@ -225,7 +250,7 @@ func (h *HITLFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp.
 				argsMap["raw"] = string(callParams.Arguments)
 			}
 		}
-		waitCtx, cancel := context.WithTimeout(ctx, h.timeout)
+		waitCtx, cancel := context.WithTimeout(ctx, h.getTimeout())
 		defer cancel()
 
 		hitlReq := &hitltypes.HITLRequest{
@@ -342,13 +367,14 @@ func (h *HITLFilter) awaitCLIApproval(
 	fmt.Fprintf(out, "Arguments: %s\n", safeArgs)
 	fmt.Fprintf(out, "Approve execution? (y/N): ")
 
-	waitCtx, cancel := context.WithTimeout(ctx, h.timeout)
+	timeout := h.getTimeout()
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	line, readErr := readLine(waitCtx)
 	if readErr != nil {
 		if errors.Is(readErr, context.DeadlineExceeded) && ctx.Err() == nil {
-			fmt.Fprintf(out, "⏱️ Approval timed out (%v expired).\n\n", h.timeout)
+			fmt.Fprintf(out, "⏱️ Approval timed out (%v expired).\n\n", timeout)
 			return false, hitltypes.ErrHITLTimeout
 		}
 		return false, readErr
@@ -403,7 +429,7 @@ func (h *HITLFilter) promptWebhook(ctx context.Context, toolName string, args js
 		return false, "webhook", err
 	}
 
-	waitCtx, cancel := context.WithTimeout(ctx, h.timeout)
+	waitCtx, cancel := context.WithTimeout(ctx, h.getTimeout())
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(waitCtx, "POST", resolvedURL, bytes.NewBuffer(bodyBytes))

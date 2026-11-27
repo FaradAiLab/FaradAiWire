@@ -44,7 +44,7 @@ func ResolveEffectiveSettings(base *config.Config, overrides map[string]string) 
 
 	// Seed with base YAML config parameters if provided
 	if base != nil {
-		if base.Filters.HITL.TimeoutSeconds > 0 {
+		if base.Filters.HITL.TimeoutSeconds >= 10 && base.Filters.HITL.TimeoutSeconds <= 600 {
 			effective.Guard.HITLTimeoutSec = base.Filters.HITL.TimeoutSeconds
 		}
 		if base.Telemetry.RetentionDays >= 7 && base.Telemetry.RetentionDays <= 365 {
@@ -69,6 +69,10 @@ func ResolveEffectiveSettings(base *config.Config, overrides map[string]string) 
 			continue
 		}
 		_ = ApplySetting(effective, key, val)
+	}
+
+	if effective.Guard.ColdTimeoutMS < effective.Guard.TimeoutMS {
+		effective.Guard.ColdTimeoutMS = effective.Guard.TimeoutMS
 	}
 
 	return effective

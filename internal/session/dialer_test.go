@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 )
 
 func TestAgentSessionBridge_BroadcastShutdown(t *testing.T) {
@@ -528,5 +529,28 @@ func TestCompositeDialer_StdioDisabledReturnsNonNilDegradedSession(t *testing.T)
 	}
 	if sess.cmd != nil {
 		t.Fatal("expected no subprocess spawned when stdio is disabled")
+	}
+}
+
+func TestExtractJSONFromSSEOrDirect_HandlesPayloadsAbove64KB(t *testing.T) {
+	t.Parallel()
+
+	sCache := settings.NewCache(nil)
+	eff := sCache.Get().Clone()
+	eff.Limits.MaxScannerBufferMB = 2
+	sCache.Update(eff)
+
+	up := &UpstreamSession{}
+	up.SetSettingsCache(sCache)
+	if got := up.getMaxScannerBufferBytes(); got != 2*1024*1024 {
+		t.Fatalf("expected 2MB scanner buffer, got %d", got)
+	}
+
+	// Single SSE data line > 128 KB (would fail under Go's default 64KB bufio.Scanner cap)
+	largeText := strings.Repeat("x", 150*1024)
+	ssePayload := []byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"text\":\"" + largeText + "\"}}\n\n")
+	extracted := extractJSONFromSSEOrDirectWithMaxBytes(ssePayload, up.getMaxScannerBufferBytes())
+	if !strings.Contains(string(extracted), largeText) {
+		t.Fatalf("expected SSE extraction >64KB to succeed, got len=%d", len(extracted))
 	}
 }

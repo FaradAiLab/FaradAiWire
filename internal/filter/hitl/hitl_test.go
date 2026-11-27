@@ -13,6 +13,7 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard/hitltypes"
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 	"github.com/FaradAiLab/FaradAiWire/internal/transport"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
@@ -407,3 +408,49 @@ func TestHITLFilter_SafetyEdgeCases(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return fn(r) }
+
+func TestHITLFilter_SettingsCacheTimeout_CLIAndWebhook(t *testing.T) {
+	sCache := settings.NewCache(nil)
+	eff := sCache.Get().Clone()
+	eff.Guard.HITLTimeoutSec = 120
+	sCache.Update(eff)
+
+	// 1. Dispatcher / CLI timeout resolves from settingsCache
+	fCLI := NewHITLFilter(true, []string{"delete_database"}, "cli", "", 5)
+	fCLI.SetSettingsCache(sCache)
+	if got := fCLI.getTimeout(); got != 120*time.Second {
+		t.Fatalf("expected HITLFilter CLI getTimeout()=120s from settingsCache, got %v", got)
+	}
+
+	// 2. Webhook mode propagates live settingsCache timeout via per-request context deadline
+	var gotDeadline time.Time
+	fHook := NewHITLFilterWithSSRF(true, []string{"delete_database"}, "webhook", "https://example.com/hook", 5, transport.SafeTransportOptions{
+		Enabled:         false,
+		BlockPrivateIPs: false,
+	})
+	fHook.SetSettingsCache(sCache)
+	fHook.SetHTTPClient(&http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			dl, ok := r.Context().Deadline()
+			if !ok {
+				t.Fatal("expected webhook request context to have deadline")
+			}
+			gotDeadline = dl
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"approved":true,"approved_by":"ops"}`)),
+			}, nil
+		}),
+	})
+
+	req := &mcp.Request{
+		Method: "tools/call",
+		Params: json.RawMessage(`{"name":"delete_database","arguments":{"target":"prod"}}`),
+	}
+	if _, mErr := fHook.FilterRequest(context.Background(), req); mErr != nil {
+		t.Fatalf("expected webhook approval, got %+v", mErr)
+	}
+	if rem := time.Until(gotDeadline); rem < 110*time.Second {
+		t.Fatalf("expected webhook context deadline ~120s from settingsCache, got %v", rem)
+	}
+}

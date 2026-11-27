@@ -169,42 +169,37 @@ func (f *GuardFilter) FilterResponse(ctx context.Context, resp *mcp.Response) (*
 	}
 
 	if result != nil {
-		isThreat := false
-		if result.Verdict == "BLOCKED" || result.Verdict == "SUSPICIOUS" || result.Verdict == "THREAT" {
-			isThreat = true
-		} else if result.Verdict != "BENIGN" && result.Verdict != "SAFE" && result.MaliciousProbability >= f.getThresholdScore() {
-			isThreat = true
-		}
-
-		if isThreat {
+		threshold, thresholdOverridden := f.getThresholdSettings()
+		if isThreatResult(result, threshold, thresholdOverridden) {
 			engine := result.DecisionEngine
 			if engine == "" {
 				engine = "Semantic Security Guard"
 			}
+			threatDomain, cwe := normalizeThreatDetails(result)
 
 			slog.WarnContext(ctx, "Semantic Security Guard detected indirect prompt injection in tool response",
 				slog.String("tool", toolName),
 				slog.String("engine", engine),
-				slog.String("threat_domain", result.ThreatDomain),
-				slog.String("cwe", result.CWE),
+				slog.String("threat_domain", threatDomain),
+				slog.String("cwe", cwe),
 				slog.Float64("score", result.MaliciousProbability),
 				slog.String("guard_mode", string(policy.guardMode)),
 			)
 
 			if policy.guardMode == agent.GuardModeAudit {
-				recordGuardAudit(ctx, fmt.Sprintf("guard:response:l2:%s:%s", engine, result.CWE))
+				recordGuardAudit(ctx, fmt.Sprintf("guard:response:l2:%s:%s", engine, cwe))
 				return resp, nil
 			}
 
 			return nil, mcp.NewError(
 				mcp.ErrIndirectInjection,
-				fmt.Sprintf("Security Alert: Indirect prompt injection detected in tool '%s' response by Semantic Security Guard (%s - %s)", toolName, result.ThreatDomain, result.CWE),
+				fmt.Sprintf("Security Alert: Indirect prompt injection detected in tool '%s' response by Semantic Security Guard (%s - %s)", toolName, threatDomain, cwe),
 				map[string]interface{}{
 					"tool":            toolName,
 					"engine":          engine,
 					"score":           result.MaliciousProbability,
-					"threat_domain":   result.ThreatDomain,
-					"cwe":             result.CWE,
+					"threat_domain":   threatDomain,
+					"cwe":             cwe,
 					"decision_engine": engine,
 				},
 			)
@@ -401,18 +396,13 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 	}
 
 	if result != nil {
-		isThreat := false
-		if result.Verdict == "BLOCKED" || result.Verdict == "SUSPICIOUS" || result.Verdict == "THREAT" {
-			isThreat = true
-		} else if result.Verdict != "BENIGN" && result.Verdict != "SAFE" && result.MaliciousProbability >= f.getThresholdScore() {
-			isThreat = true
-		}
-
-		if isThreat {
+		threshold, thresholdOverridden := f.getThresholdSettings()
+		if isThreatResult(result, threshold, thresholdOverridden) {
 			engine := result.DecisionEngine
 			if engine == "" {
 				engine = "Semantic Security Guard"
 			}
+			threatDomain, cwe := normalizeThreatDetails(result)
 
 			// Human Supremacy Invariant (ADR-0040):
 			// If a human operator has explicitly approved this execution (e.g. via DLP HITL gate or client),
@@ -421,11 +411,11 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 				slog.InfoContext(ctx, "Human Supremacy active: bypassing Semantic Security Guard threat verdict for human-approved tool execution",
 					slog.String("tool", callParams.Name),
 					slog.String("engine", engine),
-					slog.String("threat_domain", result.ThreatDomain),
-					slog.String("cwe", result.CWE),
+					slog.String("threat_domain", threatDomain),
+					slog.String("cwe", cwe),
 				)
 				if meta := types.GetAuditMetadata(ctx); meta != nil {
-					meta.AuditedRules = append(meta.AuditedRules, fmt.Sprintf("human_supremacy_override:%s:%s", engine, result.CWE))
+					meta.AuditedRules = append(meta.AuditedRules, fmt.Sprintf("human_supremacy_override:%s:%s", engine, cwe))
 				}
 				return req, nil
 			}
@@ -434,10 +424,10 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 				slog.WarnContext(ctx, "Semantic Security Guard audited threat verdict on tool request",
 					slog.String("tool", callParams.Name),
 					slog.String("engine", engine),
-					slog.String("threat_domain", result.ThreatDomain),
-					slog.String("cwe", result.CWE),
+					slog.String("threat_domain", threatDomain),
+					slog.String("cwe", cwe),
 				)
-				recordGuardAudit(ctx, fmt.Sprintf("guard:request:l2:%s:%s", engine, result.CWE))
+				recordGuardAudit(ctx, fmt.Sprintf("guard:request:l2:%s:%s", engine, cwe))
 				return req, nil
 			}
 
@@ -445,7 +435,7 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 			if f.isCriticalBlock(callParams.Name, cfg.CriticalBlocks) {
 				return nil, mcp.NewError(
 					mcp.ErrDLPViolation,
-					fmt.Sprintf("Guard Policy Hard-Block: Critical destructive tool '%s' blocked on threat verdict by %s (%s - %s)", callParams.Name, engine, result.ThreatDomain, result.CWE),
+					fmt.Sprintf("Guard Policy Hard-Block: Critical destructive tool '%s' blocked on threat verdict by %s (%s - %s)", callParams.Name, engine, threatDomain, cwe),
 					nil,
 				)
 			}
@@ -454,7 +444,7 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 			if f.isDefaultActionBlock() {
 				return nil, mcp.NewError(
 					mcp.ErrDLPViolation,
-					fmt.Sprintf("Guard Policy Auto-Block: Tool '%s' blocked on threat verdict by %s (%s - %s)", callParams.Name, engine, result.ThreatDomain, result.CWE),
+					fmt.Sprintf("Guard Policy Auto-Block: Tool '%s' blocked on threat verdict by %s (%s - %s)", callParams.Name, engine, threatDomain, cwe),
 					nil,
 				)
 			}
@@ -463,7 +453,7 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 			if mode == agent.ModeGuardedBlock {
 				return nil, mcp.NewError(
 					mcp.ErrDLPViolation,
-					fmt.Sprintf("Guard Policy Hard-Block: Tool '%s' blocked on threat verdict by %s (%s - %s)", callParams.Name, engine, result.ThreatDomain, result.CWE),
+					fmt.Sprintf("Guard Policy Hard-Block: Tool '%s' blocked on threat verdict by %s (%s - %s)", callParams.Name, engine, threatDomain, cwe),
 					nil,
 				)
 			}
@@ -477,8 +467,8 @@ func (f *GuardFilter) FilterRequest(ctx context.Context, req *mcp.Request) (*mcp
 					ToolName:       callParams.Name,
 					Arguments:      callParams.Arguments,
 					RiskScore:      result.MaliciousProbability,
-					ThreatDomain:   result.ThreatDomain,
-					CWE:            result.CWE,
+					ThreatDomain:   threatDomain,
+					CWE:            cwe,
 					DecisionEngine: engine,
 				}
 				approved, err := hitl.RequestApproval(hitlCtx, hitlReq)
@@ -529,4 +519,32 @@ func (f *GuardFilter) handleInspectError(ctx context.Context, toolName, phase st
 		slog.String("error", err.Error()),
 	)
 	f.notifyDisconnection(ctx, toolName)
+}
+
+func isThreatResult(result *InspectionResult, threshold float64, thresholdOverridden bool) bool {
+	if result == nil {
+		return false
+	}
+	if result.Verdict == "BLOCKED" || result.Verdict == "SUSPICIOUS" || result.Verdict == "THREAT" {
+		return true
+	}
+	if thresholdOverridden && result.MaliciousProbability >= threshold {
+		return true
+	}
+	return result.Verdict != "BENIGN" && result.Verdict != "SAFE" && result.MaliciousProbability >= threshold
+}
+
+func normalizeThreatDetails(result *InspectionResult) (string, string) {
+	if result == nil {
+		return "Threshold policy override", "CWE-77"
+	}
+	threatDomain := result.ThreatDomain
+	if threatDomain == "" {
+		threatDomain = "Threshold policy override"
+	}
+	cwe := result.CWE
+	if cwe == "" {
+		cwe = "CWE-77"
+	}
+	return threatDomain, cwe
 }

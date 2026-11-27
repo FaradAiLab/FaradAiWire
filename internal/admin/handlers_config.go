@@ -252,6 +252,16 @@ func (a *AdminServer) updateSettings(w http.ResponseWriter, r *http.Request) {
 		currentSettings = settings.DefaultOperationalSettings()
 	}
 
+	// Cross-field invariant: guard.cold_timeout_ms must be >= guard.timeout_ms
+	candidate := currentSettings.Clone()
+	for k, v := range toUpdate {
+		_ = settings.ApplySetting(candidate, k, v)
+	}
+	if candidate.Guard.ColdTimeoutMS < candidate.Guard.TimeoutMS {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Validation failed: guard.cold_timeout_ms must be greater than or equal to guard.timeout_ms")
+		return
+	}
+
 	keys := make([]string, 0, len(toUpdate))
 	for k := range toUpdate {
 		keys = append(keys, k)

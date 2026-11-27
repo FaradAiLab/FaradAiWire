@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 )
 
 // HTTPProviderConfig specifies configuration parameters for the HTTP inference provider.
@@ -51,6 +53,7 @@ func DefaultHTTPProviderConfig() HTTPProviderConfig {
 // AI Guard inference provider (Ollama or llama-server container) over HTTP REST.
 type HTTPProvider struct {
 	cfg           HTTPProviderConfig
+	settingsCache *settings.Cache
 	client        *http.Client
 	sem           chan struct{}
 	mu            sync.RWMutex
@@ -67,6 +70,43 @@ type HTTPProvider struct {
 	latencyMu      sync.Mutex
 	latencySamples uint64
 	avgLatencyBits atomic.Uint64
+}
+
+// SetSettingsCache binds the dynamic atomic operational settings cache to HTTPProvider.
+func (p *HTTPProvider) SetSettingsCache(c *settings.Cache) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.settingsCache = c
+}
+
+func (p *HTTPProvider) resolveSLASettingsLocked() (hot, cold time.Duration, hotOverridden, coldOverridden bool) {
+	hot = p.cfg.TimeoutSLA
+	cold = p.cfg.ColdTimeoutSLA
+	if p.settingsCache != nil {
+		if s := p.settingsCache.Get(); s != nil {
+			if s.Guard.TimeoutMS > 0 {
+				hot = time.Duration(s.Guard.TimeoutMS) * time.Millisecond
+				hotOverridden = s.Guard.TimeoutMSOverridden
+			}
+			if s.Guard.ColdTimeoutMS > 0 {
+				cold = time.Duration(s.Guard.ColdTimeoutMS) * time.Millisecond
+				coldOverridden = s.Guard.ColdTimeoutMSOverridden
+			}
+		}
+	}
+	return hot, cold, hotOverridden, coldOverridden
+}
+
+func (p *HTTPProvider) resolveThresholdSettings() (float64, bool) {
+	p.mu.RLock()
+	c := p.settingsCache
+	p.mu.RUnlock()
+	if c != nil {
+		if s := c.Get(); s != nil && s.Guard.ThresholdScore > 0 {
+			return s.Guard.ThresholdScore, s.Guard.ThresholdScoreOverridden
+		}
+	}
+	return 0.50, false
 }
 
 // AverageLatencyMS returns the EWMA measured inference latency in milliseconds (0 before samples arrive).
@@ -351,6 +391,10 @@ func parseParameterSizeInBillions(sizeStr string) float64 {
 // Heavyweight 3B-4B models (e.g. Liquid 3B, Perplexity 4B, Mica 4B) receive 2.5s hot SLA (5.0s cold)
 // to prevent premature L1 degradation during heavy reasoning or disk paging.
 func calculateAdaptiveSLA(model *Model, defaultHot, defaultCold time.Duration) (time.Duration, time.Duration) {
+	return calculateAdaptiveSLAWithOverride(model, defaultHot, defaultCold, false, false)
+}
+
+func calculateAdaptiveSLAWithOverride(model *Model, defaultHot, defaultCold time.Duration, hotOverridden, coldOverridden bool) (time.Duration, time.Duration) {
 	hot := defaultHot
 	if hot <= 0 {
 		hot = 1 * time.Second
@@ -374,10 +418,10 @@ func calculateAdaptiveSLA(model *Model, defaultHot, defaultCold time.Duration) (
 	}
 
 	if isHeavyweight {
-		if hot < 2500*time.Millisecond && (defaultHot == DefaultHTTPProviderConfig().TimeoutSLA || defaultHot == 0) {
+		if !hotOverridden && hot < 2500*time.Millisecond && (defaultHot == DefaultHTTPProviderConfig().TimeoutSLA || defaultHot == 0) {
 			hot = 2500 * time.Millisecond
 		}
-		if cold < 5000*time.Millisecond && (defaultCold == DefaultHTTPProviderConfig().ColdTimeoutSLA || defaultCold == 0) {
+		if !coldOverridden && cold < 5000*time.Millisecond && (defaultCold == DefaultHTTPProviderConfig().ColdTimeoutSLA || defaultCold == 0) {
 			cold = 5000 * time.Millisecond
 		}
 	}
@@ -416,7 +460,12 @@ func (p *HTTPProvider) executeSystemOneInference(
 	start time.Time,
 	contextWindow int,
 ) (*InspectionResult, error) {
-	engine := &SystemOneEngine{ContextWindow: contextWindow}
+	thresh, threshOverridden := p.resolveThresholdSettings()
+	engine := &SystemOneEngine{
+		ContextWindow:       contextWindow,
+		ThresholdScore:      thresh,
+		ThresholdOverridden: threshOverridden,
+	}
 	payload, err := engine.BuildPayload(modelName, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal systemone request: %w", err)
@@ -541,7 +590,8 @@ func (p *HTTPProvider) CallInspect(ctx context.Context, req *InspectionRequest) 
 			contextWindow = p.model.ContextWindow
 		}
 	}
-	hotSLA, coldSLA := calculateAdaptiveSLA(p.model, p.cfg.TimeoutSLA, p.cfg.ColdTimeoutSLA)
+	hotBase, coldBase, hotOverridden, coldOverridden := p.resolveSLASettingsLocked()
+	hotSLA, coldSLA := calculateAdaptiveSLAWithOverride(p.model, hotBase, coldBase, hotOverridden, coldOverridden)
 	isCold := p.lastSuccessAt.IsZero() || time.Since(p.lastSuccessAt) > p.cfg.IdleWarmWindow
 	timeoutSLA := hotSLA
 	if isCold && coldSLA > 0 {

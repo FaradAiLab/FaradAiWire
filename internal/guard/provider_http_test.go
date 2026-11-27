@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/FaradAiLab/FaradAiWire/internal/settings"
 )
 
 type roundTripFunc func(req *http.Request) (*http.Response, error)
@@ -1463,5 +1465,58 @@ func TestHTTPProvider_AverageLatencyMS_MeasuresRealInference(t *testing.T) {
 	}
 	if avg == 24.2 || avg == 15.0 || avg == 0.2 {
 		t.Fatalf("expected real measured latency rather than hardcoded constant, got %.3f", avg)
+	}
+}
+
+func TestHTTPProvider_SettingsCacheSLAAndSystemOneThreshold(t *testing.T) {
+	// 1. Unoverridden defaults preserve 3B-4B adaptive boost; explicit override applies verbatim
+	heavy := &Model{ID: "mica-v0.5", ParameterSize: "4.0B"}
+	hotDefault, coldDefault := calculateAdaptiveSLAWithOverride(heavy, 1*time.Second, 3*time.Second, false, false)
+	if hotDefault != 2500*time.Millisecond || coldDefault != 5000*time.Millisecond {
+		t.Fatalf("expected unoverridden heavyweight adaptive SLA 2.5s/5s, got %v/%v", hotDefault, coldDefault)
+	}
+
+	hotOverride, coldOverride := calculateAdaptiveSLAWithOverride(heavy, 1*time.Second, 2*time.Second, true, true)
+	if hotOverride != 1*time.Second || coldOverride != 2*time.Second {
+		t.Fatalf("expected explicit override 1s/2s to apply verbatim, got %v/%v", hotOverride, coldOverride)
+	}
+
+	// 2. Live settingsCache timeout enforcement + SystemOne threshold override (< 0.50)
+	sCache := settings.NewCache(nil)
+	eff := sCache.Get().Clone()
+	_ = settings.ApplySetting(eff, "guard.threshold_score", 0.30)
+	_ = settings.ApplySetting(eff, "guard.timeout_ms", 120)
+	_ = settings.ApplySetting(eff, "guard.cold_timeout_ms", 150)
+	sCache.Update(eff)
+
+	mockClient := newMockClient(func(r *http.Request) (*http.Response, error) {
+		resp := map[string]interface{}{
+			"model": "laya",
+			"answers": map[string]interface{}{
+				"exploit":      map[string]interface{}{"type": "noul", "noul": 0.40},
+				"misalignment": map[string]interface{}{"type": "noul", "noul": 0.10},
+			},
+		}
+		b, _ := json.Marshal(resp)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(b)),
+		}, nil
+	})
+
+	cfg := DefaultHTTPProviderConfig()
+	cfg.BaseURL = "http://127.0.0.1:11434"
+	p := NewHTTPProvider(cfg, mockClient)
+	p.SetSettingsCache(sCache)
+	_ = p.Start(context.Background(), &Model{ID: "laya", RuntimeType: "ollama", Paradigm: ModelParadigmDecisionModel})
+	defer p.Stop(context.Background())
+
+	res, err := p.CallInspect(context.Background(), &InspectionRequest{ToolName: "exec_cmd"})
+	if err != nil {
+		t.Fatalf("CallInspect failed: %v", err)
+	}
+	if res.Verdict != "BLOCKED" {
+		t.Fatalf("expected SystemOne exploit=0.40 to block when guard.threshold_score overridden to 0.30, got %s", res.Verdict)
 	}
 }

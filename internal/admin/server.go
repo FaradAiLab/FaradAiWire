@@ -287,6 +287,7 @@ func (a *AdminServer) Config() *config.Config {
 func safeTransportOptsEqual(a, b transport.SafeTransportOptions) bool {
 	return a.Enabled == b.Enabled &&
 		a.BlockPrivateIPs == b.BlockPrivateIPs &&
+		a.IdleConnTimeout == b.IdleConnTimeout &&
 		slices.Equal(a.AllowedDomains, b.AllowedDomains)
 }
 
@@ -319,6 +320,11 @@ func (a *AdminServer) SafeHTTPClient() *http.Client {
 	wantOpts := transport.DefaultSafeOptions()
 	if cfg != nil {
 		wantOpts = transport.OptionsFromConfig(cfg.Security.SSRFProtection)
+	}
+	if sCache := a.settingsCache; sCache != nil {
+		if active := sCache.Get(); active != nil && active.Timeouts.IdleTimeoutSec > 0 {
+			wantOpts.IdleConnTimeout = time.Duration(active.Timeouts.IdleTimeoutSec) * time.Second
+		}
 	}
 	if a.safeHTTPClient != nil && a.safeHTTPClient.Timeout == timeout && safeTransportOptsEqual(a.safeHTTPClientOpts, wantOpts) {
 		c := a.safeHTTPClient
@@ -778,10 +784,16 @@ func (a *AdminServer) Start(ctx context.Context) error {
 		a.serverMu.Unlock()
 		return nil
 	}
+	readHeaderTimeout := 5 * time.Second
+	if sCache := a.settingsCache; sCache != nil {
+		if active := sCache.Get(); active != nil && active.Timeouts.ReadHeaderTimeoutSec > 0 {
+			readHeaderTimeout = time.Duration(active.Timeouts.ReadHeaderTimeoutSec) * time.Second
+		}
+	}
 	a.server = &http.Server{
 		Addr:              addr,
 		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       120 * time.Second,
 	}
 	server := a.server

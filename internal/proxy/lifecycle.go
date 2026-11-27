@@ -47,11 +47,17 @@ func (s *SSEProxy) Start(ctx context.Context) error {
 	if host == "" {
 		host = "127.0.0.1"
 	}
+	readHeaderTimeout := 5 * time.Second
+	if c := s.settingsCache.Load(); c != nil {
+		if active := c.Get(); active != nil && active.Timeouts.ReadHeaderTimeoutSec > 0 {
+			readHeaderTimeout = time.Duration(active.Timeouts.ReadHeaderTimeoutSec) * time.Second
+		}
+	}
 	addr := net.JoinHostPort(host, strconv.Itoa(s.port))
 	s.server = &http.Server{
 		Addr:              addr,
 		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       120 * time.Second,
 		// WriteTimeout remains 0 (unbounded) to sustain persistent, long-lived MCP event streams without premature timeouts (DEC-08).
 	}

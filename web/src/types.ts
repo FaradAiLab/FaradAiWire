@@ -37,6 +37,7 @@ export interface SettingMeta {
   min?: number
   max?: number
   step?: number
+  requires_restart?: boolean
 }
 
 export interface SettingItem extends SettingMeta {
