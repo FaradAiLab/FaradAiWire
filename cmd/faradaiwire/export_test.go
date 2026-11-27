@@ -19,7 +19,8 @@ import (
 func TestExecuteExport_OfflineParityAndNoFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("FARADAI_WIRE_DATA_DIR", filepath.Join(home, ".faradaiwire"))
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("FARADAI_WIRE_HOME", filepath.Join(home, ".faradaiwire"))
 
 	dataDir := filepath.Join(home, ".faradaiwire")
 	agentsDir := filepath.Join(dataDir, "agents")
@@ -98,7 +99,8 @@ func TestExecuteExport_OfflineParityAndNoFallback(t *testing.T) {
 func TestExecuteExport_RejectsPlaintextRemoteAndProtectsClientFiles(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("FARADAI_WIRE_DATA_DIR", filepath.Join(home, ".faradaiwire"))
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("FARADAI_WIRE_HOME", filepath.Join(home, ".faradaiwire"))
 
 	dataDir := filepath.Join(home, ".faradaiwire")
 	repo := agent.NewFSRepository(filepath.Join(dataDir, "agents"))
@@ -150,7 +152,7 @@ func TestExecuteExport_RejectsPlaintextRemoteAndProtectsClientFiles(t *testing.T
 	if err != nil {
 		t.Fatalf("stat safeOut: %v", err)
 	}
-	if fi.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0600 {
 		t.Fatalf("expected 0600 perm, got %o", fi.Mode().Perm())
 	}
 	if code := runCLI([]string{"export", "--profile", "p1", "--client", "cursor", "--out", safeOut}, nil, &out, &errBuf); code == 0 {
@@ -161,7 +163,8 @@ func TestExecuteExport_RejectsPlaintextRemoteAndProtectsClientFiles(t *testing.T
 func TestExecuteExport_RemoteAdminCompanionAndRedirects(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("FARADAI_WIRE_DATA_DIR", filepath.Join(home, ".faradaiwire"))
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("FARADAI_WIRE_HOME", filepath.Join(home, ".faradaiwire"))
 	t.Setenv("ADMIN_API_KEY", "test-admin-secret-key")
 
 	var gotAuth string
