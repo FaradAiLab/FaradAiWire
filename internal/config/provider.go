@@ -35,26 +35,27 @@ type Provider interface {
 
 // Config is the top-level configuration structure for FaradAiWire.
 type Config struct {
-	mu           sync.RWMutex      `yaml:"-" json:"-"`
-	AllowStdio   *bool             `yaml:"allow_stdio,omitempty" json:"allow_stdio,omitempty"`
-	ListenHost   string            `yaml:"listen_host" json:"listen_host"`     // Interface host to bind HTTP listeners (default 127.0.0.1)
-	ListenPort   int               `yaml:"listen_port"`                        // Multi-agent gateway listen port
-	AgentsDir    string            `yaml:"agents_dir"`                         // Root directory containing agent subdirectories
-	ProtocolsDir string            `yaml:"protocols_dir" json:"protocols_dir"` // Root directory containing protocol definition files (defaults to ~/.faradaiwire/protocols)
-	Mode         string            `yaml:"mode"`                               // "stdio" or "sse"
-	Stdio        StdioConfig       `yaml:"stdio"`
-	SSE          SSEConfig         `yaml:"sse"`
-	Filters      FiltersConfig     `yaml:"filters"`
-	AuditLog     AuditLogConfig    `yaml:"audit_log"`
-	Telemetry    TelemetryConfig   `yaml:"telemetry" json:"telemetry"`
-	Logging      LoggingConfig     `yaml:"logging" json:"logging"`
-	HotReload    bool              `yaml:"hot_reload"`
-	AdminHost    string            `yaml:"admin_host" json:"admin_host"` // Interface host to bind Admin HTTP server (defaults to 127.0.0.1 per ADR-0028)
-	AdminPort    int               `yaml:"admin_port"`
-	AdminTLS     AdminTLSConfig    `yaml:"admin_tls"`
-	UserContext  UserContextConfig `yaml:"user_context"`
-	Security     SecurityConfig    `yaml:"security"`
-	ConfigPath   string            `yaml:"-"`
+	mu                    sync.RWMutex    `yaml:"-" json:"-"`
+	AllowStdio            *bool           `yaml:"allow_stdio,omitempty" json:"allow_stdio,omitempty"`
+	ListenHost            string          `yaml:"listen_host" json:"listen_host"`     // Interface host to bind HTTP listeners (default 127.0.0.1)
+	ListenPort            int             `yaml:"listen_port"`                        // Multi-agent gateway listen port
+	AgentsDir             string          `yaml:"agents_dir"`                         // Root directory containing agent subdirectories
+	ProtocolsDir          string          `yaml:"protocols_dir" json:"protocols_dir"` // Root directory containing protocol definition files (defaults to ~/.faradaiwire/protocols)
+	Mode                  string          `yaml:"mode"`                               // "stdio" or "sse"
+	Stdio                 StdioConfig     `yaml:"stdio"`
+	SSE                   SSEConfig       `yaml:"sse"`
+	Filters               FiltersConfig   `yaml:"filters"`
+	AuditLog              AuditLogConfig  `yaml:"audit_log"`
+	Telemetry             TelemetryConfig `yaml:"telemetry" json:"telemetry"`
+	Logging               LoggingConfig   `yaml:"logging" json:"logging"`
+	HotReload             bool            `yaml:"hot_reload"`
+	AdminHost             string          `yaml:"admin_host" json:"admin_host"` // Interface host to bind Admin HTTP server (defaults to 127.0.0.1 per ADR-0028)
+	AdminPort             int             `yaml:"admin_port"`
+	AdminTLS              AdminTLSConfig  `yaml:"admin_tls"`
+	AdminDisabled         bool            `yaml:"-" json:"-"` // Programmatic-only: disables embedded AdminServer entirely (headless/embedded hub)
+	AdminListenerDisabled bool            `yaml:"-" json:"-"` // Programmatic-only: constructs AdminHandler() without binding TCP listener
+	Security              SecurityConfig  `yaml:"security"`
+	ConfigPath            string          `yaml:"-"`
 }
 
 func cloneBoolPtr(p *bool) *bool {
@@ -75,29 +76,29 @@ func (c *Config) Clone() *Config {
 	defer c.mu.RUnlock()
 
 	cp := &Config{
-		AllowStdio:   cloneBoolPtr(c.AllowStdio),
-		ListenHost:   c.ListenHost,
-		ListenPort:   c.ListenPort,
-		AgentsDir:    c.AgentsDir,
-		ProtocolsDir: c.ProtocolsDir,
-		Mode:         c.Mode,
-		Stdio:        c.Stdio,
-		SSE:          c.SSE,
-		Filters:      c.Filters,
-		AuditLog:     c.AuditLog,
-		Telemetry:    c.Telemetry,
-		Logging:      c.Logging,
-		HotReload:    c.HotReload,
-		AdminHost:    c.AdminHost,
-		AdminPort:    c.AdminPort,
-		AdminTLS:     c.AdminTLS,
-		UserContext:  c.UserContext,
-		Security:     c.Security,
-		ConfigPath:   c.ConfigPath,
+		AllowStdio:            cloneBoolPtr(c.AllowStdio),
+		ListenHost:            c.ListenHost,
+		ListenPort:            c.ListenPort,
+		AgentsDir:             c.AgentsDir,
+		ProtocolsDir:          c.ProtocolsDir,
+		Mode:                  c.Mode,
+		Stdio:                 c.Stdio,
+		SSE:                   c.SSE,
+		Filters:               c.Filters,
+		AuditLog:              c.AuditLog,
+		Telemetry:             c.Telemetry,
+		Logging:               c.Logging,
+		HotReload:             c.HotReload,
+		AdminHost:             c.AdminHost,
+		AdminPort:             c.AdminPort,
+		AdminTLS:              c.AdminTLS,
+		AdminDisabled:         c.AdminDisabled,
+		AdminListenerDisabled: c.AdminListenerDisabled,
+		Security:              c.Security,
+		ConfigPath:            c.ConfigPath,
 	}
 
 	cp.Stdio.Args = slices.Clone(c.Stdio.Args)
-	cp.UserContext.TrustedProxies = slices.Clone(c.UserContext.TrustedProxies)
 	cp.Security.CORSAllowedOrigins = slices.Clone(c.Security.CORSAllowedOrigins)
 	cp.Security.SSRFProtection.AllowedDomains = slices.Clone(c.Security.SSRFProtection.AllowedDomains)
 	cp.Security.SSRFProtection.Enabled = cloneBoolPtr(c.Security.SSRFProtection.Enabled)
@@ -460,16 +461,6 @@ audit_log:
 	}
 
 	return configPath, nil
-}
-
-// UserContextConfig defines custom header mapping and provenance rules for client context propagation.
-type UserContextConfig struct {
-	RoleHeader        string   `yaml:"role_header"`         // Header key for user role
-	UserHeader        string   `yaml:"user_header"`         // Header key for user ID
-	FallbackRole      string   `yaml:"fallback_role"`       // Default role if missing or untrusted
-	FallbackUser      string   `yaml:"fallback_user"`       // Default user ID if missing or untrusted
-	TrustedProxies    []string `yaml:"trusted_proxies"`     // List of CIDRs/IPs allowed to supply user context without HMAC signature
-	ContextHMACSecret string   `yaml:"context_hmac_secret"` // Optional HMAC-SHA256 secret for cryptographic context attestation
 }
 
 // SecurityConfig defines top-level security parameters for FaradAiWire.

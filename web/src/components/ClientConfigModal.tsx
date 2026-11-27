@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { Modal } from './ui/Modal'
 import { Badge } from './ui/Badge'
+import { AgentItem } from '../types'
 import { DEFAULT_GATEWAY_HOST, DEFAULT_INGRESS_PORT, normalizeBrowserIngressHost } from '../constants'
 
 export type ClientId = 'http-agent' | 'claude-desktop' | 'cursor' | 'windsurf' | 'claude-cli' | 'antigravity'
@@ -27,6 +28,7 @@ export interface ClientConfigModalProps {
   keyName?: string
   agentName?: string
   availableAgents?: string[]
+  availableProfiles?: AgentItem[]
   ingressPort?: number
   ingressHost?: string
   allowStdio?: boolean
@@ -113,10 +115,18 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
     keyName,
     agentName,
     availableAgents = [],
+    availableProfiles = [],
     ingressPort = DEFAULT_INGRESS_PORT,
     ingressHost = DEFAULT_GATEWAY_HOST,
     allowStdio = true,
   }) => {
+    const profileNames = useMemo(() => {
+      if (availableProfiles.length > 0) {
+        return availableProfiles.map((p) => p.name)
+      }
+      return availableAgents
+    }, [availableProfiles, availableAgents])
+
     const visibleClients = useMemo(
       () => (allowStdio ? CLIENTS : CLIENTS.filter((c) => c.id !== 'claude-desktop')),
       [allowStdio]
@@ -127,9 +137,10 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
     const [isFullFile, setIsFullFile] = useState(true)
     const [selectedAgent, setSelectedAgent] = useState<string>(() => {
       if (agentName && agentName !== '*') return agentName
-      if (availableAgents.length > 0) return availableAgents[0]
-      return '*'
+      if (profileNames.length > 0) return profileNames[0]
+      return ''
     })
+    const [selectedToolSource, setSelectedToolSource] = useState<string>('')
     const [copiedConfig, setCopiedConfig] = useState(false)
     const [copiedPath, setCopiedPath] = useState(false)
     const [copiedToken, setCopiedToken] = useState(false)
@@ -145,21 +156,53 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
     React.useEffect(() => {
       if (agentName && agentName !== '*') {
         setSelectedAgent(agentName)
-      } else if (availableAgents.length > 0 && selectedAgent === '*') {
-        setSelectedAgent(availableAgents[0])
+      } else if (profileNames.length > 0 && (!selectedAgent || selectedAgent === '*' || !profileNames.includes(selectedAgent))) {
+        setSelectedAgent(profileNames[0])
+      } else if (profileNames.length === 0) {
+        setSelectedAgent('')
       }
-    }, [agentName, availableAgents, selectedAgent])
+    }, [agentName, profileNames, selectedAgent])
 
     const isWildcardKey = !agentName || agentName === '*'
     const effectiveAgent = selectedAgent === '*' ? '' : selectedAgent
+
+    const activeProfile = useMemo(
+      () => availableProfiles.find((p) => p.name === effectiveAgent),
+      [availableProfiles, effectiveAgent]
+    )
+    const isDirectProfile =
+      (activeProfile?.routing_mode || activeProfile?.config?.routing_mode || '').toLowerCase() === 'direct'
+    const attachedToolSources = useMemo(
+      () =>
+        (activeProfile?.config?.protocols || [])
+          .map((p) => p.name || p.id)
+          .filter((name): name is string => Boolean(name)),
+      [activeProfile]
+    )
+
+    React.useEffect(() => {
+      if (!isDirectProfile) {
+        setSelectedToolSource('')
+        return
+      }
+      if (attachedToolSources.length > 0 && !attachedToolSources.includes(selectedToolSource)) {
+        setSelectedToolSource(attachedToolSources[0])
+      } else if (attachedToolSources.length === 0) {
+        setSelectedToolSource('')
+      }
+    }, [isDirectProfile, attachedToolSources, selectedToolSource])
+
     const effectiveHost = normalizeBrowserIngressHost(ingressHost)
     const serverKey = effectiveAgent ? `farad-ai-${effectiveAgent}` : 'farad-ai-wire'
-    const endpointUrl = effectiveAgent
-      ? `http://${effectiveHost}:${ingressPort}/sse/${effectiveAgent}`
-      : `http://${effectiveHost}:${ingressPort}/sse`
-    const mcpEndpointUrl = effectiveAgent
-      ? `http://${effectiveHost}:${ingressPort}/mcp?profile=${encodeURIComponent(effectiveAgent)}`
-      : `http://${effectiveHost}:${ingressPort}/mcp`
+    const encodedAgent = effectiveAgent ? encodeURIComponent(effectiveAgent) : '{profile}'
+    const encodedToolSource = selectedToolSource ? encodeURIComponent(selectedToolSource) : '{tool_source}'
+
+    const endpointUrl = isDirectProfile
+      ? `http://${effectiveHost}:${ingressPort}/sse/${encodedAgent}/${encodedToolSource}`
+      : `http://${effectiveHost}:${ingressPort}/sse/${encodedAgent}`
+    const mcpEndpointUrl = isDirectProfile
+      ? `http://${effectiveHost}:${ingressPort}/mcp/${encodedAgent}/${encodedToolSource}`
+      : `http://${effectiveHost}:${ingressPort}/mcp/${encodedAgent}`
 
     const trimmedToken = (token || '').trim()
     const isTokenMasked =
@@ -183,7 +226,6 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
             mcp_post_url: mcpEndpointUrl,
             headers: {
               Authorization: `Bearer ${displayToken}`,
-              ...(effectiveAgent ? { 'X-FaradAiWire-Profile': effectiveAgent } : {}),
             },
           }
           if (!isFullFile) {
@@ -194,16 +236,13 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
             `MCP_GATEWAY_URL=${endpointUrl}`,
             `MCP_HTTP_ENDPOINT=${mcpEndpointUrl}`,
             `MCP_BEARER_TOKEN=${displayToken}`,
-            effectiveAgent ? `FARADAI_WIRE_PROFILE=${effectiveAgent}` : '',
             '',
             '# Verify JSON-RPC tools/list via cURL',
             `curl -sS -X POST "${mcpEndpointUrl}" \\`,
             `  -H "Authorization: Bearer ${displayToken}" \\`,
             '  -H "Content-Type: application/json" \\',
             `  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`,
-          ]
-            .filter(Boolean)
-            .join('\n')
+          ].join('\n')
         }
 
         case 'claude-desktop': {
@@ -266,7 +305,7 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
         default:
           return ''
       }
-    }, [selectedClient, isFullFile, serverKey, endpointUrl, mcpEndpointUrl, effectiveAgent, displayToken])
+    }, [selectedClient, isFullFile, serverKey, endpointUrl, mcpEndpointUrl, displayToken])
 
     const handleCopyConfig = useCallback(() => {
       navigator.clipboard.writeText(configCode)
@@ -308,33 +347,88 @@ export const ClientConfigModal: React.FC<ClientConfigModalProps> = React.memo(
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-muted">Target Profile:</span>
+            <div className="flex flex-wrap items-center gap-2">
               {isWildcardKey ? (
                 <div className="flex items-center gap-1.5">
+                  <label htmlFor="client-config-target-profile" className="text-muted">
+                    Target Profile:
+                  </label>
                   <select
+                    id="client-config-target-profile"
                     value={selectedAgent}
                     onChange={(e) => setSelectedAgent(e.target.value)}
-                    className="px-2.5 py-1 rounded-lg bg-surface border border-subtle text-accent-primary font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-accent-primary"
+                    disabled={profileNames.length === 0}
+                    className="px-2.5 py-1 rounded-lg bg-surface border border-subtle text-accent-primary font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-accent-primary disabled:opacity-60"
                   >
-                    {availableAgents.map((ag) => (
-                      <option key={ag} value={ag}>
-                        {ag}
-                      </option>
-                    ))}
-                    <option value="*">* (All Profiles / Root /sse)</option>
+                    {profileNames.length === 0 ? (
+                      <option value="">No Security Profiles configured</option>
+                    ) : (
+                      profileNames.map((ag) => (
+                        <option key={ag} value={ag}>
+                          {ag}
+                        </option>
+                      ))
+                    )}
                   </select>
                   <Badge variant="indigo" size="sm">
                     Global Key
                   </Badge>
                 </div>
               ) : (
-                <Badge variant="cyan" size="sm" icon={<Layers className="w-3 h-3" />}>
-                  {agentName}
-                </Badge>
+                <>
+                  <span className="text-muted">Target Profile:</span>
+                  <Badge variant="cyan" size="sm" icon={<Layers className="w-3 h-3" />}>
+                    {agentName}
+                  </Badge>
+                </>
+              )}
+
+              {isDirectProfile && (
+                <div className="flex items-center gap-1.5">
+                  {attachedToolSources.length > 0 ? (
+                    <>
+                      <label htmlFor="client-config-tool-source" className="text-muted">
+                        Tool Source:
+                      </label>
+                      <select
+                        id="client-config-tool-source"
+                        value={selectedToolSource}
+                        onChange={(e) => setSelectedToolSource(e.target.value)}
+                        className="px-2.5 py-1 rounded-lg bg-surface border border-subtle text-accent-primary font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-accent-primary"
+                      >
+                        {attachedToolSources.map((ts) => (
+                          <option key={ts} value={ts}>
+                            {ts}
+                          </option>
+                        ))}
+                      </select>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-muted">Tool Source:</span>
+                      <Badge variant="amber" size="sm">
+                        Direct (no Tool Source attached)
+                      </Badge>
+                    </>
+                  )}
+                </div>
               )}
             </div>
           </div>
+
+          {isWildcardKey && profileNames.length === 0 && (
+            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-200 flex items-start gap-2.5">
+              <Info className="w-4 h-4 shrink-0 mt-0.5 text-amber-500" />
+              <div>
+                <div className="font-semibold">Security Profile Required</div>
+                <div className="text-[11px] text-amber-700/80 dark:text-amber-300/80 mt-0.5">
+                  Global keys require an explicit Security Profile in the URL path (e.g.{' '}
+                  <code className="bg-surface px-1 py-0.5 rounded font-mono border border-subtle">/sse/{'{profile}'}</code>). Create a Security Profile first, then replace{' '}
+                  <code className="bg-surface px-1 py-0.5 rounded font-mono border border-subtle">{'{profile}'}</code>.
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Legacy Hash Notice if token is masked */}
           {isTokenMasked && (

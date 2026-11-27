@@ -837,25 +837,74 @@ paths:
   # ============================================================================
   /sse:
     get:
-      summary: MCP Client SSE Ingress Stream
-      description: Establishes a persistent Server-Sent Events stream for AI agents (Cursor, Claude Code, Copilot).
+      summary: Scoped MCP Client SSE Ingress Stream
+      description: Establishes a persistent Server-Sent Events stream for a profile-scoped API key. Wildcard (*) keys must specify a profile in `/sse/{profile}` or `/sse/{profile}/{tool_source}`.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: SSE connection established
+        '400':
+          description: PROFILE_REQUIRED (wildcard key without profile path) or INVALID_ROUTING_PARAMETER (?profile=/?agent= unsupported)
+        '401':
+          description: Fail-closed unauthorized (missing or invalid Authorization Bearer token)
+        '403':
+          description: INGRESS_ROLE_REQUIRED (Admin key rejected on ingress)
+
+  /sse/{profile}:
+    get:
+      summary: Aggregated Security Profile SSE Ingress Stream
+      description: Establishes a persistent SSE stream for an Aggregated-mode Security Profile.
       security:
         - BearerAuth: []
       parameters:
-        - name: agent
-          in: query
-          description: Optional target agent domain
+        - name: profile
+          in: path
+          required: true
           schema: { type: string }
       responses:
         '200':
           description: SSE connection established
+        '400':
+          description: ROUTING_VIOLATION_DIRECT or INVALID_ROUTING_PARAMETER
         '401':
-          description: Fail-closed unauthorized (missing or invalid Bearer token)
+          description: Unauthorized
+        '403':
+          description: Forbidden (Admin key or cross-profile scoped key)
+        '404':
+          description: Security Profile not found
+
+  /sse/{profile}/{tool_source}:
+    get:
+      summary: Direct-Mode Tool Source SSE Ingress Stream
+      description: Establishes a persistent SSE stream targeting a specific Tool Source inside a Direct-mode Security Profile.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: profile
+          in: path
+          required: true
+          schema: { type: string }
+        - name: tool_source
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: SSE connection established
+        '400':
+          description: ROUTING_VIOLATION_AGGREGATED or INVALID_ROUTING_PARAMETER
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+        '404':
+          description: Security Profile or Tool Source not found
 
   /message:
     post:
       summary: MCP JSON-RPC Message Ingress
-      description: Ingests client JSON-RPC 2.0 requests, passes them through the security filter pipeline, and proxies to upstream tools.
+      description: Ingests client JSON-RPC 2.0 requests for active SSE sessions or profile-scoped API keys and proxies to upstream tools.
       security:
         - BearerAuth: []
       requestBody:
@@ -871,13 +920,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/JSONRPCResponse'
+        '400':
+          description: PROFILE_REQUIRED or INVALID_ROUTING_PARAMETER
         '401':
           description: Unauthorized
+        '403':
+          description: Forbidden
 
   /mcp:
     post:
-      summary: Direct MCP JSON-RPC Ingress
-      description: Direct POST transport alternative to /message for single-request JSON-RPC interactions.
+      summary: Scoped Streamable HTTP MCP JSON-RPC Ingress
+      description: Direct POST transport for profile-scoped API keys. Wildcard (*) keys must use `/mcp/{profile}` or `/mcp/{profile}/{tool_source}`.
       security:
         - BearerAuth: []
       requestBody:
@@ -893,6 +946,82 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/JSONRPCResponse'
+        '400':
+          description: PROFILE_REQUIRED or INVALID_ROUTING_PARAMETER
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+
+  /mcp/{profile}:
+    post:
+      summary: Aggregated Security Profile Streamable HTTP MCP Ingress
+      description: Executes JSON-RPC 2.0 MCP calls against an Aggregated-mode Security Profile.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: profile
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JSONRPCRequest'
+      responses:
+        '200':
+          description: Filtered JSON-RPC response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JSONRPCResponse'
+        '400':
+          description: ROUTING_VIOLATION_DIRECT or INVALID_ROUTING_PARAMETER
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+        '404':
+          description: Security Profile not found
+
+  /mcp/{profile}/{tool_source}:
+    post:
+      summary: Direct-Mode Tool Source Streamable HTTP MCP Ingress
+      description: Executes JSON-RPC 2.0 MCP calls targeting a specific Tool Source inside a Direct-mode Security Profile.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: profile
+          in: path
+          required: true
+          schema: { type: string }
+        - name: tool_source
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JSONRPCRequest'
+      responses:
+        '200':
+          description: Filtered JSON-RPC response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JSONRPCResponse'
+        '400':
+          description: ROUTING_VIOLATION_AGGREGATED or INVALID_ROUTING_PARAMETER
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+        '404':
+          description: Security Profile or Tool Source not found
 
 components:
   securitySchemes:

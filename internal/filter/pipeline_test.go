@@ -1328,3 +1328,62 @@ func TestPipeline_LockFreeSnapshot_NonBlockingSwap(t *testing.T) {
 	close(slowFilter.release)
 	<-done
 }
+
+type mockPinnedCloserFilter struct {
+	filter.BaseSecurityFilter
+	name   string
+	order  int
+	closed bool
+}
+
+func (m *mockPinnedCloserFilter) Name() string { return m.name }
+func (m *mockPinnedCloserFilter) Order() int   { return m.order }
+func (m *mockPinnedCloserFilter) ExecuteRequest(ctx context.Context, req *mcp.Request) (*mcp.Response, error) {
+	return nil, nil
+}
+func (m *mockPinnedCloserFilter) Close() error {
+	m.closed = true
+	return nil
+}
+
+func TestPipeline_RegisterPinnedFilter_SurvivesSwap(t *testing.T) {
+	p := filter.NewPipeline(nil)
+	ext := &mockPinnedCloserFilter{name: "enterprise_opa", order: 20}
+	p.RegisterPinnedFilter(ext)
+
+	nonPinned := &mockPinnedCloserFilter{name: "transient", order: 40}
+	p.RegisterFilter(nonPinned)
+
+	builtIn := &mockCloserFilter{}
+	p.Swap([]filter.NamedFilter{builtIn}, nil)
+
+	if ext.closed {
+		t.Fatal("expected pinned external filter NOT to be closed during Swap")
+	}
+	if !nonPinned.closed {
+		t.Fatal("expected non-pinned RegisterFilter filter to be closed when displaced by Swap")
+	}
+
+	got := p.GetFilters()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 filters after Swap (built-in + pinned external), got %d", len(got))
+	}
+	if got[0].Name() != "closer_filter" {
+		t.Fatalf("expected closer_filter (order 10) first, got %q", got[0].Name())
+	}
+	if got[1].Name() != "enterprise_opa" {
+		t.Fatalf("expected enterprise_opa (order 20) second, got %q", got[1].Name())
+	}
+
+	// Second Swap removing built-in filter still preserves pinned external filter and closes displaced built-in.
+	p.Swap([]filter.NamedFilter{}, nil)
+	if !builtIn.closed {
+		t.Fatal("expected displaced built-in filter to be closed")
+	}
+	if ext.closed {
+		t.Fatal("expected pinned external filter NOT to be closed on subsequent Swap")
+	}
+	if p.GetFilter("enterprise_opa") != ext {
+		t.Fatal("expected pinned external filter to remain active in pipeline")
+	}
+}

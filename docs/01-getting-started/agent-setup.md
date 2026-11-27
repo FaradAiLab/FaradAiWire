@@ -35,9 +35,9 @@ All agent tool traffic must target FaradAiWire's **Proxy Ingress Port (19410)**:
 | Parameter | Value | Notes |
 | :--- | :--- | :--- |
 | **Ingress Base URL** | `http://127.0.0.1:19410` | Never connect agents to Admin Port `19415` |
-| **SSE Endpoint** | `http://127.0.0.1:19410/sse` | For persistent Server-Sent Events transports |
-| **Message Endpoint** | `http://127.0.0.1:19410/message` | For standard HTTP POST JSON-RPC 2.0 frames |
-| **Authorization Header** | `Authorization: Bearer <API_KEY>` | Matches `api_keys` in `config.yaml` or default dev key |
+| **SSE Endpoint** | `http://127.0.0.1:19410/sse/{profile}` | Aggregated SSE (or `/sse/{profile}/{tool_source}` for Direct mode) |
+| **Streamable HTTP Endpoint** | `http://127.0.0.1:19410/mcp/{profile}` | Aggregated HTTP POST (or `/mcp/{profile}/{tool_source}` for Direct mode) |
+| **Authorization Header** | `Authorization: Bearer <API_KEY>` | Matches an active Agent key in `keys/api_keys.json` |
 
 ---
 
@@ -51,10 +51,9 @@ Edit `~/.claude.json` (or project-level `.claude.json`):
 {
   "mcpServers": {
     "faradaiwire-gateway": {
-      "url": "http://127.0.0.1:19410/sse",
+      "url": "http://127.0.0.1:19410/sse/claude-code",
       "headers": {
-        "Authorization": "Bearer dev-local-key",
-        "X-Farad-Agent": "claude-code"
+        "Authorization": "Bearer faw_live_your_agent_key"
       }
     }
   }
@@ -79,10 +78,9 @@ Open **Cursor Settings** $\to$ **Features** $\to$ **MCP Servers**, or edit `.cur
 {
   "mcpServers": {
     "faradaiwire": {
-      "url": "http://127.0.0.1:19410/sse",
+      "url": "http://127.0.0.1:19410/sse/cursor-agent",
       "headers": {
-        "Authorization": "Bearer dev-local-key",
-        "X-Farad-Agent": "cursor-agent"
+        "Authorization": "Bearer faw_live_your_agent_key"
       }
     }
   }
@@ -107,11 +105,14 @@ Add the gateway entry:
 {
   "mcpServers": {
     "faradaiwire-pep": {
-      "url": "http://127.0.0.1:19410/sse",
-      "headers": {
-        "Authorization": "Bearer dev-local-key",
-        "X-Farad-Agent": "claude-desktop"
-      }
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://127.0.0.1:19410/sse/claude-desktop",
+        "--header",
+        "Authorization: Bearer faw_live_your_agent_key"
+      ]
     }
   }
 }
@@ -129,10 +130,9 @@ In Windsurf, open `~/.codeium/windsurf/mcp_config.json` and configure:
 {
   "mcpServers": {
     "faradaiwire": {
-      "serverUrl": "http://127.0.0.1:19410/sse",
+      "serverUrl": "http://127.0.0.1:19410/sse/windsurf",
       "headers": {
-        "Authorization": "Bearer dev-local-key",
-        "X-Farad-Agent": "windsurf"
+        "Authorization": "Bearer faw_live_your_agent_key"
       }
     }
   }
@@ -148,14 +148,12 @@ If you are building custom autonomous agents or LLM runners in Python, invoke MC
 ```python
 import requests
 
-GATEWAY_URL = "http://127.0.0.1:19410/message"
-API_KEY = "dev-local-key"
+GATEWAY_URL = "http://127.0.0.1:19410/mcp/finance-analyst"
+API_KEY = "faw_live_your_agent_key"
 
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"Bearer {API_KEY}",
-    "X-Farad-Agent": "finance-analyst-agent",
-    "X-User-Role": "Analyst"
 }
 
 payload = {
@@ -191,17 +189,16 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 
 async function runSecureAgent() {
   const transport = new SSEClientTransport(
-    new URL("http://127.0.0.1:19410/sse"),
+    new URL("http://127.0.0.1:19410/sse/ts-worker-agent"),
     {
       eventSourceInit: {
         headers: {
-          Authorization: "Bearer dev-local-key",
-          "X-Farad-Agent": "ts-worker-agent",
+          Authorization: "Bearer faw_live_your_agent_key",
         },
       },
       requestInit: {
         headers: {
-          Authorization: "Bearer dev-local-key",
+          Authorization: "Bearer faw_live_your_agent_key",
         },
       },
     }
@@ -224,13 +221,13 @@ runSecureAgent().catch(console.error);
 
 ---
 
-## Multi-Agent Domain Isolation Headers
+## Canonical Profile Routing
 
-When managing multiple agent roles on the same workstation or team cluster, FaradAiWire uses request headers to apply isolated policy profiles:
+Target Security Profiles directly in the URL path (with `Authorization: Bearer <agent-key>`):
 
-- `X-Farad-Agent`: Routes the call to an agent profile defined in `agents/<agent-name>.yaml`.
-- `X-User-Role`: Evaluates role-based DLP and tool visibility policies (e.g. `Developer`, `Analyst`, `Admin`).
-- `X-User-ID`: Attached to the DuckDB audit trail to maintain identity provenance.
+- **Aggregated Mode:** `/sse/{profile}` or `/mcp/{profile}`
+- **Direct Mode:** `/sse/{profile}/{tool_source}` or `/mcp/{profile}/{tool_source}`
+- **Scoped Keys:** Profile-scoped API keys also auto-route when hitting root `/sse` or `/mcp`; wildcard (`*`) keys require an explicit `{profile}` segment in the URL path.
 
 ---
 

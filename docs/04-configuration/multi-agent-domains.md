@@ -11,11 +11,11 @@ FaradAiWire supports **Per-Agent Domain Isolation**, allowing you to define gran
 
 ```mermaid
 graph TD
-    A1["Agent: 'code-reviewer'\n(Header: X-Farad-Agent: code-reviewer)"] --> Router["Agent Domain Router"]
-    A2["Agent: 'db-admin'\n(Header: X-Farad-Agent: db-admin)"] --> Router
+    A1["Client: /mcp/code-reviewer\n(or /sse/code-reviewer)"] --> Router["Profile URL Router"]
+    A2["Client: /mcp/db-admin\n(or /sse/db-admin)"] --> Router
     
-    Router --> P1["Profile: agents/code-reviewer.yaml\n- Read-only tools only\n- Strict DLP (Block all keys)"]
-    Router --> P2["Profile: agents/db-admin.yaml\n- SQL tools allowed\n- HITL approval required for DROP/DELETE"]
+    Router --> P1["Profile: agents/code-reviewer/current/config.json\n- Read-only tools only\n- Strict DLP (Block all keys)"]
+    Router --> P2["Profile: agents/db-admin/current/config.json\n- SQL tools allowed\n- HITL approval required for DROP/DELETE"]
 ```
 
 ---
@@ -66,14 +66,15 @@ hitl:
 
 ---
 
-## 2. Invoking with Agent Domain Headers
+## 2. Invoking a Security Profile via Canonical URL Paths
 
-When AI agent clients send tool requests, they include the `X-Farad-Agent` HTTP header:
+Clients target a Security Profile directly in the URL path (`Authorization: Bearer <agent-key>` only):
+- **Aggregated mode:** `GET /sse/{profile}` or `POST /mcp/{profile}`
+- **Direct mode:** `GET /sse/{profile}/{tool_source}` or `POST /mcp/{profile}/{tool_source}`
 
 ```bash
-curl -X POST http://127.0.0.1:19410/message \
-  -H "Authorization: Bearer dev-local-key" \
-  -H "X-Farad-Agent: code-reviewer" \
+curl -X POST http://127.0.0.1:19410/mcp/code-reviewer \
+  -H "Authorization: Bearer faw_live_your_agent_key" \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -83,15 +84,15 @@ curl -X POST http://127.0.0.1:19410/message \
   }'
 ```
 
-FaradAiWire evaluates the request against `agents/code-reviewer.yaml`. Because `execute_command` is explicitly listed under `denied_tools`, FaradAiWire rejects the call with JSON-RPC error `-32003` (`Policy authorization denied: tool 'execute_command' is not permitted for agent 'code-reviewer'`).
+FaradAiWire evaluates the request against the `code-reviewer` profile. Because `execute_command` is not permitted, FaradAiWire rejects the call with JSON-RPC error `-32004` / `-32003`.
 
 ---
 
-## 3. Fallback Behavior
+## 3. Root Endpoint Behavior (`/sse` and `/mcp`)
 
-If an incoming request does not provide an `X-Farad-Agent` header:
-- FaradAiWire applies the fallback profile defined by `FARADAI_WIRE_DEFAULT_AGENT` (default: `default`).
-- If no `agents/default.yaml` exists, global rules defined in `config.yaml` apply.
+When a request omits `{profile}` in the URL path:
+- **Scoped API keys** (bound to a specific Security Profile) automatically route to their bound profile.
+- **Wildcard (`*`) keys** fail closed with `400 PROFILE_REQUIRED` (no silent fallback to a default profile). Legacy `?profile=` and `?agent=` query parameters also fail closed with `400 INVALID_ROUTING_PARAMETER`.
 
 ---
 

@@ -30,11 +30,9 @@ Settings are resolved in the following order (highest precedence first):
 | **`FARADAI_WIRE_HOST`** | `127.0.0.1` | Network interface address to bind Ingress listeners (`0.0.0.0` for containers). |
 | **`FARADAI_WIRE_ADMIN_HOST`** | `127.0.0.1` | Network interface address for the Admin Console listener (`admin_host` / `--admin-host` takes higher precedence). |
 | **`FARADAI_WIRE_HOME`** | `~/.faradaiwire` | Data directory for runtime state, DuckDB analytics database, and pinned schemas. |
-| **`FARADAI_WIRE_DEFAULT_AGENT`** | `default` | Fallback agent domain name when no `X-Farad-Agent` header is present. |
 | **`FARADAI_WIRE_ALLOW_LOCAL_TARGETS`**| `false` | When set to `true`, permits upstream MCP targets on loopback/private IPs (disables SSRF block). |
 | **`FARADAI_WIRE_ENV`** | `production` | Set to `development` for verbose debug logs and relaxed local SSRF checks. |
 | **`FARADAI_WIRE_DISABLE_PROCESS_LOCK`**| `false` | Set to `true` in CI/test environments to bypass the single-instance flock guard. |
-| **`FARADAI_WIRE_HMAC_SECRET`** | *(None)* | 32-byte cryptographic secret used for verifying signed context headers. |
 | **`FARADAI_WIRE_LOG_LEVEL`** | `info` | Runtime log level (`debug`, `info`, `warn`, `error`). Overrides `logging.level` in `config.yaml`. |
 | **`FARADAI_WIRE_AUDIT_HMAC_KEY`** | *(None)* | Optional key that signs the audit hash chain with HMAC-SHA256 (`v2-hmac`). Must match when running `faradaiwire audit verify` / `GET /admin/audit/verify`. |
 | **`FARADAI_WIRE_ALLOW_STDIO`** | `true` | Highest-precedence switch for local stdio MCP subprocesses; `false` disables stdio upstreams (and local-target SSRF relaxation). The official Docker image sets `false`, so containers support **only Remote SSE and Streamable HTTP** upstreams; use a native install for local stdio MCP servers (`npx`, `python`, `git`). |
@@ -64,7 +62,6 @@ Copy the starter template from `.env.example`:
 # Security Credentials
 AGENT_API_KEY=
 ADMIN_API_KEY=
-FARADAI_WIRE_HMAC_SECRET=0123456789abcdef0123456789abcdef
 
 # Network Binding
 FARADAI_WIRE_HOST=127.0.0.1

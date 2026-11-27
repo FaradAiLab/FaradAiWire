@@ -13,7 +13,6 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/auth"
-	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/logger"
 )
@@ -63,16 +62,12 @@ func TestContextExtractor_PopulatesAPIKeyIDAndClientIP(t *testing.T) {
 		t.Fatalf("GenerateKey: %v", err)
 	}
 
-	extractor := NewContextExtractor(config.UserContextConfig{
-		FallbackRole: "Customer",
-		FallbackUser: "guest",
-	})
-	extractor.SetKeyValidator(ks)
+	extractor := NewContextExtractor(ks)
 
 	req := httptest.NewRequest(http.MethodPost, "/message", nil)
 	req.RemoteAddr = "198.51.100.42:55555"
 	req.Header.Set("Authorization", "Bearer "+rawKey)
-	// Even with X-User-ID header present, verified keyRec.ID must always populate APIKeyID
+	// Even with X-User-ID header present, verified keyRec must always populate APIKeyID and UserID
 	req.Header.Set("X-User-ID", "alice-workspace")
 
 	uCtx, err := extractor.Authenticate(req)
@@ -85,8 +80,8 @@ func TestContextExtractor_PopulatesAPIKeyIDAndClientIP(t *testing.T) {
 	if uCtx.ClientIP != "198.51.100.42" {
 		t.Errorf("ClientIP = %q, want 198.51.100.42", uCtx.ClientIP)
 	}
-	if uCtx.UserID != "alice-workspace" {
-		t.Errorf("UserID = %q, want alice-workspace", uCtx.UserID)
+	if uCtx.UserID != "claude-desktop" {
+		t.Errorf("UserID = %q, want claude-desktop (ignoring spoofed X-User-ID)", uCtx.UserID)
 	}
 }
 
@@ -111,10 +106,7 @@ func TestSSEProxy_Ingress401And403_EmitSecurityAuditWithoutSecretLeak(t *testing
 		AgentName: "agent-forbidden",
 	})
 
-	proxy := NewSSEProxy(0, "http://mock-backend/sse", pipeline, repo, nil, config.UserContextConfig{
-		FallbackRole: "Customer",
-		FallbackUser: "guest",
-	})
+	proxy := NewSSEProxy(0, "http://mock-backend/sse", pipeline, repo, nil)
 	proxy.SetKeyValidator(ks)
 	proxy.SetSecurityAuditLogger(secSpy)
 	proxy.httpClient = &http.Client{
@@ -194,10 +186,8 @@ func TestSSEProxy_PropagatesTraceAndAgentToContextLogger(t *testing.T) {
 		AgentName: "agent-alpha",
 	})
 
-	proxy := NewSSEProxy(0, "http://127.0.0.1:1/unreachable", filter.NewPipeline(nil), repo, nil, config.UserContextConfig{
-		FallbackRole: "Customer",
-		FallbackUser: "guest",
-	})
+	proxy := NewSSEProxy(0, "http://127.0.0.1:1/unreachable", filter.NewPipeline(nil), repo, nil)
+	tok := attachTestBearerAuth(t, proxy)
 
 	// Inject custom RoundTripper that records without external dialing; fails fast so Warn/Info logs emit with r.Context()
 	proxy.SetHTTPClient(&http.Client{
@@ -211,10 +201,10 @@ func TestSSEProxy_PropagatesTraceAndAgentToContextLogger(t *testing.T) {
 	})
 
 	body := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}},"id":1}`
-	req := httptest.NewRequest(http.MethodPost, "/message", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/mcp/agent-alpha", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("X-Trace-ID", "trace-prop-777")
-	req.Header.Set("X-FaradAiWire-Agent-Name", "agent-alpha")
 
 	rec := httptest.NewRecorder()
 	proxy.Handler().ServeHTTP(rec, req)

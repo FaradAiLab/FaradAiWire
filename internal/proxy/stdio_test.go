@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
-	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
@@ -48,7 +47,6 @@ func TestStdioProxy_EndToEnd_RequestResponse(t *testing.T) {
 		cmdArgs,
 		false,
 		nil,
-		config.UserContextConfig{FallbackUser: "dev", FallbackRole: "Engineer"},
 		inReader,
 		outWriter,
 		nil,
@@ -122,7 +120,6 @@ func TestStdioProxy_ServerNotificationForwarding(t *testing.T) {
 		cmdArgs,
 		false,
 		nil,
-		config.UserContextConfig{},
 		inReader,
 		outWriter,
 		nil,
@@ -194,7 +191,6 @@ func TestStdioProxy_FilterBlockingRequest(t *testing.T) {
 		cmdArgs,
 		false,
 		pipeline,
-		config.UserContextConfig{},
 		inReader,
 		outWriter,
 		nil,
@@ -253,7 +249,6 @@ func TestStdioProxy_SubprocessCrash_DeadlockElimination(t *testing.T) {
 		cmdArgs,
 		false, // No auto-restart
 		nil,
-		config.UserContextConfig{},
 		inReader, // host stdin remains OPEN!
 		outWriter,
 		nil,
@@ -305,7 +300,6 @@ func TestStdioProxy_ContextCancellation(t *testing.T) {
 		cmdArgs,
 		false,
 		nil,
-		config.UserContextConfig{},
 		inReader,
 		outWriter,
 		nil,
@@ -348,7 +342,6 @@ func TestStdioProxy_Stop(t *testing.T) {
 		cmdArgs,
 		true, // auto-restart true, but Stop() should override it
 		nil,
-		config.UserContextConfig{},
 		inReader,
 		outWriter,
 		nil,
@@ -392,7 +385,6 @@ func TestStdioProxy_SubprocessCrash_AutoRestart(t *testing.T) {
 		cmdArgs,
 		true, // autoRestart enabled!
 		nil,
-		config.UserContextConfig{},
 		inReader,
 		outWriter,
 		nil,
@@ -511,7 +503,6 @@ func TestStdioProxy_StopDuringDial(t *testing.T) {
 		[]string{"-test.run=TestHelperProcess", "--"},
 		true,
 		nil,
-		config.UserContextConfig{},
 		inReader,
 		outWriter,
 		dialer,

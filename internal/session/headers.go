@@ -13,6 +13,11 @@ var IngressHeadersBlocklist = map[string]bool{
 	"cookie":                  true,
 	"x-faradaiwire-signature": true,
 	"x-faradaiwire-timestamp": true,
+	"x-user-id":               true,
+	"x-user-role":             true,
+	"x-signature":             true,
+	"x-timestamp":             true,
+	"x-farad-agent":           true,
 }
 
 // IsBlockedIngressHeader determines whether an HTTP header should be stripped

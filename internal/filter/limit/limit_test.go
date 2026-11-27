@@ -435,6 +435,50 @@ func TestRateLimitFilter_AlwaysEnforced_CannotBypass(t *testing.T) {
 	}
 }
 
+func TestRateLimitAndLoop_APIKeyIDIsolation(t *testing.T) {
+	store := NewInMemoryStateStore(WithDisableBackgroundWorker())
+	defer store.Close()
+
+	rateLimiter := NewRateLimitFilter(true, 1, 1.0, store)
+	loopFilter := NewLoopFilter(true, 1, 60, nil, nil, store)
+
+	// Two distinct API keys sharing the same human Name ("shared-dev-name")
+	ctxKey1 := context.WithValue(context.Background(), types.UserContextKey, &types.UserContext{
+		UserID:   "shared-dev-name",
+		APIKeyID: "faw-key-001",
+	})
+	ctxKey2 := context.WithValue(context.Background(), types.UserContextKey, &types.UserContext{
+		UserID:   "shared-dev-name",
+		APIKeyID: "faw-key-002",
+	})
+
+	req := makeTestToolCallRequest("query_db", map[string]interface{}{"q": "SELECT 1"})
+
+	// Key 1 consumes its 1 rate-limit token and 1 loop slot
+	if _, err := rateLimiter.FilterRequest(ctxKey1, req); err != nil {
+		t.Fatalf("expected key1 rate-limit call 1 allowed, got: %v", err)
+	}
+	if _, err := loopFilter.FilterRequest(ctxKey1, req); err != nil {
+		t.Fatalf("expected key1 loop call 1 allowed, got: %v", err)
+	}
+
+	// Key 1 second calls must be blocked
+	if _, err := rateLimiter.FilterRequest(ctxKey1, req); err == nil || err.Code != mcp.ErrRateLimitExceeded {
+		t.Fatalf("expected key1 rate-limit call 2 blocked, got: %v", err)
+	}
+	if _, err := loopFilter.FilterRequest(ctxKey1, req); err == nil || err.Code != mcp.ErrLoopDetected {
+		t.Fatalf("expected key1 loop call 2 blocked, got: %v", err)
+	}
+
+	// Key 2 with identical UserID ("shared-dev-name") must remain unaffected
+	if _, err := rateLimiter.FilterRequest(ctxKey2, req); err != nil {
+		t.Fatalf("expected key2 rate-limit call 1 isolated and allowed, got: %v", err)
+	}
+	if _, err := loopFilter.FilterRequest(ctxKey2, req); err != nil {
+		t.Fatalf("expected key2 loop call 1 isolated and allowed, got: %v", err)
+	}
+}
+
 func BenchmarkLoopFilter_FilterRequest(b *testing.B) {
 	store := NewInMemoryStateStore(WithDisableBackgroundWorker())
 	defer store.Close()

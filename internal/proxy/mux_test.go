@@ -97,7 +97,8 @@ func TestAgentSessionBridge_ParallelDialAndMultiplexing(t *testing.T) {
 		t.Fatalf("Failed to write config.json: %v", err)
 	}
 
-	proxy := NewSSEProxy(0, s1.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, s1.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil)
+	tok := attachTestBearerAuth(t, proxy)
 	gwServer := newIPv4Server(t, proxy.Handler())
 	defer closeServer(gwServer)
 
@@ -108,6 +109,7 @@ func TestAgentSessionBridge_ParallelDialAndMultiplexing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to build client request: %v", err)
 	}
+	clientReq.Header.Set("Authorization", "Bearer "+tok)
 
 	clientResp, err := http.DefaultClient.Do(clientReq)
 	if err != nil {
@@ -199,7 +201,8 @@ func TestAgentSessionBridge_GracefulDegradation(t *testing.T) {
 	cfgBytes, _ := json.Marshal(agentCfg)
 	_ = os.WriteFile(filepath.Join(agentCurrent, "config.json"), cfgBytes, 0644)
 
-	proxy := NewSSEProxy(0, s1.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, s1.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil)
+	tok := attachTestBearerAuth(t, proxy)
 	gwServer := newIPv4Server(t, proxy.Handler())
 	defer closeServer(gwServer)
 
@@ -207,6 +210,7 @@ func TestAgentSessionBridge_GracefulDegradation(t *testing.T) {
 	defer reqCancel()
 
 	clientReq, _ := http.NewRequestWithContext(reqCtx, "GET", gwServer.URL+"/sse/"+agentName, nil)
+	clientReq.Header.Set("Authorization", "Bearer "+tok)
 	clientResp, err := http.DefaultClient.Do(clientReq)
 	if err != nil {
 		t.Fatalf("Client request failed: %v", err)
@@ -294,12 +298,14 @@ func TestAgentSessionBridge_ToolRoutingWithBridge(t *testing.T) {
 	]`
 	_ = os.WriteFile(filepath.Join(agentCurrent, "tools_manifest.json"), []byte(toolsManifest), 0644)
 
-	proxy := NewSSEProxy(0, s1.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, s1.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil)
+	tok := attachTestBearerAuth(t, proxy)
 	gwServer := newIPv4Server(t, proxy.Handler())
 	defer closeServer(gwServer)
 
 	// 1. Client connects GET /sse/routing-bridge-agent
 	clientReq, _ := http.NewRequest("GET", gwServer.URL+"/sse/"+agentName, nil)
+	clientReq.Header.Set("Authorization", "Bearer "+tok)
 	clientResp, err := http.DefaultClient.Do(clientReq)
 	if err != nil {
 		t.Fatalf("Failed to open SSE: %v", err)
@@ -327,6 +333,7 @@ func TestAgentSessionBridge_ToolRoutingWithBridge(t *testing.T) {
 	postPayload := `{"jsonrpc":"2.0","id":200,"method":"tools/call","params":{"name":"deploy_service","arguments":{"app":"portal"}}}`
 	postReq, _ := http.NewRequest("POST", gwServer.URL+"/sse/"+agentName+"/message?sessionId="+clientSessionID, bytes.NewBufferString(postPayload))
 	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set("Authorization", "Bearer "+tok)
 
 	postResp, err := http.DefaultClient.Do(postReq)
 	if err != nil {
@@ -403,12 +410,14 @@ func TestAgentSessionBridge_JITLazyReconnectOnDegraded(t *testing.T) {
 	]`
 	_ = os.WriteFile(filepath.Join(agentCurrent, "tools_manifest.json"), []byte(toolsManifest), 0644)
 
-	proxy := NewSSEProxy(0, s1.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, s1.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil)
+	tok := attachTestBearerAuth(t, proxy)
 	gwServer := newIPv4Server(t, proxy.Handler())
 	defer closeServer(gwServer)
 
 	// 1. Client connects GET /sse/jit-reconnect-agent (Server 2 is offline -> marked DEGRADED)
 	clientReq, _ := http.NewRequest("GET", gwServer.URL+"/sse/"+agentName, nil)
+	clientReq.Header.Set("Authorization", "Bearer "+tok)
 	clientResp, err := http.DefaultClient.Do(clientReq)
 	if err != nil {
 		t.Fatalf("Failed to open SSE: %v", err)
@@ -466,6 +475,7 @@ func TestAgentSessionBridge_JITLazyReconnectOnDegraded(t *testing.T) {
 	toolBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"deploy_service","arguments":{}}}`)
 	postReq, _ := http.NewRequest("POST", gwServer.URL+"/sse/"+agentName+"/message?sessionId="+clientSessionID, bytes.NewBuffer(toolBody))
 	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set("Authorization", "Bearer "+tok)
 
 	postResp, err := http.DefaultClient.Do(postReq)
 	if err != nil {
@@ -554,12 +564,14 @@ func TestDualTransport_StatefulSSE_vs_StatelessHTTP(t *testing.T) {
 	pipeline := filter.NewPipeline(nil)
 	pipeline.SetFilters([]filter.Filter{dlpFilter})
 
-	proxy := NewSSEProxy(0, mcpServer.URL, pipeline, agent.NewFSRepository(agentDir, ""), nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, mcpServer.URL, pipeline, agent.NewFSRepository(agentDir, ""), nil)
+	tok := attachTestBearerAuth(t, proxy)
 	gwServer := newIPv4Server(t, proxy.Handler())
 	defer closeServer(gwServer)
 
 	// 1. STATEFUL SSE TRANSPORT TEST
 	sseReq, _ := http.NewRequest("GET", gwServer.URL+"/sse/"+agentName, nil)
+	sseReq.Header.Set("Authorization", "Bearer "+tok)
 	sseResp, err := http.DefaultClient.Do(sseReq)
 	if err != nil {
 		t.Fatalf("Failed to open SSE connection: %v", err)
@@ -586,6 +598,7 @@ func TestDualTransport_StatefulSSE_vs_StatelessHTTP(t *testing.T) {
 	postPayload := `{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"query_users","arguments":{}}}`
 	postReq, _ := http.NewRequest("POST", gwServer.URL+"/sse/"+agentName+"/message?sessionId="+clientSessionID, bytes.NewBufferString(postPayload))
 	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set("Authorization", "Bearer "+tok)
 	postResp, err := http.DefaultClient.Do(postReq)
 	if err != nil {
 		t.Fatalf("Stateful POST failed: %v", err)
@@ -600,6 +613,7 @@ func TestDualTransport_StatefulSSE_vs_StatelessHTTP(t *testing.T) {
 	statelessPayload := `{"jsonrpc":"2.0","id":55,"method":"tools/call","params":{"name":"query_users","arguments":{}}}`
 	statelessReq, _ := http.NewRequest("POST", gwServer.URL+"/mcp/"+agentName, bytes.NewBufferString(statelessPayload))
 	statelessReq.Header.Set("Content-Type", "application/json")
+	statelessReq.Header.Set("Authorization", "Bearer "+tok)
 	statelessResp, err := http.DefaultClient.Do(statelessReq)
 	if err != nil {
 		t.Fatalf("Stateless POST failed: %v", err)
@@ -677,13 +691,15 @@ func TestAgentSessionBridge_LifecycleCleanupAndGoroutineLeak(t *testing.T) {
 	cfgBytes, _ := json.Marshal(agentCfg)
 	_ = os.WriteFile(filepath.Join(agentCurrent, "config.json"), cfgBytes, 0644)
 
-	proxy := NewSSEProxy(0, u1.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, u1.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil)
+	tok := attachTestBearerAuth(t, proxy)
 	gwServer := newIPv4Server(t, proxy.Handler())
 	defer closeServer(gwServer)
 
 	// 1. Client connects to Gateway
 	clientCtx, clientCancel := context.WithCancel(context.Background())
 	req, _ := http.NewRequestWithContext(clientCtx, "GET", gwServer.URL+"/sse/"+agentName, nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Failed to open SSE connection: %v", err)
@@ -798,7 +814,7 @@ func TestStreamableHTTP_IngressRouting(t *testing.T) {
 		t.Fatalf("Failed to generate test key: %v", err)
 	}
 
-	proxy := NewSSEProxy(0, upstreamServer.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, upstreamServer.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil)
 	proxy.SetKeyValidator(keyStore)
 	gwServer := newIPv4Server(t, proxy.Handler())
 	defer closeServer(gwServer)

@@ -347,17 +347,27 @@ func (r *FSRepository) ResolveToolProtocol(agentName, toolName string) (*ToolTar
 
 // ResolveTargetURLFromPath resolves the target MCP URL based on the request path and configured agent routing mode.
 func (r *FSRepository) ResolveTargetURLFromPath(path string, defaultTargetURL string) (string, error) {
-	p := strings.TrimPrefix(path, "/sse")
-	p = strings.TrimPrefix(p, "/mcp")
-	p = strings.Trim(p, "/")
-	p = strings.TrimSuffix(p, "/message")
-	p = strings.Trim(p, "/")
-
-	if p == "" {
+	trimmed := strings.TrimRight(path, "/")
+	var rest string
+	switch {
+	case trimmed == "", trimmed == "/sse", trimmed == "/mcp", trimmed == "/message":
+		return defaultTargetURL, nil
+	case strings.HasPrefix(trimmed, "/sse/"):
+		rest = strings.TrimPrefix(trimmed, "/sse/")
+	case strings.HasPrefix(trimmed, "/mcp/"):
+		rest = strings.TrimPrefix(trimmed, "/mcp/")
+	default:
 		return defaultTargetURL, nil
 	}
 
-	parts := strings.Split(p, "/")
+	parts := strings.Split(rest, "/")
+	if len(parts) >= 2 && parts[len(parts)-1] == "message" {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) == 0 || parts[0] == "" {
+		return defaultTargetURL, nil
+	}
+
 	if len(parts) == 1 {
 		agentName := parts[0]
 		agentCfg, err := r.GetAgentConfig(agentName)

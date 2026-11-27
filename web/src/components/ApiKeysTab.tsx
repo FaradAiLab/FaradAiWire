@@ -15,7 +15,7 @@ import {
   Lock,
   Terminal,
 } from 'lucide-react'
-import { ApiKeyItem, CreatedApiKey, GatewayStatus, isAdminRole } from '../types'
+import { AgentItem, ApiKeyItem, CreatedApiKey, GatewayStatus, isAdminRole } from '../types'
 import { DEFAULT_INGRESS_PORT, normalizeBrowserIngressHost } from '../constants'
 import { api } from '../api'
 import { Badge } from './ui/Badge'
@@ -23,7 +23,8 @@ import { ClientConfigModal } from './ClientConfigModal'
 
 export const ApiKeysTab: React.FC = () => {
   const [keys, setKeys] = useState<ApiKeyItem[]>([])
-  const [agentNames, setAgentNames] = useState<string[]>([])
+  const [agents, setAgents] = useState<AgentItem[]>([])
+  const agentNames = useMemo(() => agents.map((a) => a.name), [agents])
   const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -63,7 +64,7 @@ export const ApiKeysTab: React.FC = () => {
         api.getStatus().catch(() => null),
       ])
       setKeys(keysRes.keys || [])
-      setAgentNames((agentsRes.agents || []).map((a) => a.name))
+      setAgents(agentsRes.agents || [])
       if (statusRes) {
         setGatewayStatus(statusRes)
       }
@@ -660,6 +661,7 @@ export const ApiKeysTab: React.FC = () => {
         keyName={clientModal.keyName}
         agentName={clientModal.agentName}
         availableAgents={agentNames}
+        availableProfiles={agents}
         ingressPort={ingressPort}
         ingressHost={ingressHost}
         allowStdio={allowStdio}

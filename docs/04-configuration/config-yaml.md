@@ -36,17 +36,6 @@ security:
     block_private_ips: true        # Disallow RFC 1918 and loopback upstream destinations
     allowed_domains: []            # Explicit whitelist of permitted upstream remote domains
 
-# User Identity and Context Provenance
-user_context:
-  role_header: "X-User-Role"       # Header mapping to user role
-  user_header: "X-User-ID"         # Header mapping to unique user identity
-  fallback_role: "Customer"        # Default role if header is missing
-  fallback_user: "guest-customer"  # Default user identity if header is missing
-  trusted_proxies:
-    - "127.0.0.1/32"
-    - "10.0.0.0/8"
-  context_hmac_secret: "${FARADAI_WIRE_HMAC_SECRET}" # Secret for anti-spoofing verification
-
 # Security Filter Pipelines
 filters:
   # Assistant prefill hijack prevention

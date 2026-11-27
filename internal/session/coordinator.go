@@ -552,12 +552,17 @@ func (c *InboundCoordinator) ExecuteMessage(
 			}
 		}
 	} else if reqPath := strings.TrimRight(r.URL.Path, "/"); (strings.HasPrefix(reqPath, "/sse/") || strings.HasPrefix(reqPath, "/mcp/")) && agentRepo != nil {
-		basePath := reqPath
+		var rest string
 		if strings.HasPrefix(reqPath, "/mcp/") {
-			basePath = "/sse/" + strings.TrimPrefix(reqPath, "/mcp/")
+			rest = strings.TrimPrefix(reqPath, "/mcp/")
+		} else {
+			rest = strings.TrimPrefix(reqPath, "/sse/")
 		}
-		basePath = strings.TrimSuffix(basePath, "/message")
-		basePath = strings.TrimSuffix(basePath, "/mcp")
+		segs := strings.Split(rest, "/")
+		if len(segs) >= 2 && segs[len(segs)-1] == "message" {
+			segs = segs[:len(segs)-1]
+		}
+		basePath := "/sse/" + strings.Join(segs, "/")
 		if resolved, err := agentRepo.ResolveTargetURLFromPath(basePath, defaultTargetURL); err == nil && resolved != "" {
 			targetURL = resolved
 		}

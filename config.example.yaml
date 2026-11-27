@@ -18,17 +18,6 @@ security:
     block_private_ips: false        # Allow local/Docker bridge MCPs; cloud metadata (169.254.169.254) stays blocked
     allowed_domains: []
 
-# User Identity and Context Provenance
-user_context:
-  role_header: "X-User-Role"
-  user_header: "X-User-ID"
-  fallback_role: "Customer"
-  fallback_user: "guest-customer"
-  trusted_proxies:
-    - "127.0.0.1/32"
-    - "10.0.0.0/8"
-  context_hmac_secret: "${FARADAI_WIRE_HMAC_SECRET}" # Optional HMAC secret for anti-spoofing verification
-
 # Gateway Security Filter Pipelines
 filters:
   # Block assistant prefill prompt injection (sockpuppeting)

@@ -1,6 +1,7 @@
 package limit
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,8 +14,8 @@ import (
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
-	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 	"github.com/FaradAiLab/FaradAiWire/pkg/filter"
+	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
 
 // Ensure filters implement filter.SecurityFilter, filter.RequestFilter, and io.Closer.
@@ -107,17 +108,17 @@ func buildTrackingKey(ctx context.Context, toolName string) string {
 		agentName = "global"
 	}
 
-	userID := "anonymous"
+	callerID := "anonymous"
 	if uVal := ctx.Value(types.UserContextKey); uVal != nil {
-		if u, ok := uVal.(*types.UserContext); ok && u.UserID != "" {
-			userID = u.UserID
+		if u, ok := uVal.(*types.UserContext); ok && u != nil {
+			callerID = cmp.Or(u.APIKeyID, u.UserID, "anonymous")
 		}
 	}
 
 	if toolName != "" {
-		return fmt.Sprintf("agent:%s:user:%s:tool:%s", agentName, userID, toolName)
+		return fmt.Sprintf("agent:%s:user:%s:tool:%s", agentName, callerID, toolName)
 	}
-	return fmt.Sprintf("agent:%s:user:%s", agentName, userID)
+	return fmt.Sprintf("agent:%s:user:%s", agentName, callerID)
 }
 
 // FilterRequest evaluates whether the incoming tool call violates loop constraints.

@@ -42,7 +42,7 @@ Inspect how client connections are intercepted and mapped to user context header
 * **[internal/proxy/stdio.go](internal/proxy/stdio.go)**
   - Redirection logic for command-line spawned stdio sub-processes.
 * **[internal/proxy/sse.go](internal/proxy/sse.go)**
-  - SSE Reverse Proxy. Reads user identification headers (`X-User-ID`, `X-User-Role`), maps asynchronous request-response IDs over HTTP streams, and binds proper user contexts.
+  - SSE & Streamable HTTP Reverse Proxy. Enforces fail-closed `Authorization: Bearer` authentication, canonical URL path routing (`/sse/{profile}`, `/mcp/{profile}`, `/sse/{profile}/{tool_source}`, `/mcp/{profile}/{tool_source}`), and asynchronous request-response correlation over HTTP streams.
 
 ## 5. Integration Suite & Testing
 Review the automated test suite and benchmarks to see how all the filters interact.

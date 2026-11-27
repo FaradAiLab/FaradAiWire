@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
-	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/guard"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
@@ -26,7 +25,6 @@ type StdioProxy struct {
 	cmdArgs     []string
 	autoRestart bool
 	pipeline    *filter.Pipeline
-	userCtxCfg  config.UserContextConfig
 	dialer      session.Dialer
 
 	// Customizable I/O streams (defaults to os.Stdin, os.Stdout)
@@ -40,8 +38,8 @@ type StdioProxy struct {
 }
 
 // NewStdioProxy initializes a new StdioProxy using default OS stdio streams and StdioDialer.
-func NewStdioProxy(cmdPath string, cmdArgs []string, autoRestart bool, pipeline *filter.Pipeline, userCtxCfg config.UserContextConfig) *StdioProxy {
-	return NewStdioProxyWithIO(cmdPath, cmdArgs, autoRestart, pipeline, userCtxCfg, os.Stdin, os.Stdout, session.NewStdioDialer())
+func NewStdioProxy(cmdPath string, cmdArgs []string, autoRestart bool, pipeline *filter.Pipeline) *StdioProxy {
+	return NewStdioProxyWithIO(cmdPath, cmdArgs, autoRestart, pipeline, os.Stdin, os.Stdout, session.NewStdioDialer())
 }
 
 // NewStdioProxyWithIO initializes a StdioProxy with customizable I/O streams and dialer for testing.
@@ -50,7 +48,6 @@ func NewStdioProxyWithIO(
 	cmdArgs []string,
 	autoRestart bool,
 	pipeline *filter.Pipeline,
-	userCtxCfg config.UserContextConfig,
 	in io.Reader,
 	out io.Writer,
 	dialer session.Dialer,
@@ -69,7 +66,6 @@ func NewStdioProxyWithIO(
 		cmdArgs:     cmdArgs,
 		autoRestart: autoRestart,
 		pipeline:    pipeline,
-		userCtxCfg:  userCtxCfg,
 		in:          in,
 		out:         out,
 		dialer:      dialer,
@@ -156,21 +152,12 @@ func (s *StdioProxy) runOnce(ctx context.Context, linesCh <-chan []byte) error {
 	}
 	s.mu.Unlock()
 
-	fallbackUser := s.userCtxCfg.FallbackUser
-	if fallbackUser == "" {
-		fallbackUser = "local-developer"
-	}
-	fallbackRole := s.userCtxCfg.FallbackRole
-	if fallbackRole == "" {
-		fallbackRole = "Developer"
-	}
-
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()
 
 	userCtx := context.WithValue(sessionCtx, filter.UserContextKey, &filter.UserContext{
-		UserID: fallbackUser,
-		Role:   fallbackRole,
+		UserID: "local-developer",
+		Role:   "Developer",
 	})
 
 	proto := agent.ProtocolConfig{

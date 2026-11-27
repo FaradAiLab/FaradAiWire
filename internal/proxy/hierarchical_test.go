@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
-	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
 )
@@ -170,13 +169,15 @@ func TestHierarchicalGatewayMultiplexer(t *testing.T) {
 
 	// 3. Initialize Gateway with agent repository pointing to tmpDir
 	agentRepo := agent.NewFSRepository(tmpDir)
-	proxy := NewSSEProxy(0, corpServer.URL, filter.NewPipeline(nil), agentRepo, nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, corpServer.URL, filter.NewPipeline(nil), agentRepo, nil)
+	tok := attachTestBearerAuth(t, proxy, "default")
 
 	gwServer := newIPv4Server(t, proxy.Handler())
 	defer closeServer(gwServer)
 
-	// Phase 1: Client connects to single unified gateway endpoint: http://localhost:8090/sse (Acceptance Criteria 1)
+	// Phase 1: Client connects to single unified gateway endpoint with scoped Bearer token
 	sseReq, _ := http.NewRequest(http.MethodGet, gwServer.URL+"/sse", nil)
+	sseReq.Header.Set("Authorization", "Bearer "+tok)
 	sseResp, err := http.DefaultClient.Do(sseReq)
 	if err != nil {
 		t.Fatalf("Failed to connect to unified /sse endpoint: %v", err)
@@ -220,7 +221,10 @@ func TestHierarchicalGatewayMultiplexer(t *testing.T) {
 		"method":  "tools/list",
 	}
 	listReqBytes, _ := json.Marshal(listReq)
-	postResp, err := http.Post(endpointURL, "application/json", bytes.NewBuffer(listReqBytes))
+	listHTTPReq, _ := http.NewRequest(http.MethodPost, endpointURL, bytes.NewBuffer(listReqBytes))
+	listHTTPReq.Header.Set("Content-Type", "application/json")
+	listHTTPReq.Header.Set("Authorization", "Bearer "+tok)
+	postResp, err := http.DefaultClient.Do(listHTTPReq)
 	if err != nil {
 		t.Fatalf("Failed to send tools/list: %v", err)
 	}
@@ -267,7 +271,10 @@ func TestHierarchicalGatewayMultiplexer(t *testing.T) {
 		},
 	}
 	localCallBytes, _ := json.Marshal(localCallReq)
-	localResp, err := http.Post(endpointURL, "application/json", bytes.NewBuffer(localCallBytes))
+	localHTTPReq, _ := http.NewRequest(http.MethodPost, endpointURL, bytes.NewBuffer(localCallBytes))
+	localHTTPReq.Header.Set("Content-Type", "application/json")
+	localHTTPReq.Header.Set("Authorization", "Bearer "+tok)
+	localResp, err := http.DefaultClient.Do(localHTTPReq)
 	if err != nil {
 		t.Fatalf("Failed to call local tool: %v", err)
 	}
@@ -310,7 +317,10 @@ func TestHierarchicalGatewayMultiplexer(t *testing.T) {
 		},
 	}
 	corpCallBytes, _ := json.Marshal(corpCallReq)
-	corpCallResp, err := http.Post(endpointURL, "application/json", bytes.NewBuffer(corpCallBytes))
+	corpHTTPReq, _ := http.NewRequest(http.MethodPost, endpointURL, bytes.NewBuffer(corpCallBytes))
+	corpHTTPReq.Header.Set("Content-Type", "application/json")
+	corpHTTPReq.Header.Set("Authorization", "Bearer "+tok)
+	corpCallResp, err := http.DefaultClient.Do(corpHTTPReq)
 	if err != nil {
 		t.Fatalf("Failed to call corporate tool: %v", err)
 	}
@@ -360,7 +370,10 @@ func TestHierarchicalGatewayMultiplexer(t *testing.T) {
 		},
 	}
 	failCallBytes, _ := json.Marshal(failCallReq)
-	failResp, err := http.Post(endpointURL, "application/json", bytes.NewBuffer(failCallBytes))
+	failHTTPReq, _ := http.NewRequest(http.MethodPost, endpointURL, bytes.NewBuffer(failCallBytes))
+	failHTTPReq.Header.Set("Content-Type", "application/json")
+	failHTTPReq.Header.Set("Authorization", "Bearer "+tok)
+	failResp, err := http.DefaultClient.Do(failHTTPReq)
 	if err != nil {
 		t.Fatalf("Failed to execute request during upstream outage: %v", err)
 	}
@@ -387,7 +400,10 @@ func TestHierarchicalGatewayMultiplexer(t *testing.T) {
 	}
 
 	// Invariant: Gateway daemon did not crash, local tools still function properly
-	localRetryResp, err := http.Post(endpointURL, "application/json", bytes.NewBuffer(localCallBytes))
+	retryHTTPReq, _ := http.NewRequest(http.MethodPost, endpointURL, bytes.NewBuffer(localCallBytes))
+	retryHTTPReq.Header.Set("Content-Type", "application/json")
+	retryHTTPReq.Header.Set("Authorization", "Bearer "+tok)
+	localRetryResp, err := http.DefaultClient.Do(retryHTTPReq)
 	if err != nil {
 		t.Fatalf("Local tool execution failed after upstream outage: %v", err)
 	}

@@ -26,8 +26,7 @@ func TestSSEProxy_IngressRateLimiting(t *testing.T) {
 	}
 
 	pipeline := filter.NewPipeline(nil)
-	userCtxCfg := config.UserContextConfig{}
-	proxy := NewSSEProxy(0, "http://127.0.0.1:9999", pipeline, nil, nil, userCtxCfg, secCfg)
+	proxy := NewSSEProxy(0, "http://127.0.0.1:9999", pipeline, nil, nil, secCfg)
 	handler := proxy.Handler()
 
 	clientIP := "203.0.113.10:54321"
@@ -89,8 +88,7 @@ func TestSSEProxy_IngressRateLimiting_SpoofedXFFIgnored(t *testing.T) {
 	}
 
 	pipeline := filter.NewPipeline(nil)
-	userCtxCfg := config.UserContextConfig{}
-	proxy := NewSSEProxy(0, "http://127.0.0.1:9999", pipeline, nil, nil, userCtxCfg, secCfg)
+	proxy := NewSSEProxy(0, "http://127.0.0.1:9999", pipeline, nil, nil, secCfg)
 	handler := proxy.Handler()
 
 	socketIP := "198.51.100.50:54321"
@@ -131,40 +129,32 @@ func TestSSEProxy_IngressRateLimiting_SpoofedXFFIgnored(t *testing.T) {
 	}
 }
 
-func TestSSEProxy_ProfileHeader(t *testing.T) {
-	// 1. Unit tests for extractAgentName precedence
-	// Case A: Canonical X-FaradAiWire-Profile header
-	reqA := httptest.NewRequest(http.MethodGet, "/sse", nil)
-	reqA.Header.Set("X-FaradAiWire-Profile", "security-auditor")
-	reqA.Header.Set("X-FaradAiWire-Agent-Name", "fallback-agent")
-	if got := extractAgentName(reqA); got != "security-auditor" {
-		t.Fatalf("expected X-FaradAiWire-Profile header to take highest precedence, got %q", got)
+func TestSSEProxy_CanonicalPathRouting_And_LegacyQueryRejection(t *testing.T) {
+	// 1. Unit tests for parseIngressPath
+	cases := []struct {
+		path           string
+		wantTransport  string
+		wantProfile    string
+		wantToolSource string
+		wantIsMessage  bool
+	}{
+		{path: "/sse", wantTransport: "sse"},
+		{path: "/sse/security-auditor", wantTransport: "sse", wantProfile: "security-auditor"},
+		{path: "/sse/path-profile/message", wantTransport: "sse", wantProfile: "path-profile", wantIsMessage: true},
+		{path: "/sse/dir-profile/github", wantTransport: "sse", wantProfile: "dir-profile", wantToolSource: "github"},
+		{path: "/sse/dir-profile/github/message", wantTransport: "sse", wantProfile: "dir-profile", wantToolSource: "github", wantIsMessage: true},
+		{path: "/mcp", wantTransport: "mcp"},
+		{path: "/mcp/mcp", wantTransport: "mcp", wantProfile: "mcp"},
+		{path: "/mcp/message", wantTransport: "mcp", wantProfile: "message"},
+		{path: "/mcp/dir-profile/github", wantTransport: "mcp", wantProfile: "dir-profile", wantToolSource: "github"},
+		{path: "/message", wantTransport: "message", wantIsMessage: true},
 	}
-
-	// Case B: Query parameter ?profile=
-	reqB := httptest.NewRequest(http.MethodGet, "/sse?profile=code-reviewer", nil)
-	reqB.Header.Set("X-FaradAiWire-Agent-Name", "fallback-agent")
-	if got := extractAgentName(reqB); got != "code-reviewer" {
-		t.Fatalf("expected ?profile= query param to take precedence over legacy agent header, got %q", got)
-	}
-
-	// Case C: Legacy X-FaradAiWire-Agent-Name header fallback
-	reqC := httptest.NewRequest(http.MethodGet, "/sse", nil)
-	reqC.Header.Set("X-FaradAiWire-Agent-Name", "legacy-agent")
-	if got := extractAgentName(reqC); got != "legacy-agent" {
-		t.Fatalf("expected fallback to X-FaradAiWire-Agent-Name, got %q", got)
-	}
-
-	// Case D: Legacy query param ?agent=
-	reqD := httptest.NewRequest(http.MethodGet, "/sse?agent=legacy-query-agent", nil)
-	if got := extractAgentName(reqD); got != "legacy-query-agent" {
-		t.Fatalf("expected fallback to ?agent= query param, got %q", got)
-	}
-
-	// Case E: Path fallback /sse/{name}
-	reqE := httptest.NewRequest(http.MethodGet, "/sse/path-profile/message", nil)
-	if got := extractAgentName(reqE); got != "path-profile" {
-		t.Fatalf("expected fallback to path agent extraction, got %q", got)
+	for _, tc := range cases {
+		tr, prof, ts, isMsg := parseIngressPath(tc.path)
+		if tr != tc.wantTransport || prof != tc.wantProfile || ts != tc.wantToolSource || isMsg != tc.wantIsMessage {
+			t.Fatalf("parseIngressPath(%q) = (%q, %q, %q, %v), want (%q, %q, %q, %v)",
+				tc.path, tr, prof, ts, isMsg, tc.wantTransport, tc.wantProfile, tc.wantToolSource, tc.wantIsMessage)
+		}
 	}
 
 	// 2. Integration test with SSEProxy routing and checkAggregatedAgent
@@ -185,42 +175,42 @@ func TestSSEProxy_ProfileHeader(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(agentDir, "dev-profile", "current", "config.json"), devBytes, 0644)
 	_ = os.WriteFile(filepath.Join(agentDir, "prod-profile", "current", "config.json"), prodBytes, 0644)
 
-	proxy := NewSSEProxy(0, "", nil, agent.NewFSRepository(agentDir, ""), nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, "", nil, agent.NewFSRepository(agentDir, ""), nil)
 
-	// Request to /sse with X-FaradAiWire-Profile header
-	reqHeader := httptest.NewRequest(http.MethodGet, "/sse", nil)
-	reqHeader.Header.Set("X-FaradAiWire-Profile", "dev-profile")
-	resolved, isAgg, err := proxy.checkAggregatedAgent(reqHeader)
+	// Canonical path /sse/dev-profile succeeds
+	reqPath := httptest.NewRequest(http.MethodGet, "/sse/dev-profile", nil)
+	resolved, isAgg, err := proxy.checkAggregatedAgent(reqPath)
 	if err != nil {
-		t.Fatalf("expected checkAggregatedAgent to succeed with X-FaradAiWire-Profile, got %v", err)
+		t.Fatalf("expected checkAggregatedAgent to succeed for /sse/dev-profile, got %v", err)
 	}
 	if !isAgg || resolved != "dev-profile" {
 		t.Fatalf("expected resolved agent 'dev-profile', got %q (isAgg=%v)", resolved, isAgg)
 	}
 
-	// Request to /sse?profile=prod-profile
-	reqQuery := httptest.NewRequest(http.MethodGet, "/sse?profile=prod-profile", nil)
-	resolvedQ, isAggQ, errQ := proxy.checkAggregatedAgent(reqQuery)
-	if errQ != nil {
-		t.Fatalf("expected checkAggregatedAgent to succeed with ?profile=, got %v", errQ)
-	}
-	if !isAggQ || resolvedQ != "prod-profile" {
-		t.Fatalf("expected resolved agent 'prod-profile', got %q (isAgg=%v)", resolvedQ, isAggQ)
+	// Legacy X-FaradAiWire-Profile header on root /sse is ignored -> wildcard fails with PROFILE_REQUIRED
+	reqHeader := httptest.NewRequest(http.MethodGet, "/sse", nil)
+	reqHeader.Header.Set("X-FaradAiWire-Profile", "dev-profile")
+	if _, _, errHdr := proxy.checkAggregatedAgent(reqHeader); errHdr == nil || !strings.Contains(errHdr.Error(), "PROFILE_REQUIRED") {
+		t.Fatalf("expected PROFILE_REQUIRED when only X-FaradAiWire-Profile header is passed on /sse, got %v", errHdr)
 	}
 
-	// Fail-closed authorization: API key scoped to dev-profile cannot access prod-profile via header
-	reqForbidden := httptest.NewRequest(http.MethodGet, "/sse", nil)
-	reqForbidden.Header.Set("X-FaradAiWire-Profile", "prod-profile")
+	// Legacy ?profile= and ?agent= query params are rejected by validateNoLegacyRoutingQuery
+	for _, qPath := range []string{"/sse?profile=prod-profile", "/mcp?agent=prod-profile"} {
+		reqQ := httptest.NewRequest(http.MethodGet, qPath, nil)
+		if qErr := validateNoLegacyRoutingQuery(reqQ); qErr == nil || !strings.Contains(qErr.Error(), "INVALID_ROUTING_PARAMETER") {
+			t.Fatalf("expected INVALID_ROUTING_PARAMETER for %s, got %v", qPath, qErr)
+		}
+	}
+
+	// Fail-closed authorization: API key scoped to dev-profile cannot access /sse/prod-profile
+	reqForbidden := httptest.NewRequest(http.MethodGet, "/sse/prod-profile", nil)
 	reqForbidden = reqForbidden.WithContext(context.WithValue(reqForbidden.Context(), filter.UserContextKey, &filter.UserContext{
 		UserID:    "alice",
 		Role:      "Developer",
 		AgentName: "dev-profile",
 	}))
 	_, _, errForbidden := proxy.checkAggregatedAgent(reqForbidden)
-	if errForbidden == nil {
-		t.Fatalf("expected AGENT_ACCESS_DENIED when key scoped to dev-profile requests prod-profile")
-	}
-	if !strings.Contains(errForbidden.Error(), "AGENT_ACCESS_DENIED") {
-		t.Fatalf("expected AGENT_ACCESS_DENIED, got: %v", errForbidden)
+	if errForbidden == nil || !strings.Contains(errForbidden.Error(), "AGENT_ACCESS_DENIED") {
+		t.Fatalf("expected AGENT_ACCESS_DENIED when key scoped to dev-profile requests /sse/prod-profile, got %v", errForbidden)
 	}
 }

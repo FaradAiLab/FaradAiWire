@@ -45,6 +45,7 @@ const (
 type Pipeline struct {
 	mu                      sync.RWMutex
 	filters                 []NamedFilter
+	externalFilters         []NamedFilter
 	router                  *adaptive.Router
 	logger                  AuditLogger
 	debugRetainUnmaskedDiff bool
@@ -136,25 +137,65 @@ func sortFilters(filters []NamedFilter) []NamedFilter {
 }
 
 // RegisterFilter adds a security filter to the pipeline, maintaining strict ascending Order() precedence.
-// Dogfooded by Core built-in filters and used by enterprise extensions (ADR-0022 / ARCH-027).
+// Dogfooded by Core built-in filters and dynamically toggled runtime filters.
 func (p *Pipeline) RegisterFilter(f SecurityFilter) {
+	if f == nil {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	targetOrder := f.Order()
-	insertIdx := len(p.filters)
-	for i, existing := range p.filters {
-		if getFilterOrder(existing) > targetOrder {
-			insertIdx = i
-			break
+	p.filters = upsertSortedFilter(p.filters, f)
+}
+
+// RegisterPinnedFilter adds an external security filter (such as FAWEE's OPAFilter) and pins it
+// so it survives subsequent Swap calls during configuration reloads.
+func (p *Pipeline) RegisterPinnedFilter(f SecurityFilter) {
+	if f == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.externalFilters = upsertExternalFilter(p.externalFilters, f)
+	p.filters = upsertSortedFilter(p.filters, f)
+}
+
+func sameFilterIdentity(a, b NamedFilter) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	nameA := a.Name()
+	return nameA != "" && nameA == b.Name()
+}
+
+func upsertExternalFilter(list []NamedFilter, f NamedFilter) []NamedFilter {
+	for i, existing := range list {
+		if sameFilterIdentity(existing, f) {
+			next := make([]NamedFilter, len(list))
+			copy(next, list)
+			next[i] = f
+			return next
 		}
 	}
+	next := make([]NamedFilter, len(list)+1)
+	copy(next, list)
+	next[len(list)] = f
+	return next
+}
 
-	next := make([]NamedFilter, len(p.filters)+1)
-	copy(next[:insertIdx], p.filters[:insertIdx])
-	next[insertIdx] = f
-	copy(next[insertIdx+1:], p.filters[insertIdx:])
-	p.filters = next
+func upsertSortedFilter(list []NamedFilter, f NamedFilter) []NamedFilter {
+	filtered := make([]NamedFilter, 0, len(list)+1)
+	for _, existing := range list {
+		if !sameFilterIdentity(existing, f) {
+			filtered = append(filtered, existing)
+		}
+	}
+	filtered = append(filtered, f)
+	return sortFilters(filtered)
 }
 
 // SetFilters updates the active filters thread-safely, maintaining Order() sorting precedence.
@@ -165,17 +206,32 @@ func (p *Pipeline) SetFilters(filters []NamedFilter) {
 }
 
 // Swap atomically updates the active filters and adaptive router under a single write lock,
-// and gracefully closes any displaced filters implementing io.Closer.
+// preserving externally registered pinned filters, and gracefully closes any displaced filters implementing io.Closer.
 func (p *Pipeline) Swap(filters []NamedFilter, router *adaptive.Router) {
 	p.mu.Lock()
 	oldFilters := p.filters
-	p.filters = sortFilters(filters)
+	merged := make([]NamedFilter, 0, len(filters)+len(p.externalFilters))
+	merged = append(merged, filters...)
+	for _, ext := range p.externalFilters {
+		present := false
+		for _, newF := range merged {
+			if sameFilterIdentity(ext, newF) {
+				present = true
+				break
+			}
+		}
+		if !present {
+			merged = append(merged, ext)
+		}
+	}
+	sortedMerged := sortFilters(merged)
+	p.filters = sortedMerged
 	p.router = router
 	p.mu.Unlock()
 
 	for _, oldF := range oldFilters {
 		retained := false
-		for _, newF := range filters {
+		for _, newF := range sortedMerged {
 			if oldF == newF {
 				retained = true
 				break

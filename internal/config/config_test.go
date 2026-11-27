@@ -210,9 +210,6 @@ filters:
 	if !cfg.HotReload {
 		t.Errorf("expected hot_reload true, got false")
 	}
-	if cfg.UserContext.FallbackRole != "Developer" {
-		t.Errorf("expected fallback_role Developer, got %s", cfg.UserContext.FallbackRole)
-	}
 	if !cfg.Filters.PrefillBlock.Enabled {
 		t.Errorf("expected prefill_block enabled true, got false")
 	}

@@ -13,6 +13,11 @@ func TestSanitizeUpstreamHeaders(t *testing.T) {
 	inbound.Set("X-FaradAiWire-Signature", "t=1700000000,v1=abcdef")
 	inbound.Set("X-FaradAiWire-Timestamp", "1700000000")
 	inbound.Set("X-FaradAiWire-User-Role", "Admin")
+	inbound.Set("X-User-ID", "spoofed-user")
+	inbound.Set("X-User-Role", "Admin")
+	inbound.Set("X-Signature", "deadbeef")
+	inbound.Set("X-Timestamp", "1700000000")
+	inbound.Set("X-Farad-Agent", "legacy-agent")
 	inbound.Set("Connection", "keep-alive")
 	inbound.Set("Upgrade", "websocket")
 	inbound.Set("Accept-Encoding", "gzip, deflate")
@@ -38,6 +43,11 @@ func TestSanitizeUpstreamHeaders(t *testing.T) {
 		}
 		if sanitized.Get("X-FaradAiWire-User-Role") != "" {
 			t.Errorf("expected X-FaradAiWire-User-Role to be stripped")
+		}
+		for _, legacy := range []string{"X-User-ID", "X-User-Role", "X-Signature", "X-Timestamp", "X-Farad-Agent"} {
+			if got := sanitized.Get(legacy); got != "" {
+				t.Errorf("expected legacy header %s to be stripped, got %q", legacy, got)
+			}
 		}
 		if sanitized.Get("Connection") != "" {
 			t.Errorf("expected Connection hop-by-hop header to be stripped")

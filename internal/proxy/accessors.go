@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -59,7 +60,7 @@ func (s *SSEProxy) SetKeyValidator(v auth.KeyValidator) {
 	if s.contextExtractor != nil {
 		s.contextExtractor.SetKeyValidator(v)
 	} else {
-		s.contextExtractor = NewContextExtractor(s.userCtxCfg, v)
+		s.contextExtractor = NewContextExtractor(v)
 	}
 }
 
@@ -129,7 +130,7 @@ func (s *SSEProxy) resolveTargetURL(r *http.Request) (string, error) {
 }
 
 const (
-	unauthorizedPayload         = `{"error":"UNAUTHORIZED","message":"Missing, invalid, or revoked API key. Provide Authorization: Bearer <key> or X-API-Key."}`
+	unauthorizedPayload         = `{"error":"UNAUTHORIZED","message":"Missing, invalid, or revoked API key. Provide Authorization: Bearer <key>."}`
 	forbiddenIngressRolePayload = `{"error":"INGRESS_ROLE_REQUIRED","message":"Forbidden: admin keys are restricted to the Admin Console; use an Agent ingress key"}`
 )
 
@@ -234,9 +235,9 @@ func (s *SSEProxy) authenticate(r *http.Request) (*filter.UserContext, error) {
 		return extractor.Authenticate(r)
 	}
 	if keyVal != nil {
-		return NewContextExtractor(s.userCtxCfg, keyVal).Authenticate(r)
+		return NewContextExtractor(keyVal).Authenticate(r)
 	}
-	return NewContextExtractor(s.userCtxCfg).Authenticate(r)
+	return NewContextExtractor().Authenticate(r)
 }
 
 func (s *SSEProxy) extractUserContext(r *http.Request) *filter.UserContext {
@@ -248,10 +249,7 @@ func (s *SSEProxy) extractUserContext(r *http.Request) *filter.UserContext {
 }
 
 func (s *SSEProxy) checkAggregatedAgent(r *http.Request) (string, bool, error) {
-	p := strings.TrimPrefix(r.URL.Path, "/sse")
-	p = strings.Trim(p, "/")
-	p = strings.TrimSuffix(p, "/message")
-	p = strings.Trim(p, "/")
+	_, profile, toolSource, _ := parseIngressPath(r.URL.Path)
 
 	var keyAgent string
 	if uVal := r.Context().Value(filter.UserContextKey); uVal != nil {
@@ -261,94 +259,81 @@ func (s *SSEProxy) checkAggregatedAgent(r *http.Request) (string, bool, error) {
 	}
 
 	repo := s.getCoordinator().AgentRepository()
-	parts := strings.Split(p, "/")
-	if len(parts) >= 2 && parts[0] != "" {
-		// Fail-closed authorization for Direct Mode paths (/sse/{agent}/{mcp}):
+	if toolSource != "" && profile != "" {
+		// Fail-closed authorization for Direct Mode paths (/sse/{profile}/{tool_source}):
 		// Enforce scoped API key boundaries before delegating to direct-mode path resolution.
-		if keyAgent != "" && keyAgent != "*" && !strings.EqualFold(keyAgent, parts[0]) {
-			return "", false, fmt.Errorf("AGENT_ACCESS_DENIED: API key is scoped to agent '%s', access to '%s' is forbidden", keyAgent, parts[0])
+		if keyAgent != "" && keyAgent != "*" && !strings.EqualFold(keyAgent, profile) {
+			return "", false, fmt.Errorf("AGENT_ACCESS_DENIED: API key is scoped to agent '%s', access to '%s' is forbidden", keyAgent, profile)
 		}
 		return "", false, nil
 	}
-	if len(parts) == 1 && parts[0] != "" {
-		agentName := parts[0]
+	if profile != "" {
 		// Fail-closed authorization: If key is strictly scoped to another agent, reject with 403
-		if keyAgent != "" && keyAgent != "*" && !strings.EqualFold(keyAgent, agentName) {
-			return "", false, fmt.Errorf("AGENT_ACCESS_DENIED: API key is scoped to agent '%s', access to '%s' is forbidden", keyAgent, agentName)
+		if keyAgent != "" && keyAgent != "*" && !strings.EqualFold(keyAgent, profile) {
+			return "", false, fmt.Errorf("AGENT_ACCESS_DENIED: API key is scoped to agent '%s', access to '%s' is forbidden", keyAgent, profile)
 		}
 
 		if repo != nil {
-			agentCfg, err := repo.GetAgentConfig(agentName)
+			agentCfg, err := repo.GetAgentConfig(profile)
 			if err != nil {
 				return "", false, err
 			}
 			if agentCfg.IsDirect() {
-				return "", false, fmt.Errorf("ROUTING_VIOLATION_DIRECT: Agent '%s' is configured in DIRECT mode. Please specify target MCP in path: '/sse/%s/{mcp_name}'", agentName, agentName)
+				return "", false, fmt.Errorf("ROUTING_VIOLATION_DIRECT: Agent '%s' is configured in DIRECT mode. Please specify target MCP in path: '/sse/%s/{mcp_name}'", profile, profile)
 			}
-			return agentName, true, nil
+			return profile, true, nil
 		}
-	} else if p == "" || len(parts) == 0 || parts[0] == "" {
-		// 1. Check if an explicit profile / agent name was passed via header or query param
-		explicitAgent := extractExplicitAgent(r)
+		return "", false, nil
+	}
 
-		if explicitAgent != "" {
-			if keyAgent != "" && keyAgent != "*" && !strings.EqualFold(keyAgent, explicitAgent) {
-				return "", false, fmt.Errorf("AGENT_ACCESS_DENIED: API key is scoped to agent '%s', access to '%s' is forbidden", keyAgent, explicitAgent)
-			}
-			if repo != nil {
-				agentCfg, err := repo.GetAgentConfig(explicitAgent)
-				if err != nil {
-					return "", false, err
-				}
-				if agentCfg.IsDirect() {
-					return "", false, fmt.Errorf("ROUTING_VIOLATION_DIRECT: Agent '%s' is configured in DIRECT mode. Please specify target MCP in path: '/sse/%s/{mcp_name}'", explicitAgent, explicitAgent)
-				}
-				return explicitAgent, true, nil
-			}
+	// Root /sse without profile path segment:
+	// 1. Scoped API key auto-routes to its bound profile.
+	if keyAgent != "" && keyAgent != "*" && repo != nil {
+		agentCfg, err := repo.GetAgentConfig(keyAgent)
+		if err != nil {
+			return "", false, err
 		}
+		if agentCfg.IsDirect() {
+			return "", false, fmt.Errorf("ROUTING_VIOLATION_DIRECT: Scoped Agent '%s' is configured in DIRECT mode. Please specify target MCP in path: '/sse/%s/{mcp_name}'", keyAgent, keyAgent)
+		}
+		return agentCfg.AgentName, true, nil
+	}
 
-		// 2. Implicit Agent Resolution: If key is scoped to a specific agent, auto-route to that agent
-		if keyAgent != "" && keyAgent != "*" && repo != nil {
-			if agentCfg, err := repo.GetAgentConfig(keyAgent); err == nil && agentCfg != nil {
-				if agentCfg.IsDirect() {
-					return "", false, fmt.Errorf("ROUTING_VIOLATION_DIRECT: Scoped Agent '%s' is configured in DIRECT mode.", keyAgent)
-				}
-				return agentCfg.AgentName, true, nil
-			}
-		}
-
-		// 3. Default Agent Resolution
-		if repo != nil {
-			if defAgent, err := repo.GetDefaultAgent(); err == nil && defAgent != nil {
-				if defAgent.IsDirect() {
-					return "", false, fmt.Errorf("ROUTING_VIOLATION_DIRECT: Default Agent '%s' is configured in DIRECT mode.", defAgent.AgentName)
-				}
-				return defAgent.AgentName, true, nil
-			}
-		}
+	// 2. Wildcard (*) keys require an explicit profile segment when AgentRepository is configured.
+	if repo != nil {
+		return "", false, fmt.Errorf("PROFILE_REQUIRED: wildcard API key requires an explicit profile in URL path: '/sse/{profile}' or '/mcp/{profile}'")
 	}
 	return "", false, nil
 }
 
 func (s *SSEProxy) writeRoutingError(w http.ResponseWriter, r *http.Request, err error) {
 	w.Header().Set("Content-Type", "application/json")
+	path := ""
+	method := ""
+	ctx := context.Background()
+	if r != nil {
+		path = r.URL.Path
+		method = r.Method
+		ctx = r.Context()
+	}
+
+	status := http.StatusBadRequest
 	if strings.Contains(err.Error(), "AGENT_ACCESS_DENIED") {
-		path := ""
-		method := ""
-		if r != nil {
-			path = r.URL.Path
-			method = r.Method
-		}
+		status = http.StatusForbidden
 		s.logIngressSecurityRejection(r, "ingress_auth_forbidden", method, "agent", path, "agent_access_denied")
 		metrics.Default().IncAuthFailure("proxy", "agent_access_denied")
-		w.WriteHeader(http.StatusForbidden)
-	} else if errors.Is(err, agent.ErrAgentNotFound) || errors.Is(err, agent.ErrProtocolNotFound) || strings.Contains(err.Error(), "MCP_NOT_FOUND") || strings.Contains(err.Error(), "AGENT_NOT_FOUND") {
-		w.WriteHeader(http.StatusNotFound)
-	} else if errors.Is(err, agent.ErrRoutingModeViolation) || strings.Contains(err.Error(), "ROUTING_VIOLATION") {
-		w.WriteHeader(http.StatusBadRequest)
 	} else {
-		w.WriteHeader(http.StatusBadRequest)
+		if errors.Is(err, agent.ErrAgentNotFound) || errors.Is(err, agent.ErrProtocolNotFound) || strings.Contains(err.Error(), "MCP_NOT_FOUND") || strings.Contains(err.Error(), "AGENT_NOT_FOUND") {
+			status = http.StatusNotFound
+		}
+		slog.WarnContext(ctx, "MCP ingress routing rejected",
+			slog.String("method", method),
+			slog.String("path", path),
+			slog.Int("status", status),
+			slog.String("error", err.Error()),
+		)
 	}
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error":   "Routing Error",
 		"message": err.Error(),
@@ -490,18 +475,53 @@ func extractTraceIDFromHeader(r *http.Request) string {
 	return ""
 }
 
-func extractAgentNameFromPath(reqPath string) string {
-	reqPath = strings.TrimRight(reqPath, "/")
-	if strings.HasPrefix(reqPath, "/sse/") || strings.HasPrefix(reqPath, "/mcp/") {
-		trimmed := strings.TrimPrefix(reqPath, "/sse/")
-		trimmed = strings.TrimPrefix(trimmed, "/mcp/")
-		trimmed = strings.TrimSuffix(trimmed, "/message")
-		parts := strings.Split(trimmed, "/")
-		if len(parts) > 0 && parts[0] != "" {
-			return parts[0]
-		}
+// parseIngressPath extracts canonical transport, Security Profile, and Tool Source segments
+// from an MCP ingress path without conflating profiles literally named "mcp" or "message".
+func parseIngressPath(reqPath string) (transport, profile, toolSource string, isMessage bool) {
+	trimmed := strings.TrimRight(reqPath, "/")
+	var rest string
+	switch {
+	case trimmed == "/sse":
+		return "sse", "", "", false
+	case trimmed == "/mcp":
+		return "mcp", "", "", false
+	case trimmed == "/message":
+		return "message", "", "", true
+	case strings.HasPrefix(trimmed, "/sse/"):
+		transport = "sse"
+		rest = strings.TrimPrefix(trimmed, "/sse/")
+	case strings.HasPrefix(trimmed, "/mcp/"):
+		transport = "mcp"
+		rest = strings.TrimPrefix(trimmed, "/mcp/")
+	default:
+		return "", "", "", false
 	}
-	return ""
+
+	segs := strings.Split(rest, "/")
+	if len(segs) >= 2 && segs[len(segs)-1] == "message" {
+		isMessage = true
+		segs = segs[:len(segs)-1]
+	}
+	if len(segs) >= 1 && segs[0] != "" {
+		profile = segs[0]
+	}
+	if len(segs) >= 2 && segs[1] != "" {
+		toolSource = segs[1]
+	}
+	return transport, profile, toolSource, isMessage
+}
+
+// validateNoLegacyRoutingQuery rejects deprecated ?profile= and ?agent= query parameters
+// on MCP ingress to avoid silent misrouting or query-string leakage to upstream servers.
+func validateNoLegacyRoutingQuery(r *http.Request) error {
+	if r == nil || r.URL == nil || r.URL.RawQuery == "" {
+		return nil
+	}
+	q := r.URL.Query()
+	if q.Has("profile") || q.Has("agent") {
+		return fmt.Errorf("INVALID_ROUTING_PARAMETER: query parameters 'profile' and 'agent' are unsupported; specify profile in URL path '/sse/{profile}' or '/mcp/{profile}'")
+	}
+	return nil
 }
 
 // isSafeControlFree rejects ASCII control characters (including CR/LF and NUL)
@@ -513,45 +533,6 @@ func isSafeControlFree(s string) bool {
 		}
 	}
 	return true
-}
-
-// extractExplicitAgent inspects request headers and query parameters for explicit agent/profile identity:
-// 1. Header: X-FaradAiWire-Profile
-// 2. Query param: profile
-// 3. Header: X-FaradAiWire-Agent-Name
-// 4. Query param: agent
-func extractExplicitAgent(r *http.Request) string {
-	if r == nil {
-		return ""
-	}
-	if p := strings.TrimSpace(r.Header.Get("X-FaradAiWire-Profile")); p != "" {
-		return p
-	}
-	if r.URL != nil {
-		if q := strings.TrimSpace(r.URL.Query().Get("profile")); q != "" {
-			return q
-		}
-	}
-	if a := strings.TrimSpace(r.Header.Get("X-FaradAiWire-Agent-Name")); a != "" {
-		return a
-	}
-	if r.URL != nil {
-		if q := strings.TrimSpace(r.URL.Query().Get("agent")); q != "" {
-			return q
-		}
-	}
-	return ""
-}
-
-// extractAgentName inspects request headers, query parameters, and URL path for agent/profile identity.
-func extractAgentName(r *http.Request) string {
-	if explicit := extractExplicitAgent(r); explicit != "" {
-		return explicit
-	}
-	if r != nil && r.URL != nil {
-		return extractAgentNameFromPath(r.URL.Path)
-	}
-	return ""
 }
 
 func (s *SSEProxy) processOutgoingSSEMessage(data, clientSessionID, targetURL string) string {

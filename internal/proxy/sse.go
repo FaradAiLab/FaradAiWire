@@ -35,7 +35,6 @@ type SSEProxy struct {
 	httpClient          *http.Client
 	mu                  sync.RWMutex
 	sessionTargets      map[string]sessionBinding // sessionId -> sessionBinding
-	userCtxCfg          config.UserContextConfig
 	contextExtractor    *ContextExtractor
 	secCfg              config.SecurityConfig
 	keyValidator        auth.KeyValidator
@@ -66,7 +65,6 @@ func NewSSEProxyWithCoordinator(
 	port int,
 	targetURL string,
 	coordinator *session.InboundCoordinator,
-	userCtxCfg config.UserContextConfig,
 	secCfg ...config.SecurityConfig,
 ) *SSEProxy {
 	var sc config.SecurityConfig
@@ -86,8 +84,7 @@ func NewSSEProxyWithCoordinator(
 		targetURL:        targetURL,
 		httpClient:       httpClient,
 		sessionTargets:   make(map[string]sessionBinding),
-		userCtxCfg:       userCtxCfg,
-		contextExtractor: NewContextExtractor(userCtxCfg),
+		contextExtractor: NewContextExtractor(),
 		secCfg:           sc,
 		coordinator:      coordinator,
 	}
@@ -100,7 +97,6 @@ func NewSSEProxy(
 	pipeline *filter.Pipeline,
 	agentRepo agent.Resolver,
 	sessionMgr *session.Manager,
-	userCtxCfg config.UserContextConfig,
 	secCfg ...config.SecurityConfig,
 ) *SSEProxy {
 	var sc config.SecurityConfig
@@ -126,7 +122,7 @@ func NewSSEProxy(
 	fwd := session.NewForwarder(httpClient, pipeline, cStore)
 	coord := session.NewInboundCoordinator(pipeline, agentRepo, sessionMgr, aggregator, dispatcher, cStore, fwd, targetURL)
 
-	return NewSSEProxyWithCoordinator(port, targetURL, coord, userCtxCfg, sc)
+	return NewSSEProxyWithCoordinator(port, targetURL, coord, sc)
 }
 
 // Handler builds and returns the configured HTTP handler with security headers and rate limiting applied.
@@ -207,6 +203,10 @@ func (s *SSEProxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 	if uCtx != nil {
 		r = r.WithContext(context.WithValue(r.Context(), filter.UserContextKey, uCtx))
+	}
+	if err := validateNoLegacyRoutingQuery(r); err != nil {
+		s.writeRoutingError(w, r, err)
+		return
 	}
 	if traceID := extractTraceIDFromHeader(r); traceID != "" {
 		r = r.WithContext(context.WithValue(r.Context(), filter.TraceIDContextKey, traceID))
@@ -310,6 +310,10 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 	if uCtx != nil {
 		r = r.WithContext(context.WithValue(r.Context(), filter.UserContextKey, uCtx))
 	}
+	if err := validateNoLegacyRoutingQuery(r); err != nil {
+		s.writeRoutingError(w, r, err)
+		return
+	}
 
 	body, ok := s.readRequestBody(w, r)
 	if !ok {
@@ -328,7 +332,7 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 		traceID = req.ExtractTraceID()
 	}
 
-	userCtx := context.WithValue(r.Context(), filter.UserContextKey, uCtx)
+	userCtx := r.Context()
 	if traceID != "" {
 		userCtx = context.WithValue(userCtx, filter.TraceIDContextKey, traceID)
 	}
@@ -339,25 +343,17 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 		keyAgent = strings.TrimSpace(uCtx.AgentName)
 	}
 
-	explicitAgent := extractExplicitAgent(r)
-	pathAgent := extractAgentNameFromPath(r.URL.Path)
-	if pathAgent != "" && explicitAgent != "" && !strings.EqualFold(pathAgent, explicitAgent) {
-		s.writeRoutingError(w, r, fmt.Errorf("AGENT_ACCESS_DENIED: explicit agent '%s' conflicts with URL path agent '%s'", explicitAgent, pathAgent))
+	transport, pathAgent, pathToolSource, _ := parseIngressPath(r.URL.Path)
+	if pathAgent != "" && keyAgent != "" && !strings.EqualFold(keyAgent, pathAgent) {
+		s.writeRoutingError(w, r, fmt.Errorf("AGENT_ACCESS_DENIED: API key is scoped to agent '%s', access to '%s' is forbidden", keyAgent, pathAgent))
 		return
 	}
-	agentName := explicitAgent
-	if agentName == "" {
-		agentName = pathAgent
-	}
-	if agentName != "" && keyAgent != "" && !strings.EqualFold(keyAgent, agentName) {
-		s.writeRoutingError(w, r, fmt.Errorf("AGENT_ACCESS_DENIED: API key is scoped to agent '%s', access to '%s' is forbidden", keyAgent, agentName))
-		return
-	}
+	agentName := pathAgent
 	if agentName == "" && keyAgent != "" {
 		agentName = keyAgent
 	}
 
-	if !isSafeControlFree(clientSessionID) || !isSafeControlFree(agentName) {
+	if !isSafeControlFree(clientSessionID) || !isSafeControlFree(agentName) || !isSafeControlFree(pathToolSource) {
 		http.Error(w, "Invalid agent or session identifier", http.StatusBadRequest)
 		return
 	}
@@ -372,13 +368,47 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var agentCfg *agent.RouteConfig
+	_, hasDirectSession := s.resolveSessionTarget(clientSessionID)
+	mgr := coord.SessionManager()
 	repo := coord.AgentRepository()
+	if agentName == "" && repo != nil {
+		hasBridge := false
+		if mgr != nil {
+			if br, ok := mgr.GetBridge(clientSessionID); ok && br != nil {
+				hasBridge = true
+			}
+		}
+		if !hasDirectSession && !hasBridge {
+			s.writeRoutingError(w, r, fmt.Errorf("PROFILE_REQUIRED: wildcard API key requires an explicit profile in URL path: '/sse/{profile}' or '/mcp/{profile}'"))
+			return
+		}
+	}
+
+	var agentCfg *agent.RouteConfig
 	if repo != nil && agentName != "" {
 		agentCfg, err = repo.GetAgentConfig(agentName)
 		if err != nil {
 			s.writeRoutingError(w, r, err)
 			return
+		}
+		if agentCfg != nil {
+			if agentCfg.IsDirect() {
+				if pathToolSource == "" && !(pathAgent == "" && hasDirectSession) {
+					prefix := "mcp"
+					if transport == "sse" {
+						prefix = "sse"
+					}
+					s.writeRoutingError(w, r, fmt.Errorf("ROUTING_VIOLATION_DIRECT: Agent '%s' is configured in DIRECT mode. Please specify target MCP in path: '/%s/%s/{mcp_name}'", agentName, prefix, agentName))
+					return
+				}
+				if pathToolSource != "" && agentCfg.FindProtocol(pathToolSource) == nil {
+					s.writeRoutingError(w, r, agent.NewProtocolNotFoundError(agentName, pathToolSource))
+					return
+				}
+			} else if pathToolSource != "" {
+				s.writeRoutingError(w, r, agent.NewRoutingModeViolationError(agentName, "AGGREGATED", fmt.Sprintf("Access using single path: '/%s/%s'", transport, agentName)))
+				return
+			}
 		}
 	}
 
@@ -387,7 +417,6 @@ func (s *SSEProxy) handleMessage(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(userCtx)
 	}
 
-	mgr := coord.SessionManager()
 	if mgr != nil && agentName != "" {
 		isDirect := agentCfg != nil && agentCfg.IsDirect()
 		if !isDirect {

@@ -294,6 +294,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({ status: propStatus }) => {
         keyName={clientModal.keyName}
         agentName={clientModal.agentName}
         availableAgents={agents.map((a) => a.name)}
+        availableProfiles={agents}
         ingressPort={ingressPort}
         ingressHost={ingressHost}
         allowStdio={allowStdio}

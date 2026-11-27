@@ -29,11 +29,11 @@ func TestSecurityHeaders_DefaultHeaders(t *testing.T) {
 	}
 
 	expectedHeaders := map[string]string{
-		"X-Content-Type-Options": "nosniff",
-		"X-Frame-Options":        "DENY",
+		"X-Content-Type-Options":  "nosniff",
+		"X-Frame-Options":         "DENY",
 		"Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';",
-		"Referrer-Policy":        "strict-origin-when-cross-origin",
-		"X-XSS-Protection":       "0",
+		"Referrer-Policy":         "strict-origin-when-cross-origin",
+		"X-XSS-Protection":        "0",
 	}
 
 	for k, v := range expectedHeaders {
@@ -73,6 +73,12 @@ func TestSecurityHeaders_CORSAllowedOrigin(t *testing.T) {
 	}
 	if got := res.Header.Get("Access-Control-Allow-Credentials"); got != "true" {
 		t.Errorf("expected Access-Control-Allow-Credentials: true, got %q", got)
+	}
+	if got := res.Header.Get("Access-Control-Allow-Headers"); got != "Content-Type, Authorization, X-Trace-ID, Mcp-Session-Id, Accept, Origin" {
+		t.Errorf("unexpected Access-Control-Allow-Headers: %q", got)
+	}
+	if got := res.Header.Get("Access-Control-Expose-Headers"); got != "Mcp-Session-Id" {
+		t.Errorf("expected Access-Control-Expose-Headers: Mcp-Session-Id, got %q", got)
 	}
 }
 

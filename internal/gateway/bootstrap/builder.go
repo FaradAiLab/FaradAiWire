@@ -217,16 +217,11 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 
 	listenPort := cfg.GetListenPort()
 	adminPort := cfg.GetAdminPort()
-	if listenPort == adminPort {
+	if !cfg.AdminDisabled && listenPort == adminPort {
 		return nil, fmt.Errorf("configuration error: listen_port (%d) and admin_port (%d) must be distinct; unified single-port mode has been removed", listenPort, adminPort)
 	}
 	if strings.EqualFold(strings.TrimSpace(cfg.Mode), "stdio") && !cfg.IsStdioAllowed() {
 		return nil, fmt.Errorf("configuration error: top-level mode 'stdio' is disabled when allow_stdio=false (Containerized Security Gateway mode)")
-	}
-
-	// Expand env placeholder in user context HMAC secret
-	if strings.HasPrefix(cfg.UserContext.ContextHMACSecret, "${") && strings.HasSuffix(cfg.UserContext.ContextHMACSecret, "}") {
-		cfg.UserContext.ContextHMACSecret = os.ExpandEnv(cfg.UserContext.ContextHMACSecret)
 	}
 
 	deps := &Dependencies{
@@ -290,8 +285,12 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	deps.SettingsStore = settingsStore
 	deps.SettingsCache = settingsCache
 
+	adminBaseURL := ""
+	if !cfg.AdminDisabled {
+		adminBaseURL = notify.BuildAdminBaseURL(cfg.GetAdminHost(), cfg.GetAdminPort(), cfg.AdminTLS.Enabled)
+	}
 	desktopNotifier := notify.NewDesktopNotifier(
-		notify.BuildAdminBaseURL(cfg.GetAdminHost(), cfg.GetAdminPort(), cfg.AdminTLS.Enabled),
+		adminBaseURL,
 		deps.SettingsCache,
 	)
 	deps.DesktopNotifier = desktopNotifier
@@ -478,7 +477,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	}
 	if adminMeta, created, bootErr := auth.EnsureBootstrapAdminKey(keyStore, ""); bootErr != nil {
 		slog.Warn("Failed to ensure Bootstrap Master Key", slog.String("error", bootErr.Error()))
-	} else if adminMeta != nil {
+	} else if adminMeta != nil && !cfg.AdminDisabled {
 		containerized := !cfg.IsStdioAllowed()
 		recoverCmd := auth.TokenRecoveryCommand(containerized)
 		attrs := []any{
@@ -585,14 +584,14 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 	deps.Coordinator = coordinator
 
 	if cfg.Mode == "stdio" {
-		deps.StdioProxy = proxy.NewStdioProxy(cfg.Stdio.Command, cfg.Stdio.Args, cfg.Stdio.AutoRestart, pipe, cfg.UserContext)
+		deps.StdioProxy = proxy.NewStdioProxy(cfg.Stdio.Command, cfg.Stdio.Args, cfg.Stdio.AutoRestart, pipe)
 	} else {
 		listenHost := cfg.GetListenHost()
 		secCfg := cfg.Security
 		if secCfg.RateLimiting.Enabled == nil {
 			secCfg.RateLimiting = cfg.GetHTTPRateLimitConfig()
 		}
-		sseP := proxy.NewSSEProxyWithCoordinator(listenPort, cfg.SSE.TargetURL, coordinator, cfg.UserContext, secCfg)
+		sseP := proxy.NewSSEProxyWithCoordinator(listenPort, cfg.SSE.TargetURL, coordinator, secCfg)
 		sseP.SetHost(listenHost)
 		sseP.SetKeyValidator(keyStore)
 		if combinedSecLogger != nil {
@@ -643,7 +642,7 @@ func Build(cfg *config.Config, provider config.Provider, cb ...Callbacks) (*Depe
 		metricsReg.SetDroppedEventsProvider("jsonl", nil)
 	}
 
-	if adminPort > 0 {
+	if !cfg.AdminDisabled && adminPort > 0 {
 		var safeClient *http.Client
 		if len(cb) > 0 {
 			safeClient = cb[0].SafeHTTPClient

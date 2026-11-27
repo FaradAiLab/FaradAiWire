@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/FaradAiLab/FaradAiWire/internal/auth"
-	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/pkg/mcp"
@@ -38,14 +37,7 @@ func setupTestIngressWithPolicyAuth(t *testing.T) (*SSEProxy, auth.KeyStore) {
 
 	keyStore := auth.NewMemoryKeyStore()
 
-	userCtxCfg := config.UserContextConfig{
-		RoleHeader:   "X-User-Role",
-		UserHeader:   "X-User-ID",
-		FallbackRole: "Customer",
-		FallbackUser: "guest-customer",
-	}
-
-	proxy := NewSSEProxy(0, "http://mock-backend/sse", pipeline, nil, nil, userCtxCfg)
+	proxy := NewSSEProxy(0, "http://mock-backend/sse", pipeline, nil, nil)
 	proxy.SetKeyValidator(keyStore)
 
 	// Mock backend HTTP transport so tests don't bind sockets
@@ -153,7 +145,7 @@ func TestIngressAuth_ValidBearerToken_CanExecuteDeveloperTool(t *testing.T) {
 	}
 }
 
-func TestIngressAuth_ValidXAPIKeyHeader_CanExecuteDeveloperTool(t *testing.T) {
+func TestIngressAuth_XAPIKeyHeaderRejectedWith401(t *testing.T) {
 	proxy, keyStore := setupTestIngressWithPolicyAuth(t)
 
 	rawToken, _, err := keyStore.GenerateKey("CI Runner", "Developer")
@@ -170,16 +162,10 @@ func TestIngressAuth_ValidXAPIKeyHeader_CanExecuteDeveloperTool(t *testing.T) {
 	proxy.handleMessage(rec, req)
 
 	res := rec.Result()
-	body, _ := io.ReadAll(res.Body)
 	defer res.Body.Close()
 
-	var resp mcp.Response
-	if err := json.Unmarshal(body, &resp); err != nil {
-		t.Fatalf("failed to parse response JSON: %v", err)
-	}
-
-	if resp.Error != nil {
-		t.Fatalf("expected successful execution with X-API-Key header, got error: %s", resp.Error.Message)
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected HTTP 401 when only X-API-Key is provided, got %d", res.StatusCode)
 	}
 }
 
@@ -359,9 +345,7 @@ func TestIngressAuth_AdminKeyRejectedWith403_OnSSEAndMessage(t *testing.T) {
 		value  string
 	}{
 		{name: "SSE Bearer Admin", method: http.MethodGet, path: "/sse", header: "Authorization", value: "Bearer " + adminToken},
-		{name: "SSE X-API-Key Admin", method: http.MethodGet, path: "/sse", header: "X-API-Key", value: adminToken},
 		{name: "Message Bearer Admin", method: http.MethodPost, path: "/message?sessionId=s-admin-1", body: toolCallBody, header: "Authorization", value: "Bearer " + adminToken},
-		{name: "Message X-API-Key Admin", method: http.MethodPost, path: "/message?sessionId=s-admin-2", body: toolCallBody, header: "X-API-Key", value: adminToken},
 	}
 
 	for _, tc := range cases {

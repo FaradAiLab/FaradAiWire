@@ -419,12 +419,17 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
+	s.mu.RLock()
+	adminSrv := s.adminServer
+	adminListenerDisabled := s.cfg != nil && s.cfg.AdminListenerDisabled
+	s.mu.RUnlock()
+
 	// Start Admin Console HTTP listener on admin_port
-	if s.adminServer != nil {
+	if adminSrv != nil && !adminListenerDisabled {
 		s.runningWg.Add(1)
 		go func() {
 			defer s.runningWg.Done()
-			if err := s.adminServer.Start(serverCtx); err != nil && err != context.Canceled && err != http.ErrServerClosed {
+			if err := adminSrv.Start(serverCtx); err != nil && err != context.Canceled && err != http.ErrServerClosed {
 				slog.Error("Admin server encountered an error", slog.String("error", err.Error()))
 			}
 		}()
@@ -463,6 +468,7 @@ func (s *Server) doShutdown(ctx context.Context) error {
 	cancel := s.cancel
 	sseProxy := s.sseProxy
 	adminServer := s.adminServer
+	adminListenerDisabled := s.cfg != nil && s.cfg.AdminListenerDisabled
 	gracePeriod := s.inFlightGracePeriod
 	s.mu.Unlock()
 
@@ -503,7 +509,7 @@ func (s *Server) doShutdown(ctx context.Context) error {
 	}
 
 	var adminShutdownDone chan struct{}
-	if adminServer != nil {
+	if adminServer != nil && !adminListenerDisabled {
 		adminShutdownDone = make(chan struct{})
 		go func() {
 			defer close(adminShutdownDone)
@@ -702,8 +708,13 @@ func (s *Server) reloadWithConfigLocked(newCfg *config.Config) error {
 	}
 
 	s.mu.Lock()
+	if s.cfg != nil {
+		newCfg.AdminDisabled = s.cfg.AdminDisabled
+		newCfg.AdminListenerDisabled = s.cfg.AdminListenerDisabled
+	}
 	s.cfg = newCfg
 	s.router = newRouter
+	hasAdmin := s.adminServer != nil
 
 	bootstrap.WireFilterDependencies(newPipeline, newCfg, bootstrap.FilterWiringDependencies{
 		SchemaStore:     s.schemaStore,
@@ -716,7 +727,7 @@ func (s *Server) reloadWithConfigLocked(newCfg *config.Config) error {
 	})
 	s.mu.Unlock()
 
-	if s.desktopNotifier != nil {
+	if s.desktopNotifier != nil && !newCfg.AdminDisabled && hasAdmin {
 		s.desktopNotifier.SetAdminBaseURL(notify.BuildAdminBaseURL(newCfg.GetAdminHost(), newCfg.GetAdminPort(), newCfg.AdminTLS.Enabled))
 	}
 

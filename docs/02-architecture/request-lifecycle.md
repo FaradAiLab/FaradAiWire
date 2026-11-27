@@ -55,13 +55,12 @@ sequenceDiagram
 
 ---
 
-## Phase 2: Agent Identification & Context Provenance
+## Phase 2: Profile Routing & Identity Context
 
-FaradAiWire extracts identity metadata from incoming HTTP headers:
-- `X-Farad-Agent`: Identifies the client persona (e.g., `code-reviewer`, `db-analyst`). If omitted, falls back to `default`.
-- `X-User-Role`: Resolves the human or system role (e.g., `Developer`, `Customer`).
-- `X-User-ID`: Identifies the human operator for audit trails.
-- **Context Anti-Spoofing:** If `FARADAI_WIRE_HMAC_SECRET` is configured, FaradAiWire validates the cryptographic signature of the role header to prevent untrusted agents from forging their own privilege levels.
+FaradAiWire resolves the target Security Profile and caller identity strictly from the URL path and the verified `Authorization: Bearer` API key:
+- **Canonical URL Path Routing:** `/sse/{profile}` and `/mcp/{profile}` for Aggregated mode; `/sse/{profile}/{tool_source}` and `/mcp/{profile}/{tool_source}` for Direct mode.
+- **Scoped vs. Wildcard Keys:** Profile-scoped API keys auto-route when hitting root `/sse` or `/mcp`, whereas wildcard (`*`) keys require `{profile}` in the URL path (`400 PROFILE_REQUIRED`). Legacy `?profile=`/`?agent=` query parameters are rejected (`400 INVALID_ROUTING_PARAMETER`).
+- **API Key Provenance:** `UserID` (`keyRecord.Name`/`ID`), `Role`, `AgentName`, and `APIKeyID` come exclusively from `keys/api_keys.json` — spoofable client headers (`X-User-ID`, `X-User-Role`) are ignored on ingress and stripped before upstream forwarding.
 
 ---
 

@@ -120,7 +120,7 @@ To elevate defense against complex zero-day indirect prompt injections and jailb
 
 | Port | Service | Endpoints | Authentication |
 | :--- | :--- | :--- | :--- |
-| **19410** | **Proxy Ingress** | `/sse`, `/message`, `/mcp` | Fail-closed (`Agent` API key via `Authorization: Bearer` / `X-API-Key`; `Admin` keys rejected with `403 INGRESS_ROLE_REQUIRED`) |
+| **19410** | **Proxy Ingress** | `/sse/{profile}`, `/mcp/{profile}`, `/sse/{profile}/{tool_source}`, `/mcp/{profile}/{tool_source}` | Fail-closed (`Agent` API key via `Authorization: Bearer` only; `Admin` keys rejected with `403 INGRESS_ROLE_REQUIRED`) |
 | **19415** | **Admin Console** | `/admin/dashboard`, `/admin/status`, REST APIs | Loopback standalone or `Admin` key from `keys/api_keys.json` (`faradaiwire token [--rotate]`; `Agent` keys rejected with `403 ADMIN_ROLE_REQUIRED`) |
 
 ---
@@ -137,11 +137,9 @@ FaradAiWire can be configured via `config.yaml` or overridden through environmen
 | `FARADAI_WIRE_HOST` | `127.0.0.1` | Network interface to bind the proxy ingress listener (`0.0.0.0` for containers). |
 | `FARADAI_WIRE_ADMIN_HOST` | `127.0.0.1` | Network interface to bind the Admin Console listener (defaults to strict loopback). |
 | `FARADAI_WIRE_HOME` | `~/.faradaiwire` | Data directory for runtime state, keys, and DuckDB analytics. |
-| `FARADAI_WIRE_DEFAULT_AGENT` | `default` | Fallback agent domain if no routing header is present. |
 | `FARADAI_WIRE_ALLOW_LOCAL_TARGETS` | `false` | Set to `true` to allow upstream MCP targets on loopback/private IPs. |
 | `FARADAI_WIRE_ENV` | `production` | Set to `development` for verbose debug logs and relaxed local SSRF checks. |
 | `FARADAI_WIRE_DISABLE_PROCESS_LOCK` | `false` | Set to `true` only in CI/testing to bypass flock single-instance guard. |
-| `FARADAI_WIRE_HMAC_SECRET` | *(None)* | Optional 32-byte HMAC secret for context anti-spoofing verification. |
 
 ---
 

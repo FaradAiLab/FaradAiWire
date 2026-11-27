@@ -12,10 +12,6 @@ import (
 )
 
 func TestSSEProxy_SecurityHeadersAndCORS(t *testing.T) {
-	userCtxCfg := config.UserContextConfig{
-		FallbackRole: "Developer",
-		FallbackUser: "dev-user",
-	}
 	secCfg := config.SecurityConfig{
 		CORSAllowedOrigins: []string{
 			"https://app.faradai.security",
@@ -25,7 +21,7 @@ func TestSSEProxy_SecurityHeadersAndCORS(t *testing.T) {
 
 	pipeline := filter.NewPipeline(nil)
 	// Use a closed/invalid port rather than a common dev port like 8081 so local services never hold GET /sse open
-	proxy := NewSSEProxy(8080, "http://127.0.0.1:1/sse", pipeline, nil, nil, userCtxCfg, secCfg)
+	proxy := NewSSEProxy(8080, "http://127.0.0.1:1/sse", pipeline, nil, nil, secCfg)
 	handler := proxy.Handler()
 
 	t.Run("Security headers on /sse and /message", func(t *testing.T) {

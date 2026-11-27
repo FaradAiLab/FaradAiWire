@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/FaradAiLab/FaradAiWire/internal/agent"
 	"github.com/FaradAiLab/FaradAiWire/internal/auth"
-	"github.com/FaradAiLab/FaradAiWire/internal/config"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter"
 	"github.com/FaradAiLab/FaradAiWire/internal/filter/types"
 	"github.com/FaradAiLab/FaradAiWire/internal/session"
@@ -50,6 +50,21 @@ func newTestIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
 	}
 	ts.Start()
 	return ts
+}
+
+func attachTestBearerAuth(t *testing.T, p *SSEProxy, scope ...string) string {
+	t.Helper()
+	ks := auth.NewMemoryKeyStore()
+	agentScope := "*"
+	if len(scope) > 0 && scope[0] != "" {
+		agentScope = scope[0]
+	}
+	raw, _, err := ks.GenerateKey("test-client", "Developer", agentScope)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	p.SetKeyValidator(ks)
+	return raw
 }
 
 func closeTestServer(ts *httptest.Server) {
@@ -92,7 +107,7 @@ func TestRoutingModeStrictValidation(t *testing.T) {
 	dirData, _ := json.Marshal(dirCfg)
 	_ = os.WriteFile(filepath.Join(agentDir, "dir-agent", "current", "config.json"), dirData, 0644)
 
-	proxy := NewSSEProxy(0, "http://localhost:9090/sse", nil, agent.NewFSRepository(agentDir, ""), nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, "http://localhost:9090/sse", nil, agent.NewFSRepository(agentDir, ""), nil)
 
 	// Test Case A: Aggregated Mode valid request (/sse/agg-agent)
 	reqA := httptest.NewRequest("GET", "/sse/agg-agent", nil)
@@ -160,7 +175,7 @@ func TestSSEProxy_AgentScopingAndImplicitRouting(t *testing.T) {
 	cdData, _ := json.Marshal(coderCfg)
 	_ = os.WriteFile(filepath.Join(agentDir, "coder", "current", "config.json"), cdData, 0644)
 
-	proxy := NewSSEProxy(0, "", nil, agent.NewFSRepository(agentDir, ""), nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, "", nil, agent.NewFSRepository(agentDir, ""), nil)
 
 	// 1. Implicit routing: Request to /sse with UserContext AgentName="claude"
 	req1 := httptest.NewRequest("GET", "/sse", nil)
@@ -238,19 +253,24 @@ func TestSSEProxy_POST_Delegation_And_SimulationHeaders(t *testing.T) {
 	}))
 	defer closeTestServer(mockBackend)
 
-	uCtxCfg := config.UserContextConfig{
-		FallbackRole:   "Customer",
-		FallbackUser:   "guest",
-		TrustedProxies: []string{"127.0.0.1/32", "10.0.0.0/8"},
+	ks := auth.NewMemoryKeyStore()
+	custToken, _, err := ks.GenerateKey("guest-key", "Customer", "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Customer): %v", err)
+	}
+	devToken, _, err := ks.GenerateKey("dev-key", "Developer", "*")
+	if err != nil {
+		t.Fatalf("GenerateKey(Developer): %v", err)
 	}
 
-	proxy := NewSSEProxy(0, mockBackend.URL, pipeline, nil, nil, uCtxCfg)
+	proxy := NewSSEProxy(0, mockBackend.URL, pipeline, nil, nil)
+	proxy.SetKeyValidator(ks)
 
-	// Test 1: POST to /sse (delegation to handleMessage) with blocked role (Customer)
+	// Test 1: POST to /sse (delegation to handleMessage) with blocked role (Customer key)
 	mcpBody := []byte(`{"jsonrpc":"2.0","id":"sim-1","method":"tools/call","params":{"name":"exec_cmd","arguments":{}}}`)
 	reqBlocked := httptest.NewRequest("POST", "/sse", bytes.NewReader(mcpBody))
 	reqBlocked.Header.Set("Content-Type", "application/json")
-	reqBlocked.Header.Set("X-User-Role", "Customer")
+	reqBlocked.Header.Set("Authorization", "Bearer "+custToken)
 	reqBlocked.RemoteAddr = "127.0.0.1:12345"
 
 	wBlocked := httptest.NewRecorder()
@@ -271,10 +291,10 @@ func TestSSEProxy_POST_Delegation_And_SimulationHeaders(t *testing.T) {
 		t.Errorf("expected JSON-RPC error code %d (ErrPolicyDenied), got %d (%s)", mcp.ErrPolicyDenied, errResp.Error.Code, errResp.Error.Message)
 	}
 
-	// Test 2: POST to /sse/my-agent (delegation to handleMessage) with allowed role (Developer)
+	// Test 2: POST to /sse/my-agent (delegation to handleMessage) with allowed role (Developer key)
 	reqAllowed := httptest.NewRequest("POST", "/sse/my-agent", bytes.NewReader(mcpBody))
 	reqAllowed.Header.Set("Content-Type", "application/json")
-	reqAllowed.Header.Set("X-User-Role", "Developer")
+	reqAllowed.Header.Set("Authorization", "Bearer "+devToken)
 	reqAllowed.RemoteAddr = "127.0.0.1:12345"
 
 	wAllowed := httptest.NewRecorder()
@@ -359,12 +379,14 @@ func TestSSE_PathPreservingEndpointRewriting(t *testing.T) {
 	}
 	cfgBytes, _ := json.Marshal(cfg)
 	_ = os.WriteFile(filepath.Join(agentDir, "qa-agent", "current", "config.json"), cfgBytes, 0644)
-	proxy := NewSSEProxy(0, mockBackend.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, mockBackend.URL, filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil)
+	tok := attachTestBearerAuth(t, proxy)
 
 	// Connect via /sse/qa-agent/dummy-mcp
 	reqCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	req := httptest.NewRequest("GET", "/sse/qa-agent/dummy-mcp", nil).WithContext(reqCtx)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 
 	proxy.handleSSE(rec, req)
@@ -408,11 +430,13 @@ func TestSSE_DirectAndAggregatedMessageRouting(t *testing.T) {
 	cfgBytes, _ := json.Marshal(cfg)
 	_ = os.WriteFile(filepath.Join(agentDir, "routing-agent", "current", "config.json"), cfgBytes, 0644)
 
-	proxy := NewSSEProxy(0, "http://fallback-8081:8081", filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, "http://fallback-8081:8081", filter.NewPipeline(nil), agent.NewFSRepository(agentDir, ""), nil)
+	tok := attachTestBearerAuth(t, proxy)
 
 	// POST to /sse/routing-agent/backend-mcp/message
 	mcpBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`)
 	req := httptest.NewRequest("POST", "/sse/routing-agent/backend-mcp/message", bytes.NewReader(mcpBody))
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 
 	proxy.Handler().ServeHTTP(rec, req)
@@ -435,7 +459,8 @@ func TestSSE_SessionTargetFallback(t *testing.T) {
 	}))
 	defer closeTestServer(mockBackend)
 
-	proxy := NewSSEProxy(0, "http://fallback-8081:8081", filter.NewPipeline(nil), nil, nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, "http://fallback-8081:8081", filter.NewPipeline(nil), nil, nil)
+	tok := attachTestBearerAuth(t, proxy)
 
 	// Register session in proxy's sessionTargets map
 	proxy.mu.Lock()
@@ -445,6 +470,7 @@ func TestSSE_SessionTargetFallback(t *testing.T) {
 	// Client sends bare /message?sessionId=active-sess-456
 	mcpBody := []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_db","arguments":{}}}`)
 	req := httptest.NewRequest("POST", "/message?sessionId=active-sess-456", bytes.NewReader(mcpBody))
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 
 	proxy.Handler().ServeHTTP(rec, req)
@@ -458,11 +484,13 @@ func TestSSE_SessionTargetFallback(t *testing.T) {
 }
 
 func TestSSE_MaxBytesReader_RejectsHugePayload(t *testing.T) {
-	proxy := NewSSEProxy(0, "http://fallback-8081:8081", filter.NewPipeline(nil), nil, nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, "http://fallback-8081:8081", filter.NewPipeline(nil), nil, nil)
+	tok := attachTestBearerAuth(t, proxy)
 
 	// Create a payload larger than 10MB (11MB)
 	hugePayload := make([]byte, 11*1024*1024)
 	req := httptest.NewRequest("POST", "/message?sessionId=test-huge", bytes.NewReader(hugePayload))
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 
 	proxy.Handler().ServeHTTP(rec, req)
@@ -505,7 +533,8 @@ func TestSSEProxy_ActiveStreamEvictionOnDrain(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(agentDir, "drain-agent", "current", "config.json"), aggData, 0644)
 
 	fsRepo := agent.NewFSRepository(agentDir, "")
-	proxy := NewSSEProxy(0, "http://localhost:8080", filter.NewPipeline(nil), fsRepo, nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, "http://localhost:8080", filter.NewPipeline(nil), fsRepo, nil)
+	tok := attachTestBearerAuth(t, proxy)
 
 	pr, pw := io.Pipe()
 	rw := &pipeResponseWriter{
@@ -514,6 +543,7 @@ func TestSSEProxy_ActiveStreamEvictionOnDrain(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("GET", "/sse/drain-agent", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
 
 	handlerDone := make(chan struct{})
 	go func() {
@@ -592,7 +622,7 @@ func TestSSEProxy_ContextCancellationPropagation(t *testing.T) {
 	pipeline := filter.NewPipeline(nil)
 	pipeline.SetFilters([]filter.Filter{capFilter})
 
-	proxy := NewSSEProxy(0, "http://localhost:8080", pipeline, nil, nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, "http://localhost:8080", pipeline, nil, nil)
 
 	// 1. Canceled context test:
 	// A request whose context has been canceled should abort outgoing SSE message processing early.
@@ -649,7 +679,7 @@ func TestSSEProxy_UpstreamPayloadExceeds10MB_Rejected(t *testing.T) {
 	}))
 	defer closeTestServer(backend)
 
-	proxy := NewSSEProxy(0, backend.URL, filter.NewPipeline(nil), nil, nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, backend.URL, filter.NewPipeline(nil), nil, nil)
 
 	// 1. JSON-RPC request with reqID: must receive JSON-RPC error -32603
 	rec := httptest.NewRecorder()
@@ -700,11 +730,11 @@ func TestSSE_AgentScopedKey_EnforcesAgentTargeting(t *testing.T) {
 	tempDir := t.TempDir()
 	repo := agent.NewFSRepository(tempDir, "")
 
-	proxy := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil)
 	proxy.SetKeyValidator(keyStore)
 
-	// 1. Target different agent via query param -> 403 AGENT_ACCESS_DENIED
-	req := httptest.NewRequest("POST", "/message?profile=agent-beta", bytes.NewBufferString(`{"jsonrpc":"2.0","method":"tools/list","id":1}`))
+	// 1. Target different agent via canonical URL path -> 403 AGENT_ACCESS_DENIED
+	req := httptest.NewRequest("POST", "/mcp/agent-beta", bytes.NewBufferString(`{"jsonrpc":"2.0","method":"tools/list","id":1}`))
 	req.Header.Set("Authorization", "Bearer "+rawKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -716,6 +746,16 @@ func TestSSE_AgentScopedKey_EnforcesAgentTargeting(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "AGENT_ACCESS_DENIED") {
 		t.Errorf("expected AGENT_ACCESS_DENIED in response body, got: %s", rec.Body.String())
+	}
+
+	// 1b. Legacy ?profile= query parameter -> 400 INVALID_ROUTING_PARAMETER
+	reqQuery := httptest.NewRequest("POST", "/message?profile=agent-beta", bytes.NewBufferString(`{"jsonrpc":"2.0","method":"tools/list","id":1}`))
+	reqQuery.Header.Set("Authorization", "Bearer "+rawKey)
+	reqQuery.Header.Set("Content-Type", "application/json")
+	recQuery := httptest.NewRecorder()
+	proxy.handleMessage(recQuery, reqQuery)
+	if recQuery.Code != http.StatusBadRequest || !strings.Contains(recQuery.Body.String(), "INVALID_ROUTING_PARAMETER") {
+		t.Fatalf("expected 400 INVALID_ROUTING_PARAMETER for ?profile= query, got %d: %s", recQuery.Code, recQuery.Body.String())
 	}
 
 	// 2. Target different agent via SSE endpoint -> 403 AGENT_ACCESS_DENIED
@@ -737,10 +777,12 @@ func TestSSE_UnknownAgent_Returns404NotFound(t *testing.T) {
 	tempDir := t.TempDir()
 	repo := agent.NewFSRepository(tempDir, "")
 
-	proxy := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil)
+	tok := attachTestBearerAuth(t, proxy)
 
 	// 1. GET /sse/non-existent-agent -> 404 Not Found
 	reqSSE := httptest.NewRequest("GET", "/sse/non-existent-agent", nil)
+	reqSSE.Header.Set("Authorization", "Bearer "+tok)
 	recSSE := httptest.NewRecorder()
 	proxy.handleSSE(recSSE, reqSSE)
 
@@ -748,9 +790,10 @@ func TestSSE_UnknownAgent_Returns404NotFound(t *testing.T) {
 		t.Fatalf("expected HTTP 404 for unknown agent on SSE, got %d. Body: %s", recSSE.Code, recSSE.Body.String())
 	}
 
-	// 2. POST /message?profile=non-existent-agent -> 404 Not Found
-	reqMsg := httptest.NewRequest("POST", "/message?profile=non-existent-agent", bytes.NewBufferString(`{"jsonrpc":"2.0","method":"tools/list","id":1}`))
+	// 2. POST /mcp/non-existent-agent -> 404 Not Found
+	reqMsg := httptest.NewRequest("POST", "/mcp/non-existent-agent", bytes.NewBufferString(`{"jsonrpc":"2.0","method":"tools/list","id":1}`))
 	reqMsg.Header.Set("Content-Type", "application/json")
+	reqMsg.Header.Set("Authorization", "Bearer "+tok)
 	recMsg := httptest.NewRecorder()
 	proxy.handleMessage(recMsg, reqMsg)
 
@@ -760,7 +803,7 @@ func TestSSE_UnknownAgent_Returns404NotFound(t *testing.T) {
 }
 
 func TestSSEProxy_HealthEndpoint(t *testing.T) {
-	proxy := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), nil, nil, config.UserContextConfig{})
+	proxy := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), nil, nil)
 	handler := proxy.Handler()
 
 	// 1. GET /health -> 200 OK
@@ -819,13 +862,15 @@ func TestSSEProxy_NewWithCoordinatorPreservesForwarderHTTPClient(t *testing.T) {
 	fwd := session.NewForwarder(customClient, nil, cStore)
 	coord := session.NewInboundCoordinator(nil, nil, nil, nil, nil, cStore, fwd, "http://upstream.example/sse")
 
-	p := NewSSEProxyWithCoordinator(0, "http://upstream.example/sse", coord, config.UserContextConfig{})
+	p := NewSSEProxyWithCoordinator(0, "http://upstream.example/sse", coord)
+	tok := attachTestBearerAuth(t, p)
 	if p.httpClient != nil {
 		t.Fatalf("expected p.httpClient to remain nil when custom coordinator is injected")
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/message", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rec, req)
 
@@ -846,7 +891,8 @@ func TestSSEProxy_MethodValidationAndHEAD(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(agentDir, "agg-head", "current", "config.json"), cfgData, 0644)
 
 	repo := agent.NewFSRepository(agentDir, "")
-	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil, config.UserContextConfig{})
+	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil)
+	tok := attachTestBearerAuth(t, p)
 	h := p.Handler()
 
 	// PUT /sse -> 405 Method Not Allowed with Allow header
@@ -875,6 +921,7 @@ func TestSSEProxy_MethodValidationAndHEAD(t *testing.T) {
 	done := make(chan int, 1)
 	go func() {
 		reqHead := httptest.NewRequest(http.MethodHead, "/sse/agg-head", nil)
+		reqHead.Header.Set("Authorization", "Bearer "+tok)
 		recHead := httptest.NewRecorder()
 		h.ServeHTTP(recHead, reqHead)
 		done <- recHead.Code
@@ -901,20 +948,23 @@ func TestSSEProxy_RejectsCRLFInjectionInSessionOrAgent(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(agentDir, "agg-safe", "current", "config.json"), cfgData, 0644)
 
 	repo := agent.NewFSRepository(agentDir, "")
-	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil, config.UserContextConfig{})
+	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil)
+	tok := attachTestBearerAuth(t, p)
 	h := p.Handler()
 
 	// 1. CRLF in query sessionId on GET /sse
 	reqSSE := httptest.NewRequest(http.MethodGet, "/sse/agg-safe?sessionId=abc%0aevent:%20evil", nil)
+	reqSSE.Header.Set("Authorization", "Bearer "+tok)
 	recSSE := httptest.NewRecorder()
 	h.ServeHTTP(recSSE, reqSSE)
 	if recSSE.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 Bad Request for CRLF sessionId on GET /sse, got %d", recSSE.Code)
 	}
 
-	// 2. CRLF in Mcp-Session-Id header on POST /mcp
-	reqMsg := httptest.NewRequest(http.MethodPost, "/mcp?profile=agg-safe", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	// 2. CRLF in Mcp-Session-Id header on POST /mcp/{profile}
+	reqMsg := httptest.NewRequest(http.MethodPost, "/mcp/agg-safe", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
 	reqMsg.Header.Set("Content-Type", "application/json")
+	reqMsg.Header.Set("Authorization", "Bearer "+tok)
 	reqMsg.Header.Set("Mcp-Session-Id", "sess\r\nevil")
 	recMsg := httptest.NewRecorder()
 	h.ServeHTTP(recMsg, reqMsg)
@@ -936,12 +986,14 @@ func TestSSEProxy_HandleMessageBridgeSurvivesRequestCompletion(t *testing.T) {
 
 	repo := agent.NewFSRepository(agentDir, "")
 	mgr := session.NewManager(repo, nil)
-	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, mgr, config.UserContextConfig{})
+	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, mgr)
+	tok := attachTestBearerAuth(t, p)
 	defer func() { _ = p.Shutdown(context.Background()) }()
 
 	reqCtx, cancelReq := context.WithCancel(context.Background())
-	req := httptest.NewRequest(http.MethodPost, "/message?profile=agg-persist", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)).WithContext(reqCtx)
+	req := httptest.NewRequest(http.MethodPost, "/mcp/agg-persist", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)).WithContext(reqCtx)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Mcp-Session-Id", "persist-sess-1")
 	rec := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rec, req)
@@ -972,7 +1024,7 @@ func TestSSEProxy_DirectMode_EnforcesScopedAPIKey(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(tempAgents, "alice", "current", "config.json"), []byte(`{"agent_name":"alice","routing_mode":"direct","protocols":[{"id":"github","name":"github","type":"http","url_or_command":"http://127.0.0.1:9999/mcp"}]}`), 0600)
 
 	repo := agent.NewFSRepository(tempAgents, "")
-	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil, config.UserContextConfig{})
+	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/sse/alice/github", nil)
 	req = req.WithContext(context.WithValue(req.Context(), filter.UserContextKey, &filter.UserContext{
@@ -985,34 +1037,167 @@ func TestSSEProxy_DirectMode_EnforcesScopedAPIKey(t *testing.T) {
 	}
 }
 
-func TestSSEProxy_HandleMessage_RejectsPathAndHeaderOrQueryMismatch(t *testing.T) {
+func TestSSEProxy_CanonicalRouting_WildcardGuards_And_DirectMCP(t *testing.T) {
+	backendCalls := 0
+	mockBackend := newTestIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendCalls++
+		if r.URL.Query().Get("profile") != "" || r.URL.Query().Get("agent") != "" {
+			t.Errorf("legacy routing query leaked to upstream: %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`))
+	}))
+	defer closeTestServer(mockBackend)
+
 	tempAgents := t.TempDir()
-	for _, name := range []string{"alpha", "beta"} {
+	for _, name := range []string{"alpha", "mcp", "message"} {
 		_ = os.MkdirAll(filepath.Join(tempAgents, name, "current"), 0755)
-		cfg := `{"agent_name":"` + name + `","routing_mode":"direct","protocols":[{"id":"github","name":"github","type":"http","url_or_command":"http://127.0.0.1:9999/mcp"}]}`
+		mode := "direct"
+		if name == "mcp" || name == "message" {
+			mode = "aggregated"
+		}
+		cfg := fmt.Sprintf(`{"agent_name":%q,"routing_mode":%q,"protocols":[{"id":"github","name":"github","type":"http","url_or_command":%q}]}`, name, mode, mockBackend.URL+"/mcp")
 		_ = os.WriteFile(filepath.Join(tempAgents, name, "current", "config.json"), []byte(cfg), 0600)
 	}
 
 	repo := agent.NewFSRepository(tempAgents, "")
-	p := NewSSEProxy(0, "http://127.0.0.1:9999", filter.NewPipeline(nil), repo, nil, config.UserContextConfig{})
+	p := NewSSEProxy(0, "", filter.NewPipeline(nil), repo, nil)
+	tok := attachTestBearerAuth(t, p) // wildcard "*" key
 	h := p.Handler()
 
-	// 1. Conflicting X-FaradAiWire-Profile header vs URL path agent
-	reqHdr := httptest.NewRequest(http.MethodPost, "/sse/beta/github/message", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
-	reqHdr.Header.Set("Content-Type", "application/json")
-	reqHdr.Header.Set("X-FaradAiWire-Profile", "alpha")
-	recHdr := httptest.NewRecorder()
-	h.ServeHTTP(recHdr, reqHdr)
-	if recHdr.Code != http.StatusForbidden || !strings.Contains(recHdr.Body.String(), "AGENT_ACCESS_DENIED") {
-		t.Fatalf("expected 403 AGENT_ACCESS_DENIED for conflicting X-FaradAiWire-Profile header, got %d: %s", recHdr.Code, recHdr.Body.String())
+	// 1. Legacy ?profile= or ?agent= (including empty values) rejected with 400 INVALID_ROUTING_PARAMETER
+	for _, path := range []string{"/sse/alpha/github?profile=alpha", "/mcp/alpha/github?agent=alpha", "/sse/alpha/github?profile=", "/mcp/alpha/github?agent="} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "INVALID_ROUTING_PARAMETER") {
+			t.Fatalf("expected 400 INVALID_ROUTING_PARAMETER for %s, got %d: %s", path, rec.Code, rec.Body.String())
+		}
 	}
 
-	// 2. Conflicting ?profile= query param vs URL path agent
-	reqQ := httptest.NewRequest(http.MethodPost, "/sse/beta/github/message?profile=alpha", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
-	reqQ.Header.Set("Content-Type", "application/json")
-	recQ := httptest.NewRecorder()
-	h.ServeHTTP(recQ, reqQ)
-	if recQ.Code != http.StatusForbidden || !strings.Contains(recQ.Body.String(), "AGENT_ACCESS_DENIED") {
-		t.Fatalf("expected 403 AGENT_ACCESS_DENIED for conflicting ?profile query param, got %d: %s", recQ.Code, recQ.Body.String())
+	// 2. Wildcard (*) key on root /sse and /mcp -> 400 PROFILE_REQUIRED (even with legacy X-FaradAiWire-Profile header)
+	reqRootSSE := httptest.NewRequest(http.MethodGet, "/sse", nil)
+	reqRootSSE.Header.Set("Authorization", "Bearer "+tok)
+	reqRootSSE.Header.Set("X-FaradAiWire-Profile", "mcp")
+	recRootSSE := httptest.NewRecorder()
+	h.ServeHTTP(recRootSSE, reqRootSSE)
+	if recRootSSE.Code != http.StatusBadRequest || !strings.Contains(recRootSSE.Body.String(), "PROFILE_REQUIRED") {
+		t.Fatalf("expected 400 PROFILE_REQUIRED on root GET /sse, got %d: %s", recRootSSE.Code, recRootSSE.Body.String())
+	}
+
+	reqRootMCP := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	reqRootMCP.Header.Set("Content-Type", "application/json")
+	reqRootMCP.Header.Set("Authorization", "Bearer "+tok)
+	reqRootMCP.Header.Set("X-FaradAiWire-Profile", "mcp")
+	recRootMCP := httptest.NewRecorder()
+	h.ServeHTTP(recRootMCP, reqRootMCP)
+	if recRootMCP.Code != http.StatusBadRequest || !strings.Contains(recRootMCP.Body.String(), "PROFILE_REQUIRED") {
+		t.Fatalf("expected 400 PROFILE_REQUIRED on root POST /mcp, got %d: %s", recRootMCP.Code, recRootMCP.Body.String())
+	}
+
+	// 3. Direct-mode single-segment POST /mcp/{direct_profile} -> 400 ROUTING_VIOLATION_DIRECT
+	reqDirBad := httptest.NewRequest(http.MethodPost, "/mcp/alpha", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	reqDirBad.Header.Set("Content-Type", "application/json")
+	reqDirBad.Header.Set("Authorization", "Bearer "+tok)
+	recDirBad := httptest.NewRecorder()
+	h.ServeHTTP(recDirBad, reqDirBad)
+	if recDirBad.Code != http.StatusBadRequest || !strings.Contains(recDirBad.Body.String(), "ROUTING_VIOLATION_DIRECT") {
+		t.Fatalf("expected 400 ROUTING_VIOLATION_DIRECT on POST /mcp/alpha, got %d: %s", recDirBad.Code, recDirBad.Body.String())
+	}
+
+	// 4. Direct-mode two-segment POST /mcp/{profile}/{tool_source} -> 200 OK
+	reqDirOK := httptest.NewRequest(http.MethodPost, "/mcp/alpha/github", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+	reqDirOK.Header.Set("Content-Type", "application/json")
+	reqDirOK.Header.Set("Authorization", "Bearer "+tok)
+	recDirOK := httptest.NewRecorder()
+	h.ServeHTTP(recDirOK, reqDirOK)
+	if recDirOK.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on POST /mcp/alpha/github, got %d: %s", recDirOK.Code, recDirOK.Body.String())
+	}
+
+	// 5. Wildcard (*) key on Direct SSE POST /message?sessionId=<bound> stays intact
+	p.SetSessionTarget("direct-sess-77", mockBackend.URL, time.Now())
+	reqDirectSess := httptest.NewRequest(http.MethodPost, "/message?sessionId=direct-sess-77", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+	reqDirectSess.Header.Set("Content-Type", "application/json")
+	reqDirectSess.Header.Set("Authorization", "Bearer "+tok)
+	recDirectSess := httptest.NewRecorder()
+	h.ServeHTTP(recDirectSess, reqDirectSess)
+	if recDirectSess.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for bound Direct SSE /message?sessionId=..., got %d: %s", recDirectSess.Code, recDirectSess.Body.String())
+	}
+
+	// 6. Profiles literally named "mcp" and "message" resolve cleanly without suffix-trimming bugs
+	for _, literalName := range []string{"mcp", "message"} {
+		reqLit := httptest.NewRequest(http.MethodPost, "/mcp/"+literalName, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+		reqLit.Header.Set("Content-Type", "application/json")
+		reqLit.Header.Set("Authorization", "Bearer "+tok)
+		recLit := httptest.NewRecorder()
+		h.ServeHTTP(recLit, reqLit)
+		if recLit.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for profile named %q at /mcp/%s, got %d: %s", literalName, literalName, recLit.Code, recLit.Body.String())
+		}
+	}
+
+	if backendCalls < 4 {
+		t.Errorf("expected at least 4 backend calls, got %d", backendCalls)
+	}
+}
+
+func TestDirectMode_ScopedKey_MessageCallbackPreserved(t *testing.T) {
+	var backendCalls int
+	mockBackend := newTestIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`))
+	}))
+	defer closeTestServer(mockBackend)
+
+	tempAgents := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tempAgents, "alpha", "current"), 0755)
+	cfg := fmt.Sprintf(`{"agent_name":"alpha","routing_mode":"direct","protocols":[{"id":"github","name":"github","type":"http","url_or_command":%q}]}`, mockBackend.URL+"/mcp")
+	_ = os.WriteFile(filepath.Join(tempAgents, "alpha", "current", "config.json"), []byte(cfg), 0600)
+
+	repo := agent.NewFSRepository(tempAgents, "")
+	p := NewSSEProxy(0, "", filter.NewPipeline(nil), repo, nil)
+	scopedTok := attachTestBearerAuth(t, p, "alpha")
+	h := p.Handler()
+
+	// 1. Registered Direct-mode session callback POST /message?sessionId=<sid> succeeds even with scoped key
+	p.SetSessionTarget("direct-scoped-1", mockBackend.URL+"/mcp", time.Now())
+	reqCallback := httptest.NewRequest(http.MethodPost, "/message?sessionId=direct-scoped-1", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`))
+	reqCallback.Header.Set("Content-Type", "application/json")
+	reqCallback.Header.Set("Authorization", "Bearer "+scopedTok)
+	recCallback := httptest.NewRecorder()
+	h.ServeHTTP(recCallback, reqCallback)
+	if recCallback.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for bound Direct SSE /message?sessionId=... with scoped key, got %d: %s", recCallback.Code, recCallback.Body.String())
+	}
+
+	// 2. Unbound POST /message?sessionId=unknown fails closed with 400 ROUTING_VIOLATION_DIRECT
+	reqUnknown := httptest.NewRequest(http.MethodPost, "/message?sessionId=unknown", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	reqUnknown.Header.Set("Content-Type", "application/json")
+	reqUnknown.Header.Set("Authorization", "Bearer "+scopedTok)
+	recUnknown := httptest.NewRecorder()
+	h.ServeHTTP(recUnknown, reqUnknown)
+	if recUnknown.Code != http.StatusBadRequest || !strings.Contains(recUnknown.Body.String(), "ROUTING_VIOLATION_DIRECT") {
+		t.Fatalf("expected 400 ROUTING_VIOLATION_DIRECT for unbound /message with Direct scoped key, got %d: %s", recUnknown.Code, recUnknown.Body.String())
+	}
+
+	// 3. Single-segment POST /mcp/alpha still rejects with 400 ROUTING_VIOLATION_DIRECT
+	reqSingleMCP := httptest.NewRequest(http.MethodPost, "/mcp/alpha", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	reqSingleMCP.Header.Set("Content-Type", "application/json")
+	reqSingleMCP.Header.Set("Authorization", "Bearer "+scopedTok)
+	recSingleMCP := httptest.NewRecorder()
+	h.ServeHTTP(recSingleMCP, reqSingleMCP)
+	if recSingleMCP.Code != http.StatusBadRequest || !strings.Contains(recSingleMCP.Body.String(), "ROUTING_VIOLATION_DIRECT") {
+		t.Fatalf("expected 400 ROUTING_VIOLATION_DIRECT for single-segment POST /mcp/alpha, got %d: %s", recSingleMCP.Code, recSingleMCP.Body.String())
+	}
+
+	if backendCalls != 1 {
+		t.Errorf("expected 1 backend call, got %d", backendCalls)
 	}
 }

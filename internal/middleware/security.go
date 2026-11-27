@@ -88,14 +88,16 @@ func SecurityHeaders(cfg SecurityHeadersConfig) func(http.Handler) http.Handler 
 					originAllowed = true
 					h.Set("Access-Control-Allow-Origin", "*")
 					h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, HEAD")
-					h.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Trace-ID, X-User-Role, X-User-ID, X-FaradAiWire-Signature, Accept, Origin")
+					h.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Trace-ID, Mcp-Session-Id, Accept, Origin")
+					h.Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
 				} else if allowedMap[originLower] {
 					originAllowed = true
 					h.Set("Access-Control-Allow-Origin", origin)
 					h.Set("Vary", "Origin")
 					h.Set("Access-Control-Allow-Credentials", "true")
 					h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, HEAD")
-					h.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Trace-ID, X-User-Role, X-User-ID, X-FaradAiWire-Signature, Accept, Origin")
+					h.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Trace-ID, Mcp-Session-Id, Accept, Origin")
+					h.Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
 				}
 			}
 
