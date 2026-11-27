@@ -270,7 +270,7 @@ jobs:
 
           # Verify Host Native Daemon startup, strict port segregation (19410/19415),
           # loopback Admin UI access (ADR-0028), and fail-closed Ingress auth (ADR-0021).
-          faradaiwire run --standalone >"$DAEMON_LOG" 2>&1 &
+          faradaiwire run >"$DAEMON_LOG" 2>&1 &
           DAEMON_PID=$!
 
           HEALTH_OK=0
@@ -412,7 +412,7 @@ jobs:
             # loopback Admin UI access (ADR-0028), and fail-closed Ingress auth (ADR-0021).
             $DaemonStdout = Join-Path $SmokeHome "daemon.out.log"
             $DaemonStderr = Join-Path $SmokeHome "daemon.err.log"
-            $DaemonProc = Start-Process -FilePath $Cmd.Source -ArgumentList @("run", "--standalone") -RedirectStandardOutput $DaemonStdout -RedirectStandardError $DaemonStderr -PassThru -NoNewWindow
+            $DaemonProc = Start-Process -FilePath $Cmd.Source -ArgumentList @("run") -RedirectStandardOutput $DaemonStdout -RedirectStandardError $DaemonStderr -PassThru -NoNewWindow
 
             $Healthy = $false
             for ($i = 0; $i -lt 75; $i++) {
