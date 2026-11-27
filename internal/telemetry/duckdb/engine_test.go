@@ -245,6 +245,10 @@ func TestEngine_RetentionSweep(t *testing.T) {
 	}
 	defer engine.Close()
 
+	// Wait for and stop the background startup retention sweep so it cannot race
+	// with inserting and asserting the pre-retention expired record.
+	engine.RetentionCleaner().Stop()
+
 	// Insert old record (20 days ago) and recent record (1 day ago)
 	oldEvent := &filter.AuditEvent{
 		ID:         "old-event",
@@ -266,9 +270,10 @@ func TestEngine_RetentionSweep(t *testing.T) {
 	engine.LogEvent(oldEvent)
 	engine.LogEvent(recentEvent)
 
-	time.Sleep(100 * time.Millisecond)
-
 	ctx := context.Background()
+	if err := engine.Flush(ctx); err != nil {
+		t.Fatalf("flush failed: %v", err)
+	}
 	// Before retention
 	resBefore, err := engine.QueryAuditLogs(ctx, QueryFilter{})
 	if err != nil || resBefore.Total != 2 {
